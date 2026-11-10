@@ -43,6 +43,7 @@ A pure-Rust, cross-platform writing workspace: library and sheets sidebar, \
 Markdown editing with live counts, and styled export to Markdown, HTML, PDF, \
 Word, Rich Text, and ePub."""
 assets = [
+  "$auto",
   ["assets/ariadne.desktop", "usr/share/applications/", "644"],
   ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/ariadne.png", "644"],
 ]
