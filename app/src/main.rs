@@ -3962,6 +3962,227 @@ blockquote {
         Self::icloud_store_dir(anchor).map(|d| d.join("library.json"))
     }
 
+    /// Filename-safe stem for mirror files. Letters, digits, spaces and
+    /// dashes survive; anything else (including `/`) is stripped.
+    /// Falls back to "Untitled" so every sheet gets a file.
+    fn mirror_stem(title: &str) -> String {
+        let s = Self::sanitize_style_name(title);
+        if s.is_empty() {
+            "Untitled".to_string()
+        } else {
+            s
+        }
+    }
+
+    /// Attachment ids referenced by the given sheets' Markdown
+    /// (`![alt](attachment:<id>)`, standalone or inline).
+    fn referenced_attachments(sheets: &[Sheet]) -> Vec<String> {
+        let mut ids = Vec::new();
+        for s in sheets {
+            let text = &s.content;
+            let mut rest = text.as_str();
+            while let Some(pos) = rest.find("attachment:") {
+                let after = &rest[pos + "attachment:".len()..];
+                let id: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                if !id.is_empty() && !ids.contains(&id) {
+                    ids.push(id);
+                }
+                rest = after;
+            }
+        }
+        ids
+    }
+
+    /// Mirror the iCloud section as a tree of folders and Markdown files,
+    /// plus the attachments they reference. Managed files carry a header
+    /// comment and are rewritten/pruned on every save — the JSON store
+    /// stays the source of truth, the folder is for transparency (Finder,
+    /// Spotlight, other editors for reading).
+    fn sync_icloud_mirror(&self, store_dir: &std::path::Path) {
+        // Resolve each iCloud group's folder path, guarding against parent
+        // cycles by capping the walk at the group count.
+        let group_dir = |groups: &[Group],
+                         gi: usize,
+                         root: &std::path::Path,
+                         memo: &mut std::collections::HashMap<usize, PathBuf>|
+         -> PathBuf {
+            if let Some(p) = memo.get(&gi) {
+                return p.clone();
+            }
+            let mut chain: Vec<usize> = Vec::new();
+            let mut cur = Some(gi);
+            let mut guard = groups.len() + 1;
+            let mut base: Option<PathBuf> = None;
+            while let Some(i) = cur {
+                if let Some(p) = memo.get(&i) {
+                    base = Some(p.clone());
+                    break;
+                }
+                if guard == 0 {
+                    break;
+                }
+                chain.push(i);
+                guard -= 1;
+                cur = groups.get(i).and_then(|g| g.parent);
+            }
+            // Start from the memoized ancestor dir, or root for top-level.
+            let mut path = base.unwrap_or_else(|| root.to_path_buf());
+            // Sibling dedup so same-named groups never share a folder.
+            let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                for e in entries.flatten() {
+                    if e.path().is_dir() {
+                        if let Some(n) = e.file_name().to_str() {
+                            used.insert(n.to_string());
+                        }
+                    }
+                }
+            }
+            for i in chain.into_iter().rev() {
+                let base = Self::mirror_stem(&groups[i].name);
+                let mut name = base.clone();
+                let mut n = 2;
+                while used.contains(&name) {
+                    name = format!("{base} {n}");
+                    n += 1;
+                }
+                used.insert(name.clone());
+                path = path.join(name);
+                memo.insert(i, path.clone());
+            }
+            path
+        };
+        let mut memo: std::collections::HashMap<usize, PathBuf> = std::collections::HashMap::new();
+        // Map merged group index -> dir, for sheets and dedup bookkeeping.
+        let mut dir_of: std::collections::HashMap<usize, PathBuf> = std::collections::HashMap::new();
+        for (gi, g) in self.groups.iter().enumerate() {
+            if g.section == Section::ICloud {
+                dir_of.insert(gi, group_dir(&self.groups, gi, store_dir, &mut memo));
+            }
+        }
+        let ungrouped = store_dir.join("Ungrouped");
+        // Write one file per non-trashed iCloud sheet.
+        let mut written: Vec<PathBuf> = Vec::new();
+        let mut used_in: std::collections::HashMap<PathBuf, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for s in self.sheets.iter().filter(|s| {
+            s.section == Section::ICloud && !s.trashed && s.conflict_of.is_none()
+        }) {
+            let dir = s
+                .group
+                .and_then(|g| dir_of.get(&g).cloned())
+                .unwrap_or_else(|| ungrouped.clone());
+            let _ = std::fs::create_dir_all(&dir);
+            let used = used_in.entry(dir.clone()).or_default();
+            let base = Self::mirror_stem(&Self::inferred_title(&s.content));
+            // Within-pass dedup only: stable names across saves come free
+            // because vec order is stable, and stale files are pruned below.
+            let mut name = format!("{base}.md");
+            let mut n = 2;
+            while used.contains(&name) {
+                name = format!("{base} {n}.md");
+                n += 1;
+            }
+            used.insert(name.clone());
+            let path = dir.join(name);
+            let text = format!(
+                "<!-- Managed by Ariadne — edits here are overwritten on the next save. -->\n\n{}",
+                s.content
+            );
+            let same = std::fs::read_to_string(&path).map(|old| old == text).unwrap_or(false);
+            if !same {
+                let _ = Self::atomic_write(&path, text.as_bytes());
+            }
+            written.push(path);
+        }
+        // Prune stale mirror files (*.md we did not write this pass).
+        Self::prune_mirror(store_dir, &written);
+        // Sync referenced attachments alongside the mirror.
+        self.sync_icloud_attachments(store_dir);
+    }
+
+    /// Copy images referenced by iCloud sheets into the store's
+    /// `attachments/` folder, and prune ones no sheet references anymore.
+    /// Keeps synced sheets renderable on devices without the local assets.
+    fn sync_icloud_attachments(&self, store_dir: &std::path::Path) {
+        let dir = store_dir.join("attachments");
+        let icloud_sheets: Vec<&Sheet> = self
+            .sheets
+            .iter()
+            .filter(|s| s.section == Section::ICloud)
+            .collect();
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for id in Self::referenced_attachments(
+            &icloud_sheets.into_iter().cloned().collect::<Vec<_>>(),
+        ) {
+            if let Some(meta) = self.attached_images.iter().find(|a| a.id == id) {
+                wanted.push((meta.id.clone(), meta.ext.clone()));
+            }
+        }
+        let local_dir = Self::assets_dir();
+        let mut keep: Vec<String> = Vec::new();
+        for (id, ext) in &wanted {
+            let dest = dir.join(format!("{id}.{ext}"));
+            keep.push(dest.to_string_lossy().to_string());
+            let src_bytes = local_dir
+                .as_ref()
+                .and_then(|d| std::fs::read(d.join(format!("{id}.{ext}"))).ok());
+            let same = src_bytes.as_ref().map(|b| {
+                std::fs::read(&dest).map(|old| old == *b).unwrap_or(false)
+            });
+            if same != Some(true) {
+                if let Some(b) = src_bytes {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = Self::atomic_write(&dest, &b);
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file()
+                    && !keep.iter().any(|k| PathBuf::from(k) == p)
+                {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
+    /// Delete mirror `*.md` files we did not write this pass, then remove
+    /// directories left empty — except the store root and `attachments/`,
+    /// which belong to the sync payload rather than the mirror.
+    fn prune_mirror(store_dir: &std::path::Path, written: &[PathBuf]) {
+        fn visit(dir: &std::path::Path, root: &std::path::Path, written: &[PathBuf]) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    // Never descend into the attachments payload dir.
+                    if p.file_name().map(|n| n == "attachments").unwrap_or(false) && dir == root {
+                        continue;
+                    }
+                    visit(&p, root, written);
+                } else if p.extension().and_then(|e| e.to_str()) == Some("md")
+                    && !written.contains(&p)
+                {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+            if dir != root
+                && std::fs::read_dir(dir).map(|mut e| e.next().is_none()).unwrap_or(false)
+            {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        visit(store_dir, store_dir, written);
+    }
+
     /// Whole-file iCloud conflict copies (`library (…conflict…).json`)
     /// waiting in the store dir. Each is merged exactly once, then archived.
     fn icloud_conflict_siblings(store_path: &std::path::Path) -> Vec<PathBuf> {
@@ -4335,6 +4556,11 @@ blockquote {
                     if Self::atomic_write(&ipath, text.as_bytes()) {
                         self.sync_hashes.insert("icloud".to_string(), Self::hash_bytes(text.as_bytes()));
                     }
+                }
+                // Mirror the synced section as folders + Markdown, plus the
+                // attachments those sheets reference.
+                if let Some(store_dir) = ipath.parent() {
+                    self.sync_icloud_mirror(store_dir);
                 }
             }
         }
@@ -6310,9 +6536,23 @@ blockquote {
         let src = src.trim();
         if let Some(id) = src.strip_prefix("attachment:") {
             let meta = self.attached_images.iter().find(|a| a.id == id)?;
-            let bytes = std::fs::read(Self::assets_dir()?.join(format!("{}.{}", meta.id, meta.ext))).ok()?;
-            let kind = Self::sniff_image_kind(&bytes)?;
-            return Some((bytes, kind.to_string()));
+            // Local assets first, then the synced iCloud mirror (covers
+            // images attached on another device).
+            let mut candidates = Vec::new();
+            if let Some(dir) = Self::assets_dir() {
+                candidates.push(dir.join(format!("{}.{}", meta.id, meta.ext)));
+            }
+            if let Some(store) = Self::icloud_store_dir(self.icloud_dir.as_deref()) {
+                candidates.push(store.join("attachments").join(format!("{}.{}", meta.id, meta.ext)));
+            }
+            for path in candidates {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Some(kind) = Self::sniff_image_kind(&bytes) {
+                        return Some((bytes, kind.to_string()));
+                    }
+                }
+            }
+            return None;
         }
         if let Some(rest) = src.strip_prefix("data:") {
             let (_, data) = rest.split_once(";base64,")?;
@@ -12549,7 +12789,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -13599,7 +13839,262 @@ mod tests {
             .unwrap()
             .join("conflict-archive");
         assert!(archive.is_dir());
-        assert!(!WritingApp::load_library().expect("reloads again").sheets.iter().any(|s| s.id == "s-sib-missing"));
+        // Converge: saving the merged state persists the adoption, so a
+        // fresh load still has it (exactly once — no resurrection).
+        let mut app = sample_app();
+        app.groups = back.groups;
+        app.sheets = back.sheets;
+        app.tombstones = back.tombstones;
+        app.save_library();
+        assert_eq!(
+            WritingApp::load_library()
+                .expect("reloads converged")
+                .sheets
+                .iter()
+                .filter(|s| s.id == "s-sib")
+                .count(),
+            1
+        );
+    }
+
+    fn mirror_app() -> WritingApp {
+        // iCloud tree: Docs (top) with Kid (nested), Inbox; sheets cover
+        // nesting, duplicates, ungrouped, and trash exclusion.
+        let mut app = WritingApp {
+            groups: vec![
+                Group {
+                    id: "g-notes".to_string(),
+                    modified: SystemTime::now(),
+                    name: "Notes".to_string(),
+                    section: Section::Documents,
+                    expanded: true,
+                    parent: None,
+                },
+                Group {
+                    id: "g-parent".to_string(),
+                    modified: SystemTime::now(),
+                    name: "Parent".to_string(),
+                    section: Section::ICloud,
+                    expanded: true,
+                    parent: None,
+                },
+                Group {
+                    id: "g-kid".to_string(),
+                    modified: SystemTime::now(),
+                    name: "Kid".to_string(),
+                    section: Section::ICloud,
+                    expanded: true,
+                    parent: Some(1),
+                },
+                Group {
+                    id: "g-inbox".to_string(),
+                    modified: SystemTime::now(),
+                    name: "Inbox".to_string(),
+                    section: Section::ICloud,
+                    expanded: true,
+                    parent: None,
+                },
+            ],
+            sheets: vec![
+                Sheet {
+                    id: "s-doc".to_string(),
+                    conflict_of: None,
+                    section: Section::Documents,
+                    content: "# Local\n\nStays out of the mirror.\n".to_string(),
+                    group: Some(0),
+                    trashed: false,
+                    modified: SystemTime::now(),
+                },
+                Sheet {
+                    id: "s-top".to_string(),
+                    conflict_of: None,
+                    section: Section::ICloud,
+                    content: "# Plan\n\nTop level.\n".to_string(),
+                    group: Some(1),
+                    trashed: false,
+                    modified: SystemTime::now(),
+                },
+                Sheet {
+                    id: "s-nested".to_string(),
+                    conflict_of: None,
+                    section: Section::ICloud,
+                    content: "# Plan\n\nNested duplicate title.\n".to_string(),
+                    group: Some(2),
+                    trashed: false,
+                    modified: SystemTime::now(),
+                },
+                Sheet {
+                    id: "s-loose".to_string(),
+                    conflict_of: None,
+                    section: Section::ICloud,
+                    content: "# Floating\n\nNo group.\n".to_string(),
+                    group: None,
+                    trashed: false,
+                    modified: SystemTime::now(),
+                },
+                Sheet {
+                    id: "s-trashed".to_string(),
+                    conflict_of: None,
+                    section: Section::ICloud,
+                    content: "# Gone\n\nTrashed.\n".to_string(),
+                    group: Some(3),
+                    trashed: true,
+                    modified: SystemTime::now(),
+                },
+            ],
+            selection: SidebarSelection::Group(1),
+            selected_sheet: 1,
+            selected_sheets: vec![1],
+            export_css: String::new(),
+            export_css_name: "Built-in".to_string(),
+            style_guide_added: true,
+            style_guide_version: WritingApp::STYLE_GUIDE_VERSION,
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
+            font_db: None,
+            image_textures: std::collections::HashMap::new(),
+            style_editor: None,
+            export_format: ExportFormat::default(),
+            editor_font_size: 17.0,
+            library_visible: true,
+            sheets_visible: true,
+            word_goal: 0,
+            app_theme: AppTheme::default(),
+            editor_font_family: None,
+            loaded_editor_font: None,
+            preview_fonts_queued: std::collections::HashSet::new(),
+            settings_open: false,
+            goals_visible: false,
+            goal_draft: String::new(),
+            outline_open: false,
+            swipe_accum_x: 0.0,
+            swipe_accum_y: 0.0,
+            swipe_cooldown_until: 0.0,
+            show_export_popover: false,
+            search_open: false,
+            search_query: String::new(),
+            search_focus: false,
+            history_open: false,
+            history: std::collections::HashMap::new(),
+            preview_window_open: false,
+            preview_window_placed: false,
+            preview_cache: PreviewCache::default(),
+            status: String::new(),
+            screenshot_path: None,
+            frame_count: 0,
+            screenshot_requested: false,
+            caret_blink_start: 0.0,
+            caret_key: (usize::MAX, usize::MAX),
+            tombstones: Vec::new(),
+            sync_hashes: std::collections::HashMap::new(),
+            last_sync_check: 0.0,
+            show_conflicts: false,
+            icloud_dir: None,
+        };
+        app.selection = SidebarSelection::Group(1);
+        app
+    }
+
+    fn mirror_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("ARIADNE_ICLOUD_DIR").unwrap())
+    }
+
+    #[test]
+    fn sync_mirror_builds_tree_with_ungrouped_and_dedup() {
+        let _storage = isolate_storage();
+        let app = mirror_app();
+        let root = mirror_root();
+        app.sync_icloud_mirror(&root);
+        // Nested group folder, ungrouped folder, no Documents leakage.
+        assert!(root.join("Parent").is_dir());
+        assert!(root.join("Parent/Kid").is_dir() || root.join("Parent").join("Kid").is_dir());
+        assert!(root.join("Ungrouped/Floating.md").is_file());
+        assert!(!root.join("Notes").exists());
+        assert!(!root.join("Local.md").exists());
+        // Duplicate titles dedup within their own folders.
+        assert!(root.join("Parent/Plan.md").is_file());
+        assert!(root.join("Parent/Kid/Plan.md").is_file());
+        // Trashed sheets stay out of the mirror.
+        assert!(!root.join("Inbox/Gone.md").exists());
+        assert!(!root.join("Inbox").exists() || root.join("Inbox").read_dir().map(|mut e| e.next().is_none()).unwrap_or(true));
+        // Managed header + verbatim body.
+        let text = std::fs::read_to_string(root.join("Parent/Plan.md")).unwrap();
+        assert!(text.starts_with("<!-- Managed by Ariadne"));
+        assert!(text.contains("# Plan\n\nTop level."));
+    }
+
+    #[test]
+    fn sync_mirror_prunes_stale_files_and_empty_dirs() {
+        let _storage = isolate_storage();
+        let mut app = mirror_app();
+        let root = mirror_root();
+        app.sync_icloud_mirror(&root);
+        assert!(root.join("Parent/Plan.md").is_file());
+        // Rename the group and delete the nested sheet: the old folder and
+        // file must disappear on the next sync.
+        app.groups[1].name = "Renamed".to_string();
+        app.groups[1].modified = SystemTime::now();
+        app.sheets.retain(|s| s.id != "s-nested");
+        app.sync_icloud_mirror(&root);
+        assert!(root.join("Renamed/Plan.md").is_file());
+        assert!(!root.join("Parent").exists());
+        assert!(!root.join("Parent/Kid/Plan.md").exists());
+        // library.json is payload, never pruned by the mirror. Unreferenced
+        // attachments are pruned; the attachments/ dir itself is kept.
+        std::fs::write(root.join("library.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments/stale.png"), b"x").unwrap();
+        app.sync_icloud_mirror(&root);
+        assert!(root.join("library.json").is_file());
+        assert!(!root.join("attachments/stale.png").exists());
+        assert!(root.join("attachments").is_dir());
+    }
+
+    #[test]
+    fn sync_attachments_copy_and_resolve_without_local() {
+        let _storage = isolate_storage();
+        let mut app = mirror_app();
+        // Attach a minimal PNG and reference it from an iCloud sheet.
+        let bytes = b"\x89PNG\r\n\x1a\nfakepng-bytes".to_vec();
+        let local_dir = WritingApp::assets_dir().unwrap();
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(local_dir.join("img-1.png"), &bytes).unwrap();
+        app.attached_images.push(AttachedImage {
+            id: "img-1".to_string(),
+            name: "pic.png".to_string(),
+            ext: "png".to_string(),
+        });
+        app.sheets[1].content = "# Plan\n\n![pic](attachment:img-1)\n".to_string();
+        let root = mirror_root();
+        app.sync_icloud_mirror(&root);
+        assert_eq!(
+            std::fs::read(root.join("attachments/img-1.png")).unwrap(),
+            bytes
+        );
+        // Simulate the other device (no local assets): still resolves.
+        std::fs::remove_file(local_dir.join("img-1.png")).unwrap();
+        let (got, kind) = app.resolve_image_bytes("attachment:img-1").expect("resolves via mirror");
+        assert_eq!(got, bytes);
+        assert_eq!(kind, "png");
+        // Dropping the reference prunes the mirrored copy on next sync.
+        app.sheets[1].content = "# Plan\n\nNo image.\n".to_string();
+        app.sync_icloud_mirror(&root);
+        assert!(!root.join("attachments/img-1.png").exists());
+    }
+
+    #[test]
+    fn sync_save_writes_mirror_and_store() {
+        let _storage = isolate_storage();
+        let mut app = mirror_app();
+        app.save_library();
+        let root = mirror_root();
+        assert!(root.join("library.json").is_file());
+        let istore: SavedLibrary =
+            serde_json::from_str(&std::fs::read_to_string(root.join("library.json")).unwrap()).unwrap();
+        assert!(istore.groups.iter().all(|g| g.section == Section::ICloud));
+        assert!(istore.sheets.iter().all(|s| s.section == Section::ICloud));
+        assert!(root.join("Parent/Plan.md").is_file());
+        assert!(root.join("Ungrouped/Floating.md").is_file());
     }
 
     #[test]
