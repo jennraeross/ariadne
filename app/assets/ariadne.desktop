@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ariadne
+Comment=A pure-Rust, cross-platform writing workspace
+Exec=ariadne %F
+Icon=ariadne
+Terminal=false
+Categories=Office;TextEditor;
+StartupWMClass=ariadne

@@ -1,0 +1,34 @@
+[package]
+name = "ariadne"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Ariadne — a pure-Rust, cross-platform writing workspace"
+homepage = "https://github.com/jennraeross/ariadne"
+repository = "https://github.com/jennraeross/ariadne"
+
+[dependencies]
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"
+egui-phosphor = "0.9"
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+rfd = { version = "0.15", optional = true }
+arboard = "3"
+# PDF font embedding (subsetted OpenType) + system font discovery. Both are
+# pure Rust; pinned exact while krilla is pre-1.0.
+krilla = { version = "=0.8.2", default-features = false, features = ["simple-text", "raster-images"] }
+fontdb = "=0.24.0"
+
+[features]
+default = ["dialogs"]
+dialogs = ["dep:rfd"]
+
+[dev-dependencies]
+egui_kittest = "0.31"
+
+[profile.release]
+opt-level = 2
