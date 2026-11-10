@@ -160,11 +160,12 @@ jobs:
       - name: Checksums
         run: |
           cd dist-artifacts
-          sha256sum * > SHA256SUMS.txt
+          find . -type f -exec sha256sum {} + | sed 's| \./|  |' > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create GitHub Release
         run: |
+          mapfile -d '' files < <(find dist-artifacts -type f -print0)
           gh release create "v${VERSION}" --title "Ariadne ${VERSION}" \
-            --generate-notes dist-artifacts/*
+            --generate-notes "${files[@]}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
