@@ -37,7 +37,7 @@ winres = "0.1"
 maintainer = "Jenn Royleance <jenn.rae.ross@gmail.com>"
 copyright = "2026, Jenn Royleance"
 section = "editors"
-depends = "$auto"
+depends = "$auto, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0"
 extended-description = """\
 A pure-Rust, cross-platform writing workspace: library and sheets sidebar, \
 Markdown editing with live counts, and styled export to Markdown, HTML, PDF, \
