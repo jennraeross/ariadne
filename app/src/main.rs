@@ -3941,14 +3941,14 @@ blockquote {
     /// Explicit anchor wins (Settings move), then the test override, then
     /// iCloud Drive, else a local fallback next to the library.
     fn icloud_store_dir(anchor: Option<&str>) -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("ARIADNE_ICLOUD_DIR") {
-            if !p.is_empty() {
-                return Some(PathBuf::from(p));
-            }
-        }
         if let Some(a) = anchor {
             if !a.is_empty() {
                 return Some(PathBuf::from(a));
+            }
+        }
+        if let Ok(p) = std::env::var("ARIADNE_ICLOUD_DIR") {
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
             }
         }
         if let Some(drive) = Self::icloud_drive_dir() {
@@ -4183,6 +4183,70 @@ blockquote {
         visit(store_dir, store_dir, written);
     }
 
+    /// Move the iCloud store (library file, mirror tree, attachments) to a
+    /// new home. Flushes first, merges anything already at the destination
+    /// (another device may have gotten there first), copies the tree over,
+    /// then flips the anchor and saves there. The old files are left in
+    /// place; merging makes any later reunion a no-op.
+    fn move_icloud_store(&mut self, dest: std::path::PathBuf) {
+        // Flush first so the copy captures the latest state.
+        self.save_library();
+        let Some(src) = Self::icloud_store_dir(self.icloud_dir.as_deref()) else {
+            self.status = "Could not locate the iCloud store".to_string();
+            return;
+        };
+        if src == dest {
+            self.status = "Already using that folder".to_string();
+            return;
+        }
+        // Adopt anything already waiting at the destination before we
+        // overwrite it: two devices moving at once must union, not clobber.
+        let dest_lib = dest.join("library.json");
+        if dest_lib.is_file() {
+            Self::merge_store_file(
+                &mut self.groups,
+                &mut self.sheets,
+                &mut self.tombstones,
+                &dest_lib,
+                &mut self.sync_hashes,
+                "icloud",
+            );
+        }
+        if let Err(e) = Self::copy_dir_recursive(&src, &dest) {
+            self.status = format!("Could not copy the iCloud store: {e}");
+            return;
+        }
+        self.icloud_dir = Some(dest.to_string_lossy().to_string());
+        self.save_library();
+        if dest.join("library.json").is_file() {
+            self.status = format!("iCloud section now syncs via {}", dest.display());
+        } else {
+            self.status = "Move failed: the new store is not writable".to_string();
+        }
+    }
+
+    /// Recursive directory copy (files only; symlinks are skipped).
+    /// Skips the destination itself so moving *into* a subdirectory of the
+    /// source terminates instead of nesting forever.
+    fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let src = entry.path();
+            if src == to {
+                continue;
+            }
+            let dst = to.join(entry.file_name());
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                Self::copy_dir_recursive(&src, &dst)?;
+            } else if ft.is_file() {
+                std::fs::copy(&src, &dst)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Whole-file iCloud conflict copies (`library (…conflict…).json`)
     /// waiting in the store dir. Each is merged exactly once, then archived.
     fn icloud_conflict_siblings(store_path: &std::path::Path) -> Vec<PathBuf> {
@@ -4256,6 +4320,106 @@ blockquote {
             Some(end) => format!("{} (conflict copy){}", &content[..end], &content[end..]),
             None => format!("{content} (conflict copy)"),
         }
+    }
+
+    /// Remove the "(conflict copy)" tag, restoring the loser's original
+    /// text for "keep the copy" resolutions.
+    fn strip_conflict_suffix(content: &str) -> String {
+        const TAG: &str = " (conflict copy)";
+        match content.find('\n') {
+            Some(end) => {
+                let (first, rest) = content.split_at(end);
+                match first.strip_suffix(TAG) {
+                    Some(stripped) => format!("{stripped}{rest}"),
+                    None => content.to_string(),
+                }
+            }
+            None => content.strip_suffix(TAG).unwrap_or(content).to_string(),
+        }
+    }
+
+    /// Unresolved sync conflicts as (winner index, copy index) pairs,
+    /// derived from `conflict_of` links. Order follows the sheet list.
+    fn conflict_pairs(&self) -> Vec<(usize, usize)> {
+        let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, s) in self.sheets.iter().enumerate() {
+            by_id.entry(s.id.as_str()).or_insert(i);
+        }
+        let mut out = Vec::new();
+        for (ci, s) in self.sheets.iter().enumerate() {
+            if let Some(wid) = s.conflict_of.as_deref() {
+                // Winner may itself have been deleted since; only pair it
+                // when both sides are still present.
+                if let Some(&wi) = by_id.get(wid) {
+                    if wi != ci {
+                        out.push((wi, ci));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Resolve one conflict pair. `keep_winner`: `Some(true)` keeps the
+    /// winner and drops the copy; `Some(false)` restores the copy's text
+    /// over the winner, then drops the copy; `None` keeps both as
+    /// independent sheets by clearing the conflict link. Drops are
+    /// tombstoned so they stay dropped on the next sync.
+    fn resolve_conflict(&mut self, winner_idx: usize, copy_idx: usize, keep_winner: Option<bool>) {
+        if winner_idx >= self.sheets.len() || copy_idx >= self.sheets.len() || winner_idx == copy_idx {
+            return;
+        }
+        match keep_winner {
+            Some(true) => {
+                // Keep the winner: drop the copy.
+                let removed = self.sheets.remove(copy_idx);
+                if !self.tombstones.iter().any(|t| t.id == removed.id) {
+                    self.tombstones.push(Tombstone {
+                        id: removed.id,
+                        section: removed.section,
+                    });
+                }
+                let fallback = self.sheets.get(copy_idx).and_then(|s| s.group).or_else(|| {
+                    self.sheets.iter().find_map(|s| s.group)
+                });
+                self.remap_after_remove(copy_idx, fallback);
+                self.forget_history_above(copy_idx);
+                self.status = "Conflict resolved: kept current version".to_string();
+            }
+            Some(false) => {
+                // Keep the copy: its text (suffix stripped) wins, in place.
+                let restored = Self::strip_conflict_suffix(&self.sheets[copy_idx].content);
+                let trashed = self.sheets[copy_idx].trashed;
+                let modified = self.sheets[copy_idx].modified;
+                self.sheets[winner_idx].content = restored;
+                self.sheets[winner_idx].trashed = trashed;
+                self.sheets[winner_idx].modified = modified;
+                let removed = self.sheets.remove(copy_idx);
+                if !self.tombstones.iter().any(|t| t.id == removed.id) {
+                    self.tombstones.push(Tombstone {
+                        id: removed.id,
+                        section: removed.section,
+                    });
+                }
+                let fallback = self.sheets.get(copy_idx).and_then(|s| s.group).or_else(|| {
+                    self.sheets.iter().find_map(|s| s.group)
+                });
+                self.remap_after_remove(copy_idx, fallback);
+                self.forget_history_above(copy_idx);
+                self.status = "Conflict resolved: kept synced version".to_string();
+            }
+            None => {
+                // Keep both: unlink so they become independent sheets.
+                if let Some(s) = self.sheets.get_mut(copy_idx) {
+                    s.conflict_of = None;
+                }
+                self.status = "Conflict kept as two sheets".to_string();
+            }
+        }
+        self.ensure_visible_selection();
+        self.save_library();
     }
 
 
@@ -4420,6 +4584,36 @@ blockquote {
         cur_sheets.retain(|s| !tombstoned(&s.id));
         rep.dropped_tombstoned += before - cur_sheets.len();
         rep
+    }
+
+    /// Periodic background sync: every ~30s of app time, re-read the iCloud
+    /// store and merge external changes (another device) into memory. Merges
+    /// are union-based and never delete, so this is safe to run unattended;
+    /// real conflicts surface as reviewable copies plus a status note.
+    fn maybe_background_sync(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.last_sync_check < 30.0 {
+            return;
+        }
+        self.last_sync_check = now;
+        let anchor = self.icloud_dir.clone();
+        let Some(ipath) = Self::icloud_library_path(anchor.as_deref()) else {
+            return;
+        };
+        if ipath.exists()
+            && Self::merge_store_file(
+                &mut self.groups,
+                &mut self.sheets,
+                &mut self.tombstones,
+                &ipath,
+                &mut self.sync_hashes,
+                "icloud",
+            )
+        {
+            self.status = "Synced changes from another device".to_string();
+            self.ensure_visible_selection();
+            self.save_library();
+        }
     }
 
     /// Write groups, sheets and selection to disk. Errors are ignored on
@@ -10900,9 +11094,12 @@ blockquote {
             return;
         }
         let mut open = true;
-        // Deferred so the family combo rows stay read-only.
+        // Deferred so the combo rows stay read-only inside their closures.
         let mut apply_family: Option<Option<String>> = None;
         let mut apply_theme: Option<AppTheme> = None;
+        let mut do_move_icloud = false;
+        let mut do_unmove_icloud = false;
+        let mut do_review_conflicts = false;
         // Listed once per opening, not once per frame: the db is cached.
         let families = self.system_font_families();
         egui::Window::new("Settings")
@@ -10976,7 +11173,52 @@ blockquote {
                     self.editor_font_size = default_editor_font_size();
                     self.save_library();
                 }
+                ui.separator();
+                // iCloud sync for the iCloud section (Documents stays local).
+                ui.label(RichText::new("Sync").small().color(self.app_theme.text_dim()));
+                let using_drive = Self::icloud_drive_dir().is_some();
+                let on_drive = Self::icloud_store_dir(self.icloud_dir.as_deref())
+                    .map(|d| Some(d) == Self::icloud_drive_dir().map(|dd| dd.join("Ariadne")))
+                    .unwrap_or(false);
+                ui.label(
+                    RichText::new(if on_drive {
+                        "iCloud section syncs via iCloud Drive."
+                    } else if using_drive {
+                        "iCloud section is on this Mac only."
+                    } else {
+                        "iCloud Drive is off; iCloud section is on this Mac only."
+                    })
+                    .small()
+                    .color(self.app_theme.text_dim()),
+                );
+                ui.horizontal(|ui| {
+                    if !on_drive && using_drive {
+                        if ui.button("Move iCloud section to iCloud Drive").clicked() {
+                            do_move_icloud = true;
+                        }
+                    }
+                    if on_drive {
+                        if ui.button("Move iCloud section back to this Mac").clicked() {
+                            do_unmove_icloud = true;
+                        }
+                    }
+                    let conflicts = self.conflict_pairs().len();
+                    if conflicts > 0 {
+                        let label = if conflicts == 1 {
+                            "Review 1 sync conflict".to_string()
+                        } else {
+                            format!("Review {conflicts} sync conflicts")
+                        };
+                        if ui.button(label).clicked() {
+                            do_review_conflicts = true;
+                        }
+                    }
+                });
             });
+        if !open {
+            self.settings_open = false;
+            return;
+        }
         if !open {
             self.settings_open = false;
             return;
@@ -10995,6 +11237,114 @@ blockquote {
                 self.loaded_editor_font = None;
                 self.save_library();
             }
+        }
+        if do_move_icloud {
+            if let Some(drive) = Self::icloud_drive_dir() {
+                let dest = drive.join("Ariadne");
+                if Some(dest.clone()) != Self::icloud_store_dir(self.icloud_dir.as_deref()) {
+                    self.move_icloud_store(dest);
+                } else {
+                    self.status = "Already using iCloud Drive".to_string();
+                }
+            } else {
+                self.status = "iCloud Drive is not available on this Mac".to_string();
+            }
+        }
+        if do_unmove_icloud {
+            if let Some(local) = Self::library_dir() {
+                let dest = local.join("icloud");
+                if Some(dest.clone()) != Self::icloud_store_dir(self.icloud_dir.as_deref()) {
+                    self.move_icloud_store(dest);
+                } else {
+                    self.status = "Already stored on this Mac".to_string();
+                }
+            }
+        }
+        if do_review_conflicts {
+            self.show_conflicts = true;
+        }
+    }
+
+    /// Sync-conflict review: each pair shows the surviving sheet and its
+    /// conflict copy with their timestamps. Keeping either side deletes the
+    /// other (tombstoned, so the choice propagates); keeping both unlinks
+    /// them into independent sheets.
+    fn show_conflicts_popup(&mut self, ctx: &egui::Context) {
+        if !self.show_conflicts {
+            return;
+        }
+        let mut open = true;
+        let mut resolve: Vec<(usize, usize, Option<bool>)> = Vec::new();
+        let mut resolve_all_keep = false;
+        egui::Window::new("Sync conflicts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 44.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(
+                    RichText::new(
+                        "The same sheet changed on two devices. Pick which version to keep per conflict, or keep both as separate sheets.",
+                    )
+                    .small()
+                    .color(self.app_theme.text_dim()),
+                );
+                ui.add_space(6.0);
+                for (wi, ci) in self.conflict_pairs() {
+                    let (wtitle, wtime) = self.sheets.get(wi).map(|s| {
+                        (
+                            Self::inferred_title(&s.content),
+                            s.modified
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        )
+                    }).unwrap_or_else(|| ("(missing)".to_string(), 0));
+                    let ctime = self.sheets.get(ci).and_then(|s| {
+                        s.modified.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).ok()
+                    }).unwrap_or(0);
+                    ui.group(|ui| {
+                        ui.label(RichText::new(format!("“{wtitle}”")).strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "Current (saved {wtime}) vs copy (saved {ctime})"
+                            ))
+                            .small()
+                            .color(self.app_theme.text_dim()),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Keep current").clicked() {
+                                resolve.push((wi, ci, Some(true)));
+                            }
+                            if ui.small_button("Keep copy").clicked() {
+                                resolve.push((wi, ci, Some(false)));
+                            }
+                            if ui.small_button("Keep both").clicked() {
+                                resolve.push((wi, ci, None));
+                            }
+                        });
+                    });
+                }
+                ui.add_space(4.0);
+                if ui.button("Resolve all: keep current versions").clicked() {
+                    resolve_all_keep = true;
+                }
+            });
+        if !open {
+            self.show_conflicts = false;
+            return;
+        }
+        if resolve_all_keep {
+            for (wi, ci) in self.conflict_pairs() {
+                resolve.push((wi, ci, Some(true)));
+            }
+        }
+        // Apply deepest-first so indices stay valid as sheets are removed.
+        resolve.sort_by(|a, b| b.1.cmp(&a.1));
+        for (wi, ci, action) in resolve {
+            self.resolve_conflict(wi, ci, action);
         }
     }
 
@@ -11666,6 +12016,7 @@ impl eframe::App for WritingApp {
         }
         self.handle_screenshot(ctx);
         self.handle_dropped_files(ctx);
+        self.maybe_background_sync(ctx);
         ctx.set_visuals(self.app_theme.visuals());
         self.ensure_editor_font(ctx);
 
@@ -11747,6 +12098,22 @@ impl eframe::App for WritingApp {
                         .clicked()
                         {
                             self.settings_open = !self.settings_open;
+                        }
+                        if !self.conflict_pairs().is_empty() {
+                            let n = self.conflict_pairs().len();
+                            if Self::header_button(
+                                ui,
+                                RichText::new(icon::CLOUD_WARNING).size(17.0),
+                            )
+                            .on_hover_text(if n == 1 {
+                                "1 sync conflict to review".to_string()
+                            } else {
+                                format!("{n} sync conflicts to review")
+                            })
+                            .clicked()
+                            {
+                                self.show_conflicts = true;
+                            }
                         }
                         if Self::header_button(
                             ui,
@@ -12755,6 +13122,7 @@ impl eframe::App for WritingApp {
         self.show_outline_popup(ctx);
         self.show_settings_popup(ctx);
         self.show_history_popup(ctx);
+        self.show_conflicts_popup(ctx);
         self.show_preview_window(ctx);
         // Window-wide drop hint, painted above everything else.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
@@ -14095,6 +14463,112 @@ mod tests {
         assert!(istore.sheets.iter().all(|s| s.section == Section::ICloud));
         assert!(root.join("Parent/Plan.md").is_file());
         assert!(root.join("Ungrouped/Floating.md").is_file());
+    }
+
+    /// A merged app with one unresolved conflict: sheet s-w (winner) plus
+    /// a conflict copy s-copy.
+    fn conflict_app() -> WritingApp {
+        let mut app = sync_app();
+        app.sheets[1].content = "# B\n\nWinner text.\n".to_string();
+        app.sheets.push(Sheet {
+            id: "s-copy".to_string(),
+            conflict_of: Some("s-b".to_string()),
+            section: Section::ICloud,
+            content: "# B (conflict copy)\n\nLoser text.\n".to_string(),
+            group: Some(1),
+            trashed: false,
+            modified: SystemTime::now(),
+        });
+        app
+    }
+
+    #[test]
+    fn sync_conflict_pairs_lists_winners_and_copies() {
+        let _storage = isolate_storage();
+        // Winner first, copy second: one pair.
+        let app = conflict_app();
+        assert_eq!(app.conflict_pairs(), vec![(1, 2)]);
+        // Orphaned copies (winner gone) are not listed for review.
+        let mut orphan = conflict_app();
+        orphan.sheets.remove(1);
+        assert!(orphan.conflict_pairs().is_empty());
+    }
+
+    #[test]
+    fn sync_conflict_resolve_keep_winner() {
+        let _storage = isolate_storage();
+        let mut app = conflict_app();
+        app.selection = SidebarSelection::Sheet(2);
+        app.selected_sheet = 2;
+        app.selected_sheets = vec![2];
+        app.resolve_conflict(1, 2, Some(true));
+        assert_eq!(app.sheets.len(), 2);
+        assert!(app.sheets.iter().all(|s| s.conflict_of.is_none()));
+        assert!(app.sheets.iter().any(|s| s.id == "s-b"));
+        assert!(!app.sheets.iter().any(|s| s.id == "s-copy"));
+        // The dropped copy is tombstoned so it stays dropped on sync.
+        assert!(app.tombstones.iter().any(|t| t.id == "s-copy"));
+        // No dangling selection.
+        assert!(app.selected_sheet < app.sheets.len());
+    }
+
+    #[test]
+    fn sync_conflict_resolve_keep_copy() {
+        let _storage = isolate_storage();
+        let mut app = conflict_app();
+        app.resolve_conflict(1, 2, Some(false));
+        assert_eq!(app.sheets.len(), 2);
+        let winner = app.sheets.iter().find(|s| s.id == "s-b").unwrap();
+        assert_eq!(winner.content, "# B\n\nLoser text.\n");
+        assert!(winner.conflict_of.is_none());
+        assert!(!app.sheets.iter().any(|s| s.id == "s-copy"));
+        assert!(app.tombstones.iter().any(|t| t.id == "s-copy"));
+    }
+
+    #[test]
+    fn sync_conflict_resolve_keep_both() {
+        let _storage = isolate_storage();
+        let mut app = conflict_app();
+        app.resolve_conflict(1, 2, None);
+        assert_eq!(app.sheets.len(), 3);
+        assert!(app.conflict_pairs().is_empty());
+        assert!(app.sheets.iter().any(|s| s.id == "s-copy" && s.conflict_of.is_none()));
+    }
+
+    #[test]
+    fn sync_conflict_suffix_roundtrips() {
+        assert_eq!(
+            WritingApp::strip_conflict_suffix(&WritingApp::with_conflict_suffix("# T\nbody\n")),
+            "# T\nbody\n"
+        );
+        assert_eq!(
+            WritingApp::with_conflict_suffix("plain"),
+            "plain (conflict copy)"
+        );
+        assert_eq!(WritingApp::strip_conflict_suffix("plain"), "plain");
+    }
+
+    #[test]
+    fn sync_move_icloud_store_copies_and_flips_anchor() {
+        let _storage = isolate_storage();
+        let mut app = sync_app();
+        app.save_library();
+        let dest = std::path::PathBuf::from(std::env::var("ARIADNE_ICLOUD_DIR").unwrap()).join("moved");
+        app.move_icloud_store(dest.clone());
+        assert_eq!(app.icloud_dir, Some(dest.to_string_lossy().to_string()));
+        // Payload byte-identical at the new home.
+        let moved = std::fs::read_to_string(dest.join("library.json")).unwrap();
+        let back: SavedLibrary = serde_json::from_str(&moved).unwrap();
+        assert!(back.sheets.iter().any(|s| s.id == "s-b"));
+        // Saving again writes through the new anchor (edit an iCloud sheet,
+        // which is what the moved store carries).
+        app.sheets[1].content = "# B\n\nEdited after move.\n".to_string();
+        app.save_library();
+        let moved2 = std::fs::read_to_string(dest.join("library.json")).unwrap();
+        assert!(moved2.contains("Edited after move"));
+        // Explicit anchor survives a reload.
+        let back2 = WritingApp::load_library().expect("reloads");
+        assert_eq!(back2.icloud_dir, Some(dest.to_string_lossy().to_string()));
     }
 
     #[test]
