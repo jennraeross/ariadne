@@ -30,6 +30,16 @@ the mirror on every save. Documents stay local on each Mac.
 - Deletions sync via tombstones and stay deleted; trash still works as
   before, per machine.
 
+## Google Drive sync (all platforms)
+
+Groups in the **Google Drive** section sync through a user-visible
+`Ariadne` folder in your My Drive — same model as iCloud: one JSON store
+file plus a plain tree of folders and `.md` files, mirrored on every save.
+Connect under Settings → Sync (“Connect Google Drive”); auth happens once
+in the browser (OAuth, PKCE loopback flow) and tokens stay in the OS
+keychain. Syncs on save (debounced) and checks for remote changes every 30
+seconds; conflicts get the same `(conflict copy)` review as iCloud.
+
 ## Run from source
 
 ```sh

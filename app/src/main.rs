@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+mod gdrive;
+
+use gdrive::TokenStore as _;
+
 fn load_app_icon() -> Arc<egui::IconData> {
     // Bundled 1024x1024 yarn-ball artwork (`assets/icon.png`).
     // Decoded at startup into the RGBA bytes `egui::IconData` expects for
@@ -853,6 +857,58 @@ struct WritingApp {
     last_sync_check: f64,
     /// Whether the sync-conflict review popup is open. Session-only.
     show_conflicts: bool,
+    /// Google Drive sync session. Session-only: tokens stay in the keychain.
+    gdrive: GdriveSync,
+}
+
+/// Google Drive connection state. Session-only.
+#[derive(Default)]
+struct GdriveSync {
+    worker: Option<GdriveWorker>,
+    mode: GdriveMode,
+    /// Account email from userinfo, once known.
+    email: String,
+    /// Last successful push or pull.
+    last_synced: Option<SystemTime>,
+    /// Whether the remote folder is known to exist (seen via pull/push).
+    /// Stays false until first contact so an empty section never summons
+    /// the Drive folder.
+    remote_exists: bool,
+    /// A job is in flight; saves coalesce into one pending push.
+    busy: bool,
+    pending_push: bool,
+    /// Time of the last local save (push quiet period).
+    last_edit: Option<SystemTime>,
+    /// `ctx.time()` of the last Drive poll.
+    last_poll: f64,
+}
+
+impl GdriveSync {
+    /// Seconds since the last local save; unknown counts as long ago.
+    fn quiet_since_save(&self) -> f64 {
+        self.last_edit
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(f64::MAX)
+    }
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum GdriveMode {
+    #[default]
+    SignedOut,
+    /// No client ID baked into this build.
+    Disabled,
+    /// Browser flow running.
+    SigningIn,
+    SignedIn,
+}
+
+struct GdriveWorker {
+    tx: std::sync::mpsc::Sender<gdrive::DriveJob>,
+    rx: std::sync::mpsc::Receiver<gdrive::DriveEvent>,
+    #[allow(dead_code)]
+    handle: std::thread::JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -1966,6 +2022,7 @@ impl WritingApp {
             sync_hashes: std::collections::HashMap::new(),
             last_sync_check: 0.0,
             show_conflicts: false,
+            gdrive: GdriveSync::default(),
             icloud_dir: None,
         };
         let mut dirty_after_load = false;
@@ -3996,12 +4053,12 @@ blockquote {
         ids
     }
 
-    /// Mirror the iCloud section as a tree of folders and Markdown files,
+    /// Mirror one section as a tree of folders and Markdown files,
     /// plus the attachments they reference. Managed files carry a header
     /// comment and are rewritten/pruned on every save — the JSON store
     /// stays the source of truth, the folder is for transparency (Finder,
     /// Spotlight, other editors for reading).
-    fn sync_icloud_mirror(&self, store_dir: &std::path::Path) {
+    fn sync_section_mirror(&self, store_dir: &std::path::Path, section: Section) {
         // Resolve each iCloud group's folder path, guarding against parent
         // cycles by capping the walk at the group count.
         let group_dir = |groups: &[Group],
@@ -4059,17 +4116,17 @@ blockquote {
         // Map merged group index -> dir, for sheets and dedup bookkeeping.
         let mut dir_of: std::collections::HashMap<usize, PathBuf> = std::collections::HashMap::new();
         for (gi, g) in self.groups.iter().enumerate() {
-            if g.section == Section::ICloud {
+            if g.section == section {
                 dir_of.insert(gi, group_dir(&self.groups, gi, store_dir, &mut memo));
             }
         }
         let ungrouped = store_dir.join("Ungrouped");
-        // Write one file per non-trashed iCloud sheet.
+        // Write one file per non-trashed section sheet.
         let mut written: Vec<PathBuf> = Vec::new();
         let mut used_in: std::collections::HashMap<PathBuf, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
         for s in self.sheets.iter().filter(|s| {
-            s.section == Section::ICloud && !s.trashed && s.conflict_of.is_none()
+            s.section == section && !s.trashed && s.conflict_of.is_none()
         }) {
             let dir = s
                 .group
@@ -4101,22 +4158,22 @@ blockquote {
         // Prune stale mirror files (*.md we did not write this pass).
         Self::prune_mirror(store_dir, &written);
         // Sync referenced attachments alongside the mirror.
-        self.sync_icloud_attachments(store_dir);
+        self.sync_section_attachments(store_dir, section);
     }
 
-    /// Copy images referenced by iCloud sheets into the store's
+    /// Copy images referenced by the section's sheets into the store's
     /// `attachments/` folder, and prune ones no sheet references anymore.
     /// Keeps synced sheets renderable on devices without the local assets.
-    fn sync_icloud_attachments(&self, store_dir: &std::path::Path) {
+    fn sync_section_attachments(&self, store_dir: &std::path::Path, section: Section) {
         let dir = store_dir.join("attachments");
-        let icloud_sheets: Vec<&Sheet> = self
+        let section_sheets: Vec<&Sheet> = self
             .sheets
             .iter()
-            .filter(|s| s.section == Section::ICloud)
+            .filter(|s| s.section == section)
             .collect();
         let mut wanted: Vec<(String, String)> = Vec::new();
         for id in Self::referenced_attachments(
-            &icloud_sheets.into_iter().cloned().collect::<Vec<_>>(),
+            &section_sheets.into_iter().cloned().collect::<Vec<_>>(),
         ) {
             if let Some(meta) = self.attached_images.iter().find(|a| a.id == id) {
                 wanted.push((meta.id.clone(), meta.ext.clone()));
@@ -4273,11 +4330,14 @@ blockquote {
 
     /// Split merged groups into a file-local subset. Returns the subset plus
     /// a map from merged index to file-local index (`None` = other store).
-    fn partition_groups(groups: &[Group], icloud: bool) -> (Vec<Group>, Vec<Option<usize>>) {
+    fn partition_groups(
+        groups: &[Group],
+        section: Section,
+    ) -> (Vec<Group>, Vec<Option<usize>>) {
         let mut out = Vec::new();
         let mut map = vec![None; groups.len()];
         for (i, g) in groups.iter().enumerate() {
-            if (g.section == Section::ICloud) == icloud {
+            if g.section == section {
                 map[i] = Some(out.len());
                 out.push(g.clone());
             }
@@ -4295,11 +4355,11 @@ blockquote {
     fn partition_sheets(
         sheets: &[Sheet],
         group_map: &[Option<usize>],
-        icloud: bool,
+        section: Section,
     ) -> Vec<Sheet> {
         sheets
             .iter()
-            .filter(|s| (s.section == Section::ICloud) == icloud)
+            .filter(|s| s.section == section)
             .map(|s| {
                 let mut c = s.clone();
                 c.group = c.group.and_then(|g| group_map.get(g).copied().flatten());
@@ -4616,14 +4676,276 @@ blockquote {
         }
     }
 
+    /// Quiet period after the last local edit before a save is pushed to
+    /// Google Drive (coalesces keystrokes into one upload).
+    const GDRIVE_PUSH_QUIET_SECS: f64 = 5.0;
+    /// Background Drive poll cadence, mirroring the iCloud check.
+    const GDRIVE_POLL_SECS: f64 = 30.0;
+
+    fn gdrive_configured() -> bool {
+        gdrive::client_id().is_some()
+    }
+
+    /// Spawn the sync worker on first use and learn the auth state.
+    /// Silent until the user connects: no tokens means SignedOut, and the
+    /// UI offers Connect.
+    fn ensure_gdrive_worker(&mut self) {
+        if self.gdrive.worker.is_some() {
+            return;
+        }
+        if !Self::gdrive_configured() {
+            self.gdrive.mode = GdriveMode::Disabled;
+            return;
+        }
+        let (job_tx, job_rx) = std::sync::mpsc::channel();
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let handle =
+            gdrive::spawn_worker(Box::new(gdrive::KeyringTokenStore), job_rx, ev_tx);
+        self.gdrive.worker = Some(GdriveWorker {
+            tx: job_tx,
+            rx: ev_rx,
+            handle,
+        });
+        self.gdrive_send(gdrive::DriveJob::CheckAuth);
+    }
+
+    /// Send a job when a worker exists and none is in flight.
+    fn gdrive_send(&mut self, job: gdrive::DriveJob) -> bool {
+        let Some(w) = self.gdrive.worker.as_ref() else {
+            return false;
+        };
+        if self.gdrive.busy {
+            return false;
+        }
+        if w.tx.send(job).is_err() {
+            return false;
+        }
+        self.gdrive.busy = true;
+        true
+    }
+
+    /// Drain worker events; called every frame so login URLs and merges
+    /// land promptly. Follow-up jobs (merge-then-push) run inline.
+    fn gdrive_poll(&mut self, ctx: &egui::Context) {
+        let events: Vec<gdrive::DriveEvent> = self
+            .gdrive
+            .worker
+            .as_ref()
+            .map(|w| w.rx.try_iter().collect())
+            .unwrap_or_default();
+        for ev in events {
+            self.gdrive_on_event(ctx, ev);
+        }
+    }
+
+    /// Per-frame Drive tick: worker startup, event drain, quiet push after
+    /// edits, and the background poll.
+    fn gdrive_tick(&mut self, ctx: &egui::Context) {
+        self.ensure_gdrive_worker();
+        self.gdrive_poll(ctx);
+        if self.gdrive.mode != GdriveMode::SignedIn {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        // Edits coalesce: push once typing has been quiet a few seconds.
+        if !self.gdrive.busy
+            && self.gdrive.pending_push
+            && self.gdrive.quiet_since_save() > Self::GDRIVE_PUSH_QUIET_SECS
+        {
+            self.gdrive.pending_push = false;
+            self.gdrive_send(gdrive::DriveJob::Pull { then_push: true });
+            return;
+        }
+        if !self.gdrive.busy && now - self.gdrive.last_poll > Self::GDRIVE_POLL_SECS {
+            self.gdrive.last_poll = now;
+            self.gdrive_send(gdrive::DriveJob::Pull { then_push: false });
+        }
+    }
+
+    /// Handle one worker event. Runs on the UI thread with full app access.
+    fn gdrive_on_event(&mut self, _ctx: &egui::Context, ev: gdrive::DriveEvent) {
+        match ev {
+            gdrive::DriveEvent::LoginUrl(url) => {
+                gdrive::open_url(&url);
+                self.status =
+                    "Continue signing in with Google in your browser…".to_string();
+                // Login still in flight; busy stays true.
+            }
+            gdrive::DriveEvent::Authed { email } => {
+                self.gdrive.mode = GdriveMode::SignedIn;
+                self.gdrive.email = email.clone();
+                self.gdrive.busy = false;
+                self.status = format!("Signed in to Google Drive as {email}");
+                // Converge immediately: adopt remote edits, then push local.
+                self.gdrive_send(gdrive::DriveJob::Pull { then_push: true });
+            }
+            gdrive::DriveEvent::SignedOut => {
+                if self.gdrive.mode != GdriveMode::Disabled {
+                    self.gdrive.mode = GdriveMode::SignedOut;
+                }
+                self.gdrive.email.clear();
+                self.gdrive.busy = false;
+            }
+            gdrive::DriveEvent::AuthFailed(msg) => {
+                self.gdrive.busy = false;
+                if self.gdrive.mode == GdriveMode::SigningIn {
+                    self.gdrive.mode = GdriveMode::SignedOut;
+                }
+                self.status = format!("Google Drive: {msg}");
+            }
+            gdrive::DriveEvent::Pulled {
+                store_json,
+                then_push,
+            } => {
+                if let Some(bytes) = store_json {
+                    self.gdrive.remote_exists = true;
+                    if Self::merge_store_bytes(
+                        &mut self.groups,
+                        &mut self.sheets,
+                        &mut self.tombstones,
+                        &bytes,
+                        &mut self.sync_hashes,
+                        "gdrive",
+                    ) {
+                        self.status =
+                            "Synced changes from Google Drive".to_string();
+                        self.ensure_visible_selection();
+                        self.save_library();
+                    }
+                }
+                if then_push {
+                    if let Some((json, files)) = self.gdrive_build_push() {
+                        // Push supersedes the save-time dirty flag: it was
+                        // built from just-merged memory.
+                        self.gdrive.pending_push = false;
+                        self.gdrive_send(gdrive::DriveJob::PushNow {
+                            store_json: json,
+                            files,
+                        });
+                    } else {
+                        self.gdrive.busy = false;
+                    }
+                } else {
+                    self.gdrive.busy = false;
+                }
+            }
+            gdrive::DriveEvent::Pushed { store_hash } => {
+                self.sync_hashes
+                    .insert("gdrive".to_string(), store_hash);
+                self.gdrive.remote_exists = true;
+                self.gdrive.last_synced = Some(SystemTime::now());
+                self.gdrive.busy = false;
+                self.status = "Synced to Google Drive".to_string();
+            }
+            gdrive::DriveEvent::SyncError(msg) => {
+                self.gdrive.busy = false;
+                self.status = format!("Google Drive sync failed: {msg}");
+            }
+        }
+    }
+
+    /// Build the upload payload from merged memory: the Google-only store
+    /// file plus the staged mirror tree. `None` when there is nothing to
+    /// sync and no remote folder to clean up (never summons the folder).
+    fn gdrive_build_push(&mut self) -> Option<(Vec<u8>, Vec<(String, Vec<u8>)>)> {
+        let (ggroups, gmap) = Self::partition_groups(&self.groups, Section::GoogleDrive);
+        let gsheets = Self::partition_sheets(&self.sheets, &gmap, Section::GoogleDrive);
+        let gtombs: Vec<Tombstone> = self
+            .tombstones
+            .iter()
+            .filter(|t| t.section == Section::GoogleDrive)
+            .cloned()
+            .collect();
+        if gsheets.is_empty() && gtombs.is_empty() && !self.gdrive.remote_exists {
+            return None;
+        }
+        let saved = SavedLibrary {
+            groups: ggroups,
+            sheets: gsheets,
+            tombstones: gtombs,
+            sheet_order: Vec::new(),
+            selection: SidebarSelection::Filter(SmartFilter::All),
+            selected_sheet: 0,
+            selected_sheets: Vec::new(),
+            export_css: String::new(),
+            export_css_name: String::new(),
+            style_guide_added: true,
+            style_guide_version: Self::STYLE_GUIDE_VERSION,
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
+            export_format: ExportFormat::default(),
+            editor_font_size: default_editor_font_size(),
+            sidebars_visible: true,
+            library_visible: None,
+            sheets_visible: None,
+            word_goal: 0,
+            app_theme: AppTheme::default(),
+            editor_font_family: None,
+            selection_id: None,
+            selected_sheet_id: None,
+            selected_sheets_ids: Vec::new(),
+            icloud_dir: None,
+            dirty: false,
+            version: 1,
+        };
+        let text = serde_json::to_string_pretty(&saved).ok()?;
+        let stage = gdrive::staging_dir()?;
+        if std::fs::create_dir_all(&stage).is_err() {
+            return None;
+        }
+        self.sync_section_mirror(&stage, Section::GoogleDrive);
+        let mut files = Vec::new();
+        Self::collect_staging_files(&stage, &stage, &mut files);
+        Some((text.into_bytes(), files))
+    }
+
+    /// Recursively read the staging dir as `(relative/path, bytes)` pairs.
+    fn collect_staging_files(
+        stage: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut Vec<(String, Vec<u8>)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut names: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        names.sort();
+        for path in names {
+            if path.is_dir() {
+                Self::collect_staging_files(stage, &path, out);
+            } else if path.is_file() {
+                if let Ok(rel) = path.strip_prefix(stage) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        out.push((
+                            rel.to_string_lossy().replace('\\', "/"),
+                            bytes,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mark local state dirty for Drive after any save. Uploads go out
+    /// after a short quiet period (see [`Self::gdrive_tick`]).
+    fn gdrive_mark_dirty(&mut self) {
+        if self.gdrive.mode != GdriveMode::SignedIn {
+            return;
+        }
+        self.gdrive.pending_push = true;
+        self.gdrive.last_edit = Some(SystemTime::now());
+    }
+
     /// Write groups, sheets and selection to disk. Errors are ignored on
     /// purpose: the app must keep working even without a writable folder.
     ///
-    /// The library is split across two stores: Documents/GoogleDrive
-    /// sections live in the local `library.json`; the iCloud section lives
-    /// in the iCloud store (`icloud_store_dir`). Before writing, each store
-    /// file is re-read: if it changed since we last saw it (another device),
-    /// it is merged in first so saves never clobber remote edits.
+    /// The library is split across stores: Documents/GoogleDrive sections
+    /// live in the local `library.json`; the iCloud section lives in the
+    /// iCloud store (`icloud_store_dir`); the GoogleDrive section additionally
+    /// syncs to a user-visible Google Drive folder (see [`Self::gdrive_tick`]).
+    /// Before writing, each local store file is re-read: if it changed since
+    /// we last saw it (another device), it is merged in first so saves never
+    /// clobber remote edits.
     fn save_library(&mut self) {
         let Some(local_path) = Self::library_path() else {
             return;
@@ -4653,8 +4975,8 @@ blockquote {
         // Partition memory into per-store parts with file-local indices.
         // The local file keeps the full library (all sections, merged
         // indices); the iCloud file holds only the iCloud section.
-        let (icloud_groups, icloud_gmap) = Self::partition_groups(&self.groups, true);
-        let icloud_sheets = Self::partition_sheets(&self.sheets, &icloud_gmap, true);
+        let (icloud_groups, icloud_gmap) = Self::partition_groups(&self.groups, Section::ICloud);
+        let icloud_sheets = Self::partition_sheets(&self.sheets, &icloud_gmap, Section::ICloud);
         let icloud_tombs: Vec<Tombstone> = self
             .tombstones
             .iter()
@@ -4753,10 +5075,13 @@ blockquote {
                 // Mirror the synced section as folders + Markdown, plus the
                 // attachments those sheets reference.
                 if let Some(store_dir) = ipath.parent() {
-                    self.sync_icloud_mirror(store_dir);
+                    self.sync_section_mirror(store_dir, Section::ICloud);
                 }
             }
         }
+        // Google Drive uploads go out after a quiet period (the worker owns
+        // the network); mark here so no save path has to think about it.
+        self.gdrive_mark_dirty();
     }
 
     /// Re-read a store file; if its bytes differ from our last write, merge
@@ -4774,7 +5099,21 @@ blockquote {
         let Ok(bytes) = std::fs::read(path) else {
             return false;
         };
-        let hash = Self::hash_bytes(&bytes);
+        Self::merge_store_bytes(groups, sheets, tombs, &bytes, sync_hashes, key)
+    }
+
+    /// Merge downloaded store bytes (file or Drive payload) into memory.
+    /// Hash-gated on `key` so unchanged bytes are a no-op. Returns true when
+    /// the merge changed memory.
+    fn merge_store_bytes(
+        groups: &mut Vec<Group>,
+        sheets: &mut Vec<Sheet>,
+        tombs: &mut Vec<Tombstone>,
+        bytes: &[u8],
+        sync_hashes: &mut std::collections::HashMap<String, u64>,
+        key: &str,
+    ) -> bool {
+        let hash = Self::hash_bytes(bytes);
         if sync_hashes.get(key) == Some(&hash) {
             return false;
         }
@@ -4785,6 +5124,9 @@ blockquote {
         if store.version != 1 {
             return false;
         }
+        // Baseline what we saw: identical bytes skip the merge next time
+        // without needing a save to record the hash first.
+        sync_hashes.insert(key.to_string(), hash);
         // Files are section-pure by construction; the merge itself is
         // UUID-based and needs no section filtering.
         let mut pseudo = SavedLibrary {
@@ -6729,14 +7071,17 @@ blockquote {
         let src = src.trim();
         if let Some(id) = src.strip_prefix("attachment:") {
             let meta = self.attached_images.iter().find(|a| a.id == id)?;
-            // Local assets first, then the synced iCloud mirror (covers
-            // images attached on another device).
+            // Local assets first, then the synced mirrors (covers images
+            // attached on another device via iCloud or Google Drive).
             let mut candidates = Vec::new();
             if let Some(dir) = Self::assets_dir() {
                 candidates.push(dir.join(format!("{}.{}", meta.id, meta.ext)));
             }
             if let Some(store) = Self::icloud_store_dir(self.icloud_dir.as_deref()) {
                 candidates.push(store.join("attachments").join(format!("{}.{}", meta.id, meta.ext)));
+            }
+            if let Some(stage) = gdrive::staging_dir() {
+                candidates.push(stage.join("attachments").join(format!("{}.{}", meta.id, meta.ext)));
             }
             for path in candidates {
                 if let Ok(bytes) = std::fs::read(&path) {
@@ -11099,6 +11444,8 @@ blockquote {
         let mut do_move_icloud = false;
         let mut do_unmove_icloud = false;
         let mut do_review_conflicts = false;
+        let mut do_gdrive_connect = false;
+        let mut do_gdrive_disconnect = false;
         // Listed once per opening, not once per frame: the db is cached.
         let families = self.system_font_families();
         egui::Window::new("Settings")
@@ -11213,6 +11560,68 @@ blockquote {
                         }
                     }
                 });
+                ui.separator();
+                // Google Drive sync for the Google Drive section. Auth is
+                // OAuth in the browser; tokens stay in the OS keychain.
+                ui.label(
+                    RichText::new("Google Drive")
+                        .small()
+                        .color(self.app_theme.text_dim()),
+                );
+                let gdrive_status = match self.gdrive.mode {
+                    GdriveMode::Disabled => {
+                        "Google Drive is not configured in this build.".to_string()
+                    }
+                    GdriveMode::SigningIn => {
+                        "Waiting for the browser sign-in to complete…".to_string()
+                    }
+                    GdriveMode::SignedIn => {
+                        let when = self
+                            .gdrive
+                            .last_synced
+                            .and_then(|t| {
+                                t.elapsed().ok().map(|d| {
+                                    if d.as_secs() < 60 {
+                                        "just now".to_string()
+                                    } else {
+                                        format!("{}m ago", d.as_secs() / 60)
+                                    }
+                                })
+                            })
+                            .unwrap_or_else(|| "never".to_string());
+                        if self.gdrive.email.is_empty() {
+                            format!("Google Drive section syncs (last sync {when}).")
+                        } else {
+                            format!(
+                                "Google Drive section syncs as {} (last sync {when}).",
+                                self.gdrive.email
+                            )
+                        }
+                    }
+                    GdriveMode::SignedOut => {
+                        "Google Drive section is on this Mac only.".to_string()
+                    }
+                };
+                ui.label(
+                    RichText::new(gdrive_status)
+                        .small()
+                        .color(self.app_theme.text_dim()),
+                );
+                ui.horizontal(|ui| {
+                    match self.gdrive.mode {
+                        GdriveMode::SignedOut => {
+                            if ui.button("Connect Google Drive").clicked() {
+                                do_gdrive_connect = true;
+                            }
+                        }
+                        GdriveMode::SignedIn | GdriveMode::SigningIn => {
+                            if ui.button("Disconnect Google Drive").clicked() {
+                                do_gdrive_disconnect = true;
+                            }
+                        }
+                        GdriveMode::Disabled => {}
+                    }
+                });
             });
         if !open {
             self.settings_open = false;
@@ -11261,6 +11670,30 @@ blockquote {
         }
         if do_review_conflicts {
             self.show_conflicts = true;
+        }
+        if do_gdrive_disconnect {
+            gdrive::KeyringTokenStore.clear();
+            self.gdrive.mode = GdriveMode::SignedOut;
+            self.gdrive.email.clear();
+            self.gdrive.busy = false;
+            self.gdrive.pending_push = false;
+            self.status = "Disconnected Google Drive".to_string();
+        }
+        if do_gdrive_connect {
+            if !Self::gdrive_configured() {
+                self.status =
+                    "Google Drive is not configured in this build".to_string();
+            } else {
+                self.ensure_gdrive_worker();
+                self.gdrive.mode = GdriveMode::SigningIn;
+                if self.gdrive_send(gdrive::DriveJob::Login) {
+                    self.status = "Opening the browser to sign in…".to_string();
+                } else {
+                    self.gdrive.mode = GdriveMode::SignedOut;
+                    self.status =
+                        "Google Drive sync is busy; try again in a moment".to_string();
+                }
+            }
         }
     }
 
@@ -12020,6 +12453,7 @@ impl eframe::App for WritingApp {
         self.handle_screenshot(ctx);
         self.handle_dropped_files(ctx);
         self.maybe_background_sync(ctx);
+        self.gdrive_tick(ctx);
         ctx.set_visuals(self.app_theme.visuals());
         self.ensure_editor_font(ctx);
 
@@ -13219,7 +13653,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, default_editor_font_size, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -13238,6 +13672,11 @@ mod tests {
             let mut ic = std::env::temp_dir();
             ic.push("ariadne-test-icloud");
             std::env::set_var("ARIADNE_ICLOUD_DIR", &ic);
+            // Same for the Google Drive staging dir: the mirror builder
+            // writes there, and it must never touch real data in tests.
+            let mut gd = std::env::temp_dir();
+            gd.push("ariadne-test-gdrive");
+            std::env::set_var("ARIADNE_GDRIVE_DIR", &gd);
             // System fonts vary by machine; keep PDF exports hermetic.
             // Tests needing real fonts attach files explicitly instead.
             std::env::set_var("ARIADNE_NO_SYSTEM_FONTS", "1");
@@ -13248,6 +13687,9 @@ mod tests {
             let _ = std::fs::remove_file(&p);
         }
         if let Ok(p) = std::env::var("ARIADNE_ICLOUD_DIR") {
+            let _ = std::fs::remove_dir_all(std::path::PathBuf::from(&p));
+        }
+        if let Ok(p) = std::env::var("ARIADNE_GDRIVE_DIR") {
             let _ = std::fs::remove_dir_all(std::path::PathBuf::from(&p));
         }
         guard
@@ -13433,6 +13875,7 @@ mod tests {
             sync_hashes: std::collections::HashMap::new(),
             last_sync_check: 0.0,
             show_conflicts: false,
+            gdrive: GdriveSync::default(),
             icloud_dir: None,
         }
     }
@@ -14419,6 +14862,7 @@ mod tests {
             sync_hashes: std::collections::HashMap::new(),
             last_sync_check: 0.0,
             show_conflicts: false,
+            gdrive: GdriveSync::default(),
             icloud_dir: None,
         };
         app.selection = SidebarSelection::Group(1);
@@ -14434,7 +14878,7 @@ mod tests {
         let _storage = isolate_storage();
         let app = mirror_app();
         let root = mirror_root();
-        app.sync_icloud_mirror(&root);
+        app.sync_section_mirror(&root, Section::ICloud);
         // Nested group folder, ungrouped folder, no Documents leakage.
         assert!(root.join("Parent").is_dir());
         assert!(root.join("Parent/Kid").is_dir() || root.join("Parent").join("Kid").is_dir());
@@ -14458,14 +14902,14 @@ mod tests {
         let _storage = isolate_storage();
         let mut app = mirror_app();
         let root = mirror_root();
-        app.sync_icloud_mirror(&root);
+        app.sync_section_mirror(&root, Section::ICloud);
         assert!(root.join("Parent/Plan.md").is_file());
         // Rename the group and delete the nested sheet: the old folder and
         // file must disappear on the next sync.
         app.groups[1].name = "Renamed".to_string();
         app.groups[1].modified = SystemTime::now();
         app.sheets.retain(|s| s.id != "s-nested");
-        app.sync_icloud_mirror(&root);
+        app.sync_section_mirror(&root, Section::ICloud);
         assert!(root.join("Renamed/Plan.md").is_file());
         assert!(!root.join("Parent").exists());
         assert!(!root.join("Parent/Kid/Plan.md").exists());
@@ -14474,7 +14918,7 @@ mod tests {
         std::fs::write(root.join("library.json"), "{}").unwrap();
         std::fs::create_dir_all(root.join("attachments")).unwrap();
         std::fs::write(root.join("attachments/stale.png"), b"x").unwrap();
-        app.sync_icloud_mirror(&root);
+        app.sync_section_mirror(&root, Section::ICloud);
         assert!(root.join("library.json").is_file());
         assert!(!root.join("attachments/stale.png").exists());
         assert!(root.join("attachments").is_dir());
@@ -14496,7 +14940,7 @@ mod tests {
         });
         app.sheets[1].content = "# Plan\n\n![pic](attachment:img-1)\n".to_string();
         let root = mirror_root();
-        app.sync_icloud_mirror(&root);
+        app.sync_section_mirror(&root, Section::ICloud);
         assert_eq!(
             std::fs::read(root.join("attachments/img-1.png")).unwrap(),
             bytes
@@ -14508,7 +14952,7 @@ mod tests {
         assert_eq!(kind, "png");
         // Dropping the reference prunes the mirrored copy on next sync.
         app.sheets[1].content = "# Plan\n\nNo image.\n".to_string();
-        app.sync_icloud_mirror(&root);
+        app.sync_section_mirror(&root, Section::ICloud);
         assert!(!root.join("attachments/img-1.png").exists());
     }
 
@@ -17541,5 +17985,219 @@ mod tests {
             before, after,
             "group drag did not move the group: drop never landed"
         );
+    }
+
+    /// Test app with one Google Drive group + sheet alongside the samples.
+    fn google_app() -> WritingApp {
+        let mut app = sample_app();
+        let now = SystemTime::now();
+        app.groups.push(Group {
+            id: "g-drive".to_string(),
+            modified: now,
+            name: "Drive".to_string(),
+            section: Section::GoogleDrive,
+            expanded: true,
+            parent: None,
+        });
+        let gi = app.groups.len() - 1;
+        app.sheets.push(Sheet {
+            id: "s-drive".to_string(),
+            conflict_of: None,
+            section: Section::GoogleDrive,
+            content: "# GDoc\n\nfrom drive".to_string(),
+            group: Some(gi),
+            trashed: false,
+            modified: now,
+        });
+        app
+    }
+
+    #[test]
+    fn partition_splits_google_section() {
+        let _storage = isolate_storage();
+        let app = google_app();
+        let (gg, gmap) = WritingApp::partition_groups(&app.groups, Section::GoogleDrive);
+        assert_eq!(gg.len(), 1);
+        assert_eq!(gg[0].name, "Drive");
+        let gsheets = WritingApp::partition_sheets(&app.sheets, &gmap, Section::GoogleDrive);
+        assert_eq!(gsheets.len(), 1);
+        assert_eq!(gsheets[0].id, "s-drive");
+        // Remapped to file-local indices.
+        assert_eq!(gsheets[0].group, Some(0));
+        // The other sections stay out.
+        let (dg, _) = WritingApp::partition_groups(&app.groups, Section::Documents);
+        assert!(dg.iter().all(|g| g.section == Section::Documents));
+        assert!(!dg.iter().any(|g| g.name == "Drive"));
+    }
+
+    #[test]
+    fn merge_store_bytes_roundtrip_and_gate() {
+        let _storage = isolate_storage();
+        let source = google_app();
+        let (gg, gmap) = WritingApp::partition_groups(&source.groups, Section::GoogleDrive);
+        let gsheets = WritingApp::partition_sheets(&source.sheets, &gmap, Section::GoogleDrive);
+        let store = SavedLibrary {
+            version: 1,
+            groups: gg,
+            sheets: gsheets,
+            tombstones: Vec::new(),
+            sheet_order: Vec::new(),
+            selection: SidebarSelection::Filter(SmartFilter::All),
+            selected_sheet: 0,
+            selected_sheets: Vec::new(),
+            export_css: String::new(),
+            export_css_name: String::new(),
+            style_guide_added: true,
+            style_guide_version: 0,
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
+            export_format: ExportFormat::default(),
+            editor_font_size: default_editor_font_size(),
+            sidebars_visible: true,
+            library_visible: None,
+            sheets_visible: None,
+            word_goal: 0,
+            app_theme: AppTheme::default(),
+            editor_font_family: None,
+            selection_id: None,
+            selected_sheet_id: None,
+            selected_sheets_ids: Vec::new(),
+            icloud_dir: None,
+            dirty: false,
+        };
+        let bytes = serde_json::to_vec(&store).unwrap();
+        let mut groups = Vec::new();
+        let mut sheets = Vec::new();
+        let mut tombs = Vec::new();
+        let mut hashes = std::collections::HashMap::new();
+        assert!(WritingApp::merge_store_bytes(
+            &mut groups,
+            &mut sheets,
+            &mut tombs,
+            &bytes,
+            &mut hashes,
+            "gdrive"
+        ));
+        assert!(sheets.iter().any(|s| s.id == "s-drive"));
+        assert!(groups.iter().any(|g| g.id == "g-drive"));
+        // Identical bytes are a hash-gated no-op.
+        assert!(!WritingApp::merge_store_bytes(
+            &mut groups,
+            &mut sheets,
+            &mut tombs,
+            &bytes,
+            &mut hashes,
+            "gdrive"
+        ));
+        // Garbage never merges.
+        assert!(!WritingApp::merge_store_bytes(
+            &mut groups,
+            &mut sheets,
+            &mut tombs,
+            b"not json",
+            &mut hashes,
+            "other"
+        ));
+    }
+
+    #[test]
+    fn gdrive_build_push_packages_google_section() {
+        let _storage = isolate_storage();
+        let mut app = google_app();
+        app.gdrive.remote_exists = true;
+        let (json, files) = app.gdrive_build_push().expect("payload");
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(v["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|g| g["section"] == "GoogleDrive"));
+        assert!(v["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["section"] == "GoogleDrive"));
+        // Staged mirror file for the Google sheet.
+        assert!(
+            files.iter().any(|(p, b)| p.ends_with(".md")
+                && String::from_utf8_lossy(b).contains("# GDoc")),
+            "mirror missing: {:?}",
+            files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gdrive_build_push_skips_empty_unknown_remote() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        // No Google content and no known remote: summon nothing.
+        assert!(app.gdrive_build_push().is_none());
+        // Known remote with nothing local: still push (propagates deletions).
+        app.gdrive.remote_exists = true;
+        let (json, _) = app.gdrive_build_push().expect("payload");
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(v["sheets"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gdrive_pulled_event_merges_remote_sheet() {
+        let _storage = isolate_storage();
+        let mut app = google_app();
+        let remote = SavedLibrary {
+            version: 1,
+            groups: vec![Group {
+                id: "g-drive".to_string(),
+                modified: SystemTime::now(),
+                name: "Drive".to_string(),
+                section: Section::GoogleDrive,
+                expanded: true,
+                parent: None,
+            }],
+            sheets: vec![Sheet {
+                id: "s-remote".to_string(),
+                conflict_of: None,
+                section: Section::GoogleDrive,
+                content: "# Remote\n\nfrom another device".to_string(),
+                group: Some(0),
+                trashed: false,
+                modified: SystemTime::now(),
+            }],
+            selection: SidebarSelection::Filter(SmartFilter::All),
+            selected_sheet: 0,
+            selected_sheets: Vec::new(),
+            export_css: String::new(),
+            export_css_name: String::new(),
+            style_guide_added: true,
+            style_guide_version: 0,
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
+            export_format: ExportFormat::default(),
+            editor_font_size: default_editor_font_size(),
+            sidebars_visible: true,
+            library_visible: None,
+            sheets_visible: None,
+            word_goal: 0,
+            app_theme: AppTheme::default(),
+            editor_font_family: None,
+            selection_id: None,
+            selected_sheet_id: None,
+            selected_sheets_ids: Vec::new(),
+            tombstones: Vec::new(),
+            sheet_order: Vec::new(),
+            icloud_dir: None,
+            dirty: false,
+        };
+        let bytes = serde_json::to_vec(&remote).unwrap();
+        let ctx = egui::Context::default();
+        app.gdrive_on_event(
+            &ctx,
+            super::gdrive::DriveEvent::Pulled {
+                store_json: Some(bytes),
+                then_push: false,
+            },
+        );
+        assert!(app.sheets.iter().any(|s| s.id == "s-remote"));
+        assert!(app.gdrive.remote_exists);
+        assert!(!app.gdrive.busy);
     }
 }

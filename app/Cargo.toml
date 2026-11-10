@@ -19,6 +19,13 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 rfd = { version = "0.15", optional = true }
 arboard = "3"
+# Google Drive sync (background thread, blocking I/O; no async runtime).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+oauth2 = { version = "5", features = ["reqwest-blocking"] }
+tiny_http = "0.12"
+keyring = "3"
+url = "2"
+md5 = "0.7"
 # PDF font embedding (subsetted OpenType) + system font discovery. Both are
 # pure Rust; pinned exact while krilla is pre-1.0.
 krilla = { version = "=0.8.2", default-features = false, features = ["simple-text", "raster-images"] }

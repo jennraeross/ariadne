@@ -29,6 +29,7 @@ jobs:
     runs-on: macos-15
     env:
       VERSION: ${{ needs.check-tag.outputs.version }}
+      ARIADNE_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,6 +73,7 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.check-tag.outputs.version }}
+      ARIADNE_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -112,6 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.check-tag.outputs.version }}
+      ARIADNE_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
