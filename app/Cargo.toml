@@ -36,7 +36,6 @@ winres = "0.1"
 [package.metadata.deb]
 maintainer = "Jenn Royleance <jenn.rae.ross@gmail.com>"
 copyright = "2026, Jenn Royleance"
-license = "MIT"
 section = "editors"
 depends = "$auto"
 extended-description = """\

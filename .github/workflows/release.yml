@@ -26,7 +26,7 @@ jobs:
 
   build-macos:
     needs: check-tag
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       VERSION: ${{ needs.check-tag.outputs.version }}
     steps:
@@ -81,10 +81,19 @@ jobs:
       - name: Build
         run: cargo build --release --locked
         working-directory: app
-      - name: Smoke test (screenshot)
+      - name: Smoke test (screenshot, software GL)
         run: |
+          $mesa = "$env:TEMP\mesa"
+          New-Item -ItemType Directory -Force -Path $mesa | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://github.com/pal1000/mesa-dist-win/releases/download/26.2.6/mesa3d-26.2.6-release-msvc.7z" `
+            -OutFile "$mesa\mesa.7z"
+          & "C:\Program Files\7-Zip\7z.exe" x "$mesa\mesa.7z" -o"$mesa" -y | Out-Null
+          # llvmpipe provides OpenGL for the headless runner; it is NOT shipped.
+          Copy-Item "$mesa\x64\opengl32.dll" app\target\release\opengl32.dll
           .\app\target\release\ariadne.exe --screenshot $env:TEMP\smoke.png
           if ((Get-Item $env:TEMP\smoke.png).Length -lt 10000) { exit 1 }
+          Remove-Item app\target\release\opengl32.dll
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer
