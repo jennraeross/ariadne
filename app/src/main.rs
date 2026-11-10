@@ -1760,7 +1760,7 @@ impl WritingApp {
             ],
             sheets: vec![
                 Sheet {
-                    content: "# Welcome\n\nThis is a pure Rust, cross-platform writing workspace.\n\n## What you can do\n- Browse groups and sheets in the sidebar\n- Write and edit Markdown text\n- Add a new sheet\n- See word and character counts\n- Attach images with the paperclip button\n\n*This is a starter version built in clean room with placeholder sample content.*\n"
+                    content: "# Welcome\n\nThis is a pure Rust, cross-platform writing workspace.\n\n## What you can do\n- Browse groups and sheets in the sidebar\n- Write and edit Markdown text\n- Add a new sheet\n- See word and character counts\n- Drag and drop images to attach them\n\n*This is a starter version built in clean room with placeholder sample content.*\n"
                         .to_string(),
                     group: Some(0),
                     trashed: false,
@@ -1787,7 +1787,7 @@ impl WritingApp {
             export_css: String::new(),
             export_css_name: "Built-in".to_string(),
             style_guide_added: true,
-            style_guide_version: 14,
+            style_guide_version: 15,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
             font_db: None,
@@ -1809,7 +1809,9 @@ impl WritingApp {
             swipe_accum_x: 0.0,
             swipe_accum_y: 0.0,
             swipe_cooldown_until: 0.0,
-            show_export_popover: false,
+            // Docs hook: set ARIADNE_SCREENSHOT_POPOVER=1 to open the
+            // export popover from the first frame for screenshots.
+            show_export_popover: std::env::var("ARIADNE_SCREENSHOT_POPOVER").is_ok(),
             search_open: false,
             search_query: String::new(),
             search_focus: false,
@@ -1896,7 +1898,8 @@ impl WritingApp {
                 | app.ensure_style_guide_v11()
                 | app.ensure_style_guide_v12()
                 | app.ensure_style_guide_v13()
-                | app.ensure_style_guide_v14();
+                | app.ensure_style_guide_v14()
+                | app.ensure_style_guide_v15();
             app.ensure_visible_selection();
             if app.sheets.is_empty() {
                 app.selected_sheet = 0;
@@ -1955,7 +1958,7 @@ Put an image on its own line like this:
 
 `![A red sunset](attachment:abc123)`
 
-- Click the paperclip button in the top bar and pick a file to attach it. The app copies the file into its library folder and inserts the reference for you.
+- Drag and drop image files onto the window to attach them. The app copies the file into its library folder and inserts the reference for you.
 - Attached files stay on your machine; sharing a sheet only shares the `attachment:` reference, which breaks elsewhere.
 - A plain path works too (`![Alt](./photo.png)` resolves next to the library, absolute paths and `file://` URLs work as well), and web addresses (`https://…`) work in HTML and the preview.
 - Only PNG, JPEG, and GIF files are supported. Anything else is skipped with a status note, as are images whose files go missing.
@@ -2070,7 +2073,7 @@ blockquote {
     }
 
     /// Current revision of the built-in guide text.
-    const STYLE_GUIDE_VERSION: u32 = 14;
+    const STYLE_GUIDE_VERSION: u32 = 15;
 
     /// Bring a revision-0/1 guide up to date. Only the known v1 lines are
     /// touched, so anything the person added or reworded is preserved. Any
@@ -2206,7 +2209,7 @@ blockquote {
             }
             let before = sheet.content.len();
             let anchor = "- **Attached by you.** In the export menu, `Attach font file…` picks a `.ttf`, `.otf`, or `.ttc` file — for example a brand font that is not installed. Attached fonts win over installed ones with the same name. They are remembered by location: if the file moves, exports fall back with a status note.\n";
-            let section = "\n## Images\n\nPut an image on its own line like this:\n\n`![A red sunset](attachment:abc123)`\n\n- Click the paperclip button in the top bar and pick a file to attach it. The app copies the file into its library folder and inserts the reference for you.\n- Attached files stay on your machine; sharing a sheet only shares the `attachment:` reference, which breaks elsewhere.\n- A plain path works too (`![Alt](./photo.png)` resolves next to the library, absolute paths and `file://` URLs work as well), and web addresses (`https://…`) work in HTML and the preview.\n- Only PNG, JPEG, and GIF files are supported. Anything else is skipped with a status note, as are images whose files go missing.\n- In the editor, image lines stay as text; they render as pictures in the preview and in exports. Missing images show their alt text instead.\n";
+            let section = "\n## Images\n\nPut an image on its own line like this:\n\n`![A red sunset](attachment:abc123)`\n\n- Drag and drop image files onto the window to attach them. The app copies the file into its library folder and inserts the reference for you.\n- Attached files stay on your machine; sharing a sheet only shares the `attachment:` reference, which breaks elsewhere.\n- A plain path works too (`![Alt](./photo.png)` resolves next to the library, absolute paths and `file://` URLs work as well), and web addresses (`https://…`) work in HTML and the preview.\n- Only PNG, JPEG, and GIF files are supported. Anything else is skipped with a status note, as are images whose files go missing.\n- In the editor, image lines stay as text; they render as pictures in the preview and in exports. Missing images show their alt text instead.\n";
             if sheet.content.contains(anchor) && !sheet.content.contains("## Images\n") {
                 sheet.content = sheet.content.replace(anchor, &format!("{anchor}{section}"));
             }
@@ -2486,6 +2489,31 @@ blockquote {
             let new_manage = "3. Manage styles under the list: `Create New Style` starts one from a starter template (name it, write CSS, Save); the icon buttons edit the active style in the same editor (each built-in style opens as a copy under a new name, ready to customize), import a `.css` file from anywhere into the styles folder, or delete the active style file for good, returning to Built-in.\n";
             if sheet.content.contains(old_manage) {
                 sheet.content = sheet.content.replace(old_manage, new_manage);
+            }
+            if sheet.content.len() != before {
+                sheet.modified = SystemTime::now();
+            }
+        }
+        true
+    }
+
+    /// Bring a revision-14 (or older) guide up to the drag-and-drop images
+    /// revision: the Images section no longer names the removed paperclip
+    /// button. Only known lines change.
+    fn ensure_style_guide_v15(&mut self) -> bool {
+        if self.style_guide_version >= 15 {
+            return false;
+        }
+        self.style_guide_version = 15;
+        for sheet in self.sheets.iter_mut() {
+            if Self::inferred_title(&sheet.content) != "Export Style Guide" {
+                continue;
+            }
+            let before = sheet.content.len();
+            let old_attach = "- Click the paperclip button in the top bar and pick a file to attach it. The app copies the file into its library folder and inserts the reference for you.\n";
+            let new_attach = "- Drag and drop image files onto the window to attach them. The app copies the file into its library folder and inserts the reference for you.\n";
+            if sheet.content.contains(old_attach) {
+                sheet.content = sheet.content.replace(old_attach, new_attach);
             }
             if sheet.content.len() != before {
                 sheet.modified = SystemTime::now();
@@ -13413,6 +13441,30 @@ mod tests {
         assert!(!guide.contains("(Professional opens as a copy"));
         assert!(guide.contains("MY NOTE stays."));
         assert!(!app.ensure_style_guide_v14());
+    }
+
+    #[test]
+    fn style_guide_v15_updates_image_instructions() {
+        let _storage = isolate_storage();
+        // Exact v14 wording: v15 drops the removed paperclip button for
+        // drag and drop, keeping everything else.
+        let old = "# Export Style Guide\n\nPut an image on its own line like this:\n\n`![A red sunset](attachment:abc123)`\n\n- Click the paperclip button in the top bar and pick a file to attach it. The app copies the file into its library folder and inserts the reference for you.\n\nMY NOTE stays.\n";
+        let mut app = sample_app();
+        app.style_guide_added = true;
+        app.style_guide_version = 14;
+        app.sheets.push(Sheet {
+            content: old.to_string(),
+            group: Some(0),
+            trashed: false,
+            modified: SystemTime::now(),
+        });
+        assert!(app.ensure_style_guide_v15());
+        assert_eq!(app.style_guide_version, 15);
+        let guide = &app.sheets[2].content;
+        assert!(guide.contains("Drag and drop image files onto the window"));
+        assert!(!guide.contains("paperclip"));
+        assert!(guide.contains("MY NOTE stays."));
+        assert!(!app.ensure_style_guide_v15());
     }
 
     #[test]

@@ -7,6 +7,13 @@ to Markdown, HTML, PDF, Word (.docx), Rich Text (.rtf), and ePub.
 Built with [egui](https://github.com/emilk/egui) (`eframe`). No web views,
 no runtime beyond the OS GUI layer.
 
+![Ariadne library, sheets, and editor](app/assets/screenshots/hero.png)
+
+Export to Markdown, HTML, PDF, Word, Rich Text, and ePub with built-in
+styles (Manuscript, Student, Paperback Novel, Professional) or your own CSS:
+
+![Export popover with style list and format grid](app/assets/screenshots/export-popover.png)
+
 ## Run from source
 
 ```sh
