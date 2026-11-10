@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "ariadne"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "base64",
@@ -1046,6 +1046,7 @@ version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c46def610cf9486675aeec698d4e36a949ec0b0e1f6096135b0584dcfd52aa47"
 dependencies = [
+ "eframe",
  "egui",
  "kittest",
 ]
