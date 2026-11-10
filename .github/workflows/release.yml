@@ -1,0 +1,159 @@
+name: Release
+# Cut a release by pushing a version tag matching app/Cargo.toml:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches Cargo.toml version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(grep '^version' app/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag=$TAG cargo=$VER"
+          test "$TAG" = "$VER" || { echo "Tag $TAG does not match Cargo.toml $VER"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    needs: check-tag
+    runs-on: macos-14
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app -> target
+      - name: Build universal binary
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+        working-directory: app
+      - name: Bundle Ariadne.app and DMG
+        run: |
+          APP="staging/Ariadne.app/Contents"
+          mkdir -p "$APP/MacOS" "$APP/Resources"
+          lipo -create \
+            app/target/aarch64-apple-darwin/release/ariadne \
+            app/target/x86_64-apple-darwin/release/ariadne \
+            -output "$APP/MacOS/ariadne"
+          chmod +x "$APP/MacOS/ariadne"
+          cp app/assets/icon.icns "$APP/Resources/icon.icns"
+          sed "s/__VERSION__/${VERSION}/g" dist/macos/Info.plist > "$APP/Info.plist"
+          printf 'APPL????' > "$APP/PkgInfo"
+          ln -s /Applications staging/Applications
+          hdiutil create -volname Ariadne -srcfolder staging \
+            -ov -format UDZO "ariadne-${VERSION}-macos-universal.dmg"
+          rm staging/Applications
+      - name: Smoke test (screenshot)
+        run: |
+          ./staging/Ariadne.app/Contents/MacOS/ariadne --screenshot /tmp/smoke.png
+          test $(stat -f%z /tmp/smoke.png) -gt 10000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: ariadne-*.dmg
+
+  build-windows:
+    needs: check-tag
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app -> target
+      - name: Build
+        run: cargo build --release --locked
+        working-directory: app
+      - name: Smoke test (screenshot)
+        run: |
+          .\app\target\release\ariadne.exe --screenshot $env:TEMP\smoke.png
+          if ((Get-Item $env:TEMP\smoke.png).Length -lt 10000) { exit 1 }
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=$env:VERSION /Oinstaller dist\windows\app.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/*.exe
+
+  build-linux:
+    needs: check-tag
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app -> target
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev xvfb
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build .deb (compiles release + packages)
+        run: cargo deb --locked
+        working-directory: app
+      - name: Portable tarball
+        run: |
+          mkdir -p portable
+          cp app/target/release/ariadne portable/
+          cp app/assets/ariadne.desktop portable/
+          cp app/assets/icon-256.png portable/ariadne.png
+          tar -czf "ariadne-${VERSION}-linux-x86_64.tar.gz" -C portable .
+      - name: Smoke test (screenshot under Xvfb)
+        run: |
+          xvfb-run -a ./app/target/release/ariadne --screenshot /tmp/smoke.png
+          test $(stat -c%s /tmp/smoke.png) -gt 10000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            app/target/debian/*.deb
+            ariadne-*.tar.gz
+
+  publish:
+    needs: [check-tag, build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist-artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create GitHub Release
+        run: |
+          gh release create "v${VERSION}" --title "Ariadne ${VERSION}" \
+            --generate-notes dist-artifacts/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

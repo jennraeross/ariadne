@@ -10,9 +10,9 @@ targets = [
 ]
 
 [licenses]
-unlicensed = "deny"
-# Copyleft of any strength is rejected; everything else allowlisted below.
-copyleft = "deny"
+# Allowlist: anything not listed here fails the check. This keeps the tree
+# MIT-compatible — no copyleft (GPL/LGPL/AGPL) licenses are listed.
+# See https://spdx.org/licenses/ for identifiers.
 allow = [
   "MIT",
   "Apache-2.0",
@@ -30,17 +30,28 @@ allow = [
   "OFL-1.1",
   "Ubuntu-font-1.0",
 ]
+confidence-threshold = 0.8
 # Weak file-level copyleft: fine to link, notices stay intact.
 exceptions = [
-  { name = "option-ext", allow = ["MPL-2.0"] },
+  { allow = ["MPL-2.0"], crate = "option-ext" },
 ]
 
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-unmaintained = "warn"
-unsound = "warn"
+# Unmaintained notices fail only for crates we directly depend on;
+# transitive ones (egui/font/DBus stack) are out of our control.
+unmaintained = "workspace"
+# Ignored with justification; ignored advisories still print a note.
+# Vulnerabilities always fail unless ignored here.
+ignore = [
+  # quick-xml 0.30 is pinned by zbus_xml/wayland-scanner with no fixed 0.30
+  # release. In this app it parses only local build-time Wayland protocol
+  # files and local D-Bus introspection XML — no untrusted input.
+  { id = "RUSTSEC-2026-0194", reason = "no fixed 0.30 release; local-only XML input" },
+  { id = "RUSTSEC-2026-0195", reason = "no fixed 0.30 release; local-only XML input" },
+]
 
 [bans]
 multiple-versions = "warn"

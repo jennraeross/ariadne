@@ -30,5 +30,23 @@ dialogs = ["dep:rfd"]
 [dev-dependencies]
 egui_kittest = "0.31"
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[package.metadata.deb]
+maintainer = "Jenn Royleance <jenn.rae.ross@gmail.com>"
+copyright = "2026, Jenn Royleance"
+license = "MIT"
+section = "editors"
+depends = "$auto"
+extended-description = """\
+A pure-Rust, cross-platform writing workspace: library and sheets sidebar, \
+Markdown editing with live counts, and styled export to Markdown, HTML, PDF, \
+Word, Rich Text, and ePub."""
+assets = [
+  ["assets/ariadne.desktop", "usr/share/applications/", "644"],
+  ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/ariadne.png", "644"],
+]
+
 [profile.release]
 opt-level = 2
