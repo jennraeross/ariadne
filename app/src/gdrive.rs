@@ -299,9 +299,10 @@ impl Worker {
         if self.valid_token().is_err() {
             return DriveEvent::SignedOut;
         }
-        match self.fetch_email() {
-            Ok(email) => DriveEvent::Authed { email },
-            Err(e) => DriveEvent::AuthFailed(e),
+        // Email is display-only; never fail auth for it (e.g. a project
+        // that only granted the Drive scope).
+        DriveEvent::Authed {
+            email: self.fetch_email().unwrap_or_default(),
         }
     }
 
@@ -384,10 +385,10 @@ impl Worker {
         };
         self.token_store.save(&tokens);
         self.tokens = Some(tokens);
-        match self.fetch_email() {
-            Ok(email) => DriveEvent::Authed { email },
-            Err(e) => DriveEvent::AuthFailed(e),
-        }
+        // Email is display-only; the tokens are fresh by construction, so
+        // never fail the login for a userinfo hiccup.
+        let email = self.fetch_email().unwrap_or_default();
+        DriveEvent::Authed { email }
     }
 
     fn pull(&mut self, then_push: bool) -> DriveEvent {

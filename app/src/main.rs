@@ -4775,7 +4775,11 @@ blockquote {
                 self.gdrive.mode = GdriveMode::SignedIn;
                 self.gdrive.email = email.clone();
                 self.gdrive.busy = false;
-                self.status = format!("Signed in to Google Drive as {email}");
+                self.status = if email.is_empty() {
+                    "Signed in to Google Drive".to_string()
+                } else {
+                    format!("Signed in to Google Drive as {email}")
+                };
                 // Converge immediately: adopt remote edits, then push local.
                 self.gdrive_send(gdrive::DriveJob::Pull { then_push: true });
             }
