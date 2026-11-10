@@ -14,6 +14,22 @@ styles (Manuscript, Student, Paperback Novel, Professional) or your own CSS:
 
 ![Export popover with style list and format grid](app/assets/screenshots/export-popover.png)
 
+## iCloud sync (Mac)
+
+Groups in the **iCloud** section sync through iCloud Drive — no account or
+sign-in needed beyond having iCloud Drive enabled. The section is mirrored
+as a plain tree of folders and `.md` files, so it stays readable in Finder
+and Spotlight; the app's JSON store remains the source of truth and rewrites
+the mirror on every save. Documents stay local on each Mac.
+
+- Move the store under Settings → Sync (“Move iCloud section to iCloud
+  Drive”, or back). Moving unions both sides, never overwrites.
+- Editing the same sheet on two Macs keeps the newer version and preserves
+  the other as a `(conflict copy)` sheet for review (header badge → popup:
+  keep current, keep copy, or keep both).
+- Deletions sync via tombstones and stay deleted; trash still works as
+  before, per machine.
+
 ## Run from source
 
 ```sh

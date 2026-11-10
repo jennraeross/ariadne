@@ -4711,11 +4711,10 @@ blockquote {
         }
 
         // The iCloud store holds only the iCloud section (globals ride in
-        // the local file). Skip creating it until there is something to sync.
+        // the local file). Skip creating it until there is something to
+        // sync — an empty group alone doesn't summon the folder.
         if let Some(ipath) = icloud_path {
-            let has_content = !icloud_groups.is_empty()
-                || !icloud_sheets.is_empty()
-                || !icloud_tombs.is_empty();
+            let has_content = !icloud_sheets.is_empty() || !icloud_tombs.is_empty();
             if has_content || ipath.exists() {
                 let icloud_saved = SavedLibrary {
                     groups: icloud_groups,
