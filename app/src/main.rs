@@ -12599,7 +12599,7 @@ impl WritingApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.spacing_mut().item_spacing.y = 4.0;
                 let mut jump: Option<(usize, usize)> = None;
                 let mut apply: Option<(usize, usize, usize, grammar::AppliedSuggestion)> = None;
                 for issue in issues.iter().take(100) {
@@ -12610,22 +12610,28 @@ impl WritingApp {
                     } else {
                         issue.covered.clone()
                     };
-                    // Card look matches the sheet cards: filled frame with
-                    // comfortable padding instead of a bare separator.
+                    // Card look matches the sheet cards: inset rounded frame
+                    // with comfortable padding instead of a bare separator.
                     let card_width = ui.available_width();
                     let bg = self.app_theme.card_selected();
                     egui::Frame::new()
                         .fill(bg)
+                        .corner_radius(8.0)
                         .inner_margin(egui::Margin {
                             left: 12,
                             right: 10,
                             top: 10,
                             bottom: 10,
                         })
-                        .outer_margin(egui::Margin::same(0))
+                        .outer_margin(egui::Margin {
+                            left: 8,
+                            right: 8,
+                            top: 4,
+                            bottom: 4,
+                        })
                         .show(ui, |ui| {
-                            ui.set_min_width(card_width - 22.0);
-                            ui.set_max_width(card_width - 22.0);
+                            ui.set_min_width(card_width - 38.0);
+                            ui.set_max_width(card_width - 38.0);
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 6.0;
                                 // The problem, stated plainly and large.
@@ -13666,7 +13672,7 @@ impl eframe::App for WritingApp {
                 let scroll = ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.spacing_mut().item_spacing.y = 4.0;
                         for idx in visible.clone() {
                             let (display_title, preview) = self
                                 .sheets
@@ -13687,16 +13693,22 @@ impl eframe::App for WritingApp {
                             let render_card = |ui: &mut egui::Ui| {
                                 egui::Frame::new()
                                     .fill(bg)
+                                    .corner_radius(8.0)
                                     .inner_margin(egui::Margin {
                                         left: 12,
                                         right: 10,
                                         top: 10,
                                         bottom: 10,
                                     })
-                                    .outer_margin(egui::Margin::same(0))
+                                    .outer_margin(egui::Margin {
+                                        left: 8,
+                                        right: 8,
+                                        top: 4,
+                                        bottom: 4,
+                                    })
                                     .show(ui, |ui| {
-                                        ui.set_min_width(width - 22.0);
-                                        ui.set_max_width(width - 22.0);
+                                        ui.set_min_width(width - 38.0);
+                                        ui.set_max_width(width - 38.0);
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 4.0;
                                             ui.label(
@@ -13855,7 +13867,6 @@ impl eframe::App for WritingApp {
                             if resp.hovered() {
                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
-                            ui.separator();
                         }
                         if let Some((rect, after)) = mark {
                             let y = if after {
