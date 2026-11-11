@@ -23,6 +23,7 @@ arboard = "3"
 # pure Rust; pinned exact while krilla is pre-1.0.
 krilla = { version = "=0.8.2", default-features = false, features = ["simple-text", "raster-images"] }
 fontdb = "=0.24.0"
+harper-core = "3.0.0"
 
 [features]
 default = ["dialogs"]

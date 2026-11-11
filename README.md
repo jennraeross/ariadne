@@ -30,6 +30,21 @@ the mirror on every save. Documents stay local on each Mac.
 - Deletions sync via tombstones and stay deleted; trash still works as
   before, per machine.
 
+## Spelling, grammar, and style (offline)
+
+Checking runs fully on-device with [Harper](https://github.com/automerge/harper)
+— no account, no network, your text never leaves the Mac:
+
+- **Inline**: spelling and grammar mistakes get red/blue squiggles as you
+  type. Put the caret in one for a fix popup (apply, ignore, or add the
+  word to your dictionary).
+- **Style sidebar** (book icon in the header): concision and clarity notes —
+  wordy phrases, passive voice, redundancies — with click-to-jump and
+  one-click fixes. Its open/closed state is remembered across runs.
+- **Custom dictionary**: words you add sync across devices with the rest of
+  the library (removing one syncs the removal too); manage the list in
+  Settings, which is also where the master toggle lives.
+
 ## Run from source
 
 ```sh
