@@ -363,7 +363,7 @@ impl Worker {
             .request(&http);
         let token = match token {
             Ok(t) => t,
-            Err(e) => return DriveEvent::AuthFailed(format!("Token exchange failed: {e}")),
+            Err(e) => return DriveEvent::AuthFailed(friendly_token_error("exchange", &e)),
         };
         let refresh = match token.refresh_token() {
             Some(r) => r.secret().clone(),
@@ -653,6 +653,21 @@ pub fn open_url(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
+/// Explain the most common token-endpoint misconfiguration in plain
+/// language: a Web-application client ID (which mandates a secret) was
+/// used where a Desktop-app client ID (PKCE, no secret) is required.
+fn friendly_token_error(action: &str, e: &impl std::fmt::Display) -> String {
+    let msg = e.to_string();
+    if msg.contains("client_secret") {
+        return "Google rejected the sign-in: this looks like a Web-application \
+            OAuth client ID, which requires a client secret. Create a \
+            Desktop-app client ID instead (APIs & Services → Credentials) \
+            and update GOOGLE_CLIENT_ID."
+            .to_string();
+    }
+    format!("Token {action} failed: {msg}")
+}
+
 /// Wait for the OAuth redirect (validating `state`), with a 5-minute cap.
 fn wait_for_code(
     server: tiny_http::Server,
@@ -712,7 +727,7 @@ fn refresh_tokens(
     let token = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
         .request(http)
-        .map_err(|e| format!("Token refresh failed: {e}"))?;
+        .map_err(|e| friendly_token_error("refresh", &e))?;
     // Google may or may not rotate the refresh token; keep the old one when
     // it doesn't return a new one.
     let refresh = token
@@ -1209,6 +1224,17 @@ impl DriveFiles for MemoryDriveFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friendly_error_names_wrong_client_type() {
+        let msg = friendly_token_error(
+            "exchange",
+            &"invalid_request: client_secret is missing".to_string(),
+        );
+        assert!(msg.contains("Desktop-app"), "got: {msg}");
+        let plain = friendly_token_error("refresh", &"timeout".to_string());
+        assert!(plain.contains("Token refresh failed"));
+    }
 
     #[test]
     fn tokens_serde_roundtrip() {
