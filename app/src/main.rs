@@ -6055,7 +6055,13 @@ blockquote {
                         let mut fmt = base.clone();
                         fmt.color = theme.ed_strike();
                         fmt.strikethrough = Stroke::new(1.0, theme.ed_strike());
+                        // The `~~` markers stay in the job (dimmed, like
+                        // bold/italic): dropping them would shift every
+                        // galley char offset after them and misalign the
+                        // spelling squiggles on that line.
+                        job.append("~~", 0.0, dim_marker.clone());
                         job.append(inner, 0.0, fmt);
+                        job.append("~~", 0.0, dim_marker.clone());
                         i += end + 4;
                         continue;
                     }
@@ -6822,49 +6828,52 @@ blockquote {
                                     .order(egui::Order::Tooltip)
                                     .fixed_pos(anchor)
                                     .show(ui.ctx(), |ui| {
-                                        ui.set_max_width(300.0);
-                                        ui.label(
-                                            RichText::new(hit.message.clone()).small(),
-                                        );
-                                        for s in &hit.suggestions {
-                                            let label = match s {
-                                                grammar::AppliedSuggestion::Replace(t) => {
-                                                    format!("→ {}", Self::truncate_suggestion(t))
+                                        egui::Frame::popup(ui.style())
+                                            .show(ui, |ui| {
+                                                ui.set_max_width(300.0);
+                                                ui.label(
+                                                    RichText::new(hit.message.clone()).small(),
+                                                );
+                                                for s in &hit.suggestions {
+                                                    let label = match s {
+                                                        grammar::AppliedSuggestion::Replace(t) => {
+                                                            format!("→ {}", Self::truncate_suggestion(t))
+                                                        }
+                                                        grammar::AppliedSuggestion::InsertAfter(t) => {
+                                                            format!("+ {}", Self::truncate_suggestion(t))
+                                                        }
+                                                        grammar::AppliedSuggestion::Remove => {
+                                                            "Remove".to_string()
+                                                        }
+                                                    };
+                                                    if ui.button(label).clicked() {                                                grammar_action = Some(GrammarAction::Apply {
+                                                            sheet: sel,
+                                                            start: hit.start,
+                                                            end: hit.end,
+                                                            suggestion: s.clone(),
+                                                        });
+                                                    }
                                                 }
-                                                grammar::AppliedSuggestion::InsertAfter(t) => {
-                                                    format!("+ {}", Self::truncate_suggestion(t))
-                                                }
-                                                grammar::AppliedSuggestion::Remove => {
-                                                    "Remove".to_string()
-                                                }
-                                            };
-                                            if ui.button(label).clicked() {                                                grammar_action = Some(GrammarAction::Apply {
-                                                    sheet: sel,
-                                                    start: hit.start,
-                                                    end: hit.end,
-                                                    suggestion: s.clone(),
+                                                ui.horizontal(|ui| {
+                                                    if ui.small_button("Ignore").clicked() {
+                                                        grammar_action = Some(GrammarAction::Ignore {
+                                                            message: hit.message.clone(),
+                                                            covered: hit.covered.clone(),
+                                                        });
+                                                    }
+                                                    if hit.kind == grammar::IssueKind::Spelling
+                                                        && Self::is_single_word(&hit.covered)
+                                                    {
+                                                        if ui.small_button("Add to dictionary").clicked() {
+                                                            grammar_action = Some(
+                                                                GrammarAction::LearnWord(
+                                                                    hit.covered.clone(),
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
                                                 });
-                                            }
-                                        }
-                                        ui.horizontal(|ui| {
-                                            if ui.small_button("Ignore").clicked() {
-                                                grammar_action = Some(GrammarAction::Ignore {
-                                                    message: hit.message.clone(),
-                                                    covered: hit.covered.clone(),
-                                                });
-                                            }
-                                            if hit.kind == grammar::IssueKind::Spelling
-                                                && Self::is_single_word(&hit.covered)
-                                            {
-                                                if ui.small_button("Add to dictionary").clicked() {
-                                                    grammar_action = Some(
-                                                        GrammarAction::LearnWord(
-                                                            hit.covered.clone(),
-                                                        ),
-                                                    );
-                                                }
-                                            }
-                                        });
+                                            });
                                     });
                                 }
                             }
@@ -18596,6 +18605,57 @@ mod tests {
             before, after,
             "group drag did not move the group: drop never landed"
         );
+    }
+
+    /// The squiggle overlay maps Harper's source char offsets through the
+    /// editor galley, so the layouter must preserve every source char
+    /// exactly once, in order. Dropped or duplicated chars shift every
+    /// squiggle after them on that line.
+    #[test]
+    fn markdown_layouter_preserves_source_chars() {
+        egui::__run_test_ui(|ui| {
+            let lines = [
+                "plain Teh here",
+                "# Heading Teh",
+                "## Sub Teh head",
+                "### Deep Teh head",
+                "> quote Teh here",
+                "- item Teh here",
+                "* star Teh here",
+                "1. numbered Teh here",
+                "12. numbered Teh here",
+                "- [ ] task Teh here",
+                "- [x] done Teh here",
+                "inline `code Teh` here",
+                "**bold Teh** here",
+                "__bold Teh__ here",
+                "*italic Teh* here",
+                "_italic Teh_ here",
+                "~~strike Teh~~ here",
+                "[link Teh](https://example.com) here",
+                "bare https://example.com Teh here",
+                "mixed **bold** and *italic* and `code` Teh here",
+                "```",
+                "code Teh block",
+                "```",
+                "",
+                "   ",
+                "after blank Teh here",
+            ];
+            let text = lines.join("\n") + "\n";
+            let galley = WritingApp::markdown_layouter(
+                ui,
+                &text,
+                600.0,
+                17.0,
+                AppTheme::Light,
+                egui::FontId::proportional(17.0),
+            );
+            assert_eq!(
+                galley.job.text, text,
+                "layouter must preserve every source char in order"
+            );
+        });
     }
 
     #[test]
