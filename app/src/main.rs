@@ -825,7 +825,7 @@ struct WritingApp {
     search_focus: bool,
     /// Whether the history popup is open. Session-only.
     history_open: bool,
-    /// Group being renamed via the sheets-bar title editor, if any.
+    /// Group being renamed inline in the library list, if any.
     /// Stored by UUID so list reorders can't desync it. Session-only:
     /// cancelled on selection change, never persisted.
     group_rename: Option<String>,
@@ -2828,18 +2828,18 @@ blockquote {
         idx
     }
 
-    /// Start renaming `gi` via the sheets-bar title editor: select the
-    /// group so the header shows it, and prefill the draft.
+    /// Start renaming `gi` in place in the library list, prefilled with
+    /// the current name. Selection is untouched: the sheets panel simply
+    /// reflects the new name once committed.
     fn begin_group_rename(&mut self, gi: usize) {
         let Some(g) = self.groups.get(gi) else {
             return;
         };
         let (id, name) = (g.id.clone(), g.name.clone());
-        self.selection = SidebarSelection::Group(gi);
         self.start_group_rename(id, name);
     }
 
-    /// Arm the sheets-bar title editor for an already-selected group
+    /// Arm the inline library-row editor for an already-selected group
     /// (used right after creating one, whose default name is prefilled
     /// and selected so typing replaces it).
     fn start_group_rename(&mut self, id: String, draft: String) {
@@ -12419,6 +12419,12 @@ impl eframe::App for WritingApp {
                                 // grace: plain clicks select, real drags move.
                                 let drag_id =
                                     egui::Id::new(("group-drag", gi));
+                                // Inline rename: the row being renamed shows
+                                // a text field instead of its label.
+                                let renaming = self.group_rename.as_deref()
+                                    == self.groups.get(gi).map(|g| g.id.as_str());
+                                let rename_id = egui::Id::new("group_rename_field");
+                                let bright = self.app_theme.text_bright();
                                 // Caret clicks toggle; everything else selects.
                                 // (Caret edge derived from the row geometry;
                                 // kept in sync with the 24px row height and
@@ -12437,6 +12443,59 @@ impl eframe::App for WritingApp {
                                     24.0,
                                     selected,
                                     |child| {
+                                        if renaming {
+                                            child.spacing_mut().item_spacing.x =
+                                                2.0;
+                                            child.add_space(depth as f32 * 14.0);
+                                            child.add_space(14.0);
+                                            child.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut self.group_rename_draft,
+                                                )
+                                                .id(rename_id)
+                                                .frame(false)
+                                                .hint_text("Group name")
+                                                .desired_width(f32::INFINITY),
+                                            );
+                                            // Focus now that the widget
+                                            // exists, then select-all so
+                                            // typing replaces the default.
+                                            if self.group_rename_focus {
+                                                self.group_rename_focus = false;
+                                                child.memory_mut(|m| {
+                                                    m.request_focus(rename_id)
+                                                });
+                                                let len = self
+                                                    .group_rename_draft
+                                                    .chars()
+                                                    .count();
+                                                if let Some(mut state) =
+                                                    egui::TextEdit::load_state(
+                                                        child.ctx(),
+                                                        rename_id,
+                                                    )
+                                                {
+                                                    state.cursor.set_char_range(
+                                                        Some(
+                                                            egui::text::CCursorRange::two(
+                                                                egui::text::CCursor::new(
+                                                                    0,
+                                                                ),
+                                                                egui::text::CCursor::new(
+                                                                    len,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                    );
+                                                    egui::TextEdit::store_state(
+                                                        child.ctx(),
+                                                        rename_id,
+                                                        state,
+                                                    );
+                                                }
+                                            }
+                                            return;
+                                        }
                                         child.spacing_mut().item_spacing.x =
                                             2.0;
                                         child.add_space(depth as f32 * 14.0);
@@ -12464,7 +12523,7 @@ impl eframe::App for WritingApp {
                                             ))
                                             .size(15.0)
                                             .color(if selected {
-                                                self.app_theme.text_bright()
+                                                bright
                                             } else {
                                                 row_text
                                             }),
@@ -12522,6 +12581,26 @@ impl eframe::App for WritingApp {
                                     ctx.set_cursor_icon(
                                         egui::CursorIcon::PointingHand,
                                     );
+                                }
+                                // Inline rename keys: Enter commits (blank
+                                // reverts), Esc cancels, clicking away
+                                // abandons. The field surrenders focus on
+                                // commit/cancel so no dangling focus id
+                                // outlives the editor.
+                                if renaming {
+                                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                    if esc {
+                                        self.group_rename = None;
+                                        ui.memory_mut(|m| m.surrender_focus(rename_id));
+                                    } else if enter {
+                                        let draft = std::mem::take(&mut self.group_rename_draft);
+                                        self.group_rename = None;
+                                        ui.memory_mut(|m| m.surrender_focus(rename_id));
+                                        self.commit_group_rename(gi, &draft);
+                                    } else if resp.lost_focus() {
+                                        self.group_rename = None;
+                                    }
                                 }
                                 // Drags engage with egui's grace (only after
                                 // real movement), so clicks stay clicks.
@@ -12803,81 +12882,7 @@ impl eframe::App for WritingApp {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            // The displayed group, if the sheets list is
-                            // scoped to one.
-                            let displayed_group: Option<usize> = match self.selection {
-                                SidebarSelection::Group(g) => Some(g),
-                                SidebarSelection::Sheet(s) => {
-                                    self.sheets.get(s).and_then(|sh| sh.group)
-                                }
-                                _ => None,
-                            };
-                            // Rename editor when the target group is the one
-                            // shown here; a plain label otherwise.
-                            let renaming_here: Option<usize> = self
-                                .group_rename
-                                .as_ref()
-                                .and_then(|id| {
-                                    self.groups.iter().position(|g| &g.id == id)
-                                })
-                                .filter(|gi| Some(*gi) == displayed_group);
-                            if let Some(gi) = renaming_here {
-                                let edit_id = egui::Id::new("group_rename_field");
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(
-                                        &mut self.group_rename_draft,
-                                    )
-                                    .id(edit_id)
-                                    .hint_text("Group name")
-                                    .desired_width(f32::INFINITY),
-                                );
-                                // Focus after the widget exists, then
-                                // select-all so typing replaces the default.
-                                let mut just_focused = false;
-                                if self.group_rename_focus {
-                                    self.group_rename_focus = false;
-                                    ui.memory_mut(|m| m.request_focus(edit_id));
-                                    just_focused = true;
-                                }
-                                if just_focused {
-                                    // Select-all so typing replaces the
-                                    // default name outright.
-                                    let len = self
-                                        .group_rename_draft
-                                        .chars()
-                                        .count();
-                                    if let Some(mut state) =
-                                        egui::TextEdit::load_state(ui.ctx(), edit_id)
-                                    {
-                                        state.cursor.set_char_range(Some(
-                                            egui::text::CCursorRange::two(
-                                                egui::text::CCursor::new(0),
-                                                egui::text::CCursor::new(len),
-                                            ),
-                                        ));
-                                        egui::TextEdit::store_state(ui.ctx(), edit_id, state);
-                                    }
-                                }
-                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                if esc {
-                                    self.group_rename = None;
-                                    // The field is gone next frame: don't
-                                    // leave focus pointing at it.
-                                    ui.memory_mut(|m| m.surrender_focus(edit_id));
-                                } else if enter {
-                                    let draft =
-                                        std::mem::take(&mut self.group_rename_draft);
-                                    self.group_rename = None;
-                                    ui.memory_mut(|m| m.surrender_focus(edit_id));
-                                    self.commit_group_rename(gi, &draft);
-                                } else if resp.lost_focus() {
-                                    // Clicking away abandons the edit.
-                                    self.group_rename = None;
-                                }
-                            } else {
-                                ui.label(RichText::new(context_name).strong().size(13.0).color(self.app_theme.text_faint()));
-                            }
+                            ui.label(RichText::new(context_name).strong().size(13.0).color(self.app_theme.text_faint()));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -17713,11 +17718,12 @@ mod tests {
     }
 
     #[test]
-    fn begin_group_rename_selects_and_prefills() {
+    fn begin_group_rename_prefills_without_moving_selection() {
         let _storage = isolate_storage();
         let mut app = sample_app();
         app.begin_group_rename(1);
-        assert_eq!(app.selection, SidebarSelection::Group(1));
+        // Selection is untouched now that editing happens in the row.
+        assert_eq!(app.selection, SidebarSelection::Group(0));
         assert_eq!(app.group_rename_draft, "Inbox");
         assert!(app.group_rename_focus);
         assert!(app.group_rename.is_some());
