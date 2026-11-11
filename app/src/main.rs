@@ -12550,38 +12550,104 @@ impl WritingApp {
                 let mut jump: Option<(usize, usize)> = None;
                 let mut apply: Option<(usize, usize, usize, grammar::AppliedSuggestion)> = None;
                 for issue in issues.iter().take(100) {
-                    let excerpt = if issue.covered.chars().count() > 60 {
-                        let mut s: String = issue.covered.chars().take(59).collect();
+                    let excerpt = if issue.covered.chars().count() > 90 {
+                        let mut s: String = issue.covered.chars().take(89).collect();
                         s.push('…');
                         s
                     } else {
                         issue.covered.clone()
                     };
-                    if ui
-                        .button(RichText::new(format!("“{excerpt}”")).strong().size(13.0))
-                        .on_hover_text("Jump to this passage in the editor")
-                        .clicked()
-                    {
-                        jump = Some((sel, issue.start));
-                    }
-                    ui.label(RichText::new(issue.message.clone()).small().color(dim));
-                    ui.horizontal_wrapped(|ui| {
-                        for s in issue.suggestions.iter().take(3) {
-                            let label = match s {
-                                grammar::AppliedSuggestion::Replace(t) => {
-                                    format!("→ {}", Self::truncate_suggestion(t))
+                    // Card look matches the sheet cards: filled frame with
+                    // comfortable padding instead of a bare separator.
+                    let card_width = ui.available_width();
+                    let bg = self.app_theme.card_selected();
+                    egui::Frame::new()
+                        .fill(bg)
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 10,
+                            top: 10,
+                            bottom: 10,
+                        })
+                        .outer_margin(egui::Margin::same(0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(card_width - 22.0);
+                            ui.set_max_width(card_width - 22.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                // The problem, stated plainly and large.
+                                ui.label(
+                                    RichText::new(issue.message.clone())
+                                        .strong()
+                                        .size(14.0)
+                                        .color(self.app_theme.text_bright()),
+                                );
+                                // The flagged passage, dimmer and secondary.
+                                ui.label(
+                                    RichText::new(format!("“{excerpt}”"))
+                                        .size(12.5)
+                                        .italics()
+                                        .color(self.app_theme.text_faint()),
+                                );
+                                // The recommended fix, as the primary action.
+                                let mut primary: Option<&grammar::AppliedSuggestion> =
+                                    None;
+                                if let Some(first) = issue.suggestions.first() {
+                                    let label = match first {
+                                        grammar::AppliedSuggestion::Replace(t) => {
+                                            format!("Apply: {}", Self::truncate_suggestion(t))
+                                        }
+                                        grammar::AppliedSuggestion::InsertAfter(t) => {
+                                            format!("Apply: +{}", Self::truncate_suggestion(t))
+                                        }
+                                        grammar::AppliedSuggestion::Remove => {
+                                            "Apply: remove".to_string()
+                                        }
+                                    };
+                                    if ui
+                                        .add_sized(
+                                            Vec2::new(ui.available_width(), 26.0),
+                                            egui::Button::new(
+                                                RichText::new(label).strong().size(13.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        primary = Some(first);
+                                    }
                                 }
-                                grammar::AppliedSuggestion::InsertAfter(t) => {
-                                    format!("+ {}", Self::truncate_suggestion(t))
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.small_button("Show in editor").clicked() {
+                                        jump = Some((sel, issue.start));
+                                    }
+                                    for s in issue.suggestions.iter().skip(1).take(2) {
+                                        let label = match s {
+                                            grammar::AppliedSuggestion::Replace(t) => {
+                                                format!("→ {}", Self::truncate_suggestion(t))
+                                            }
+                                            grammar::AppliedSuggestion::InsertAfter(t) => {
+                                                format!("+ {}", Self::truncate_suggestion(t))
+                                            }
+                                            grammar::AppliedSuggestion::Remove => {
+                                                "Remove".to_string()
+                                            }
+                                        };
+                                        if ui.small_button(label).clicked() {
+                                            apply = Some((
+                                                sel,
+                                                issue.start,
+                                                issue.end,
+                                                s.clone(),
+                                            ));
+                                        }
+                                    }
+                                });
+                                if let Some(first) = primary {
+                                    apply = Some((sel, issue.start, issue.end, first.clone()));
                                 }
-                                grammar::AppliedSuggestion::Remove => "Remove".to_string(),
-                            };
-                            if ui.small_button(label).clicked() {
-                                apply = Some((sel, issue.start, issue.end, s.clone()));
-                            }
-                        }
-                    });
-                    ui.separator();
+                            });
+                        })
+                        .response;
                 }
                 if issues.len() > 100 {
                     ui.label(
