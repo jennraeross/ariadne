@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 mod grammar;
 
@@ -895,14 +895,11 @@ struct WritingApp {
     grammar: GrammarState,
 }
 
-/// Grammar checking session: a lazily built Harper checker over the
+/// Grammar checking session: a background Harper worker over the
 /// effective custom dictionary, plus a per-sheet lint cache keyed by
 /// content hash so idle frames cost nothing.
 #[derive(Default)]
 struct GrammarState {
-    checker: Option<grammar::Checker>,
-    /// Fingerprint of the dictionary the checker was built for.
-    built_for: u64,
     /// Sheet index -> last lint result.
     cache: std::collections::HashMap<usize, CachedLint>,
     /// Session-only ignores, keyed by (message, covered text).
@@ -915,12 +912,59 @@ struct GrammarState {
     dict_removes: std::collections::BTreeSet<String>,
     /// Style sidebar visibility (persisted).
     style_visible: bool,
+    /// Lazy background lint worker; never blocks the UI thread.
+    worker: Option<GrammarWorker>,
+    /// Sheet index -> latest un-linted content, with last-change time.
+    pending: std::collections::HashMap<usize, PendingLint>,
+    /// Sheet index -> content hash currently queued or running.
+    inflight: std::collections::HashMap<usize, u64>,
+    /// Bumped whenever the ignore set or dictionary changes so stale
+    /// in-flight results are discarded instead of cached.
+    generation: u64,
 }
 
 #[derive(Clone)]
 struct CachedLint {
     hash: u64,
     issues: Vec<grammar::Issue>,
+}
+
+/// How long after the last keystroke a re-lint waits: squiggles lag
+/// typing instead of flickering mid-word, and big pastes settle before
+/// the checker runs.
+const GRAMMAR_IDLE: Duration = Duration::from_secs(1);
+
+/// Most recent un-linted content for one sheet, with last-change time.
+struct PendingLint {
+    hash: u64,
+    last_change: Instant,
+}
+
+/// One background lint request (all owned: crosses threads).
+struct LintJob {
+    sheet: usize,
+    hash: u64,
+    generation: u64,
+    text: String,
+    words: std::collections::BTreeSet<String>,
+    ignored: std::collections::HashSet<(String, String)>,
+}
+
+/// A finished background lint, matched to content by hash and to the
+/// ignore/dictionary state by generation.
+struct LintResult {
+    sheet: usize,
+    hash: u64,
+    generation: u64,
+    issues: Vec<grammar::Issue>,
+}
+
+/// Lone background lint thread: owns the Harper checker (rebuilt only
+/// when the custom dictionary changes) so the UI thread never blocks,
+/// however large the paste.
+struct GrammarWorker {
+    jobs: std::sync::mpsc::Sender<LintJob>,
+    results: std::sync::mpsc::Receiver<LintResult>,
 }
 
 /// A grammar fix to apply after the overlay pass (the overlay only reads).
@@ -3675,8 +3719,10 @@ blockquote {
         }
     }
 
-    /// Re-lint `sel` when its content changed (hash-gated, so idle frames
-    /// cost nothing). Skipped when checking is off or the doc is huge.
+    /// Queue a background re-lint of `sel` when its content changed.
+    /// Never blocks: a sheet with no cached pass lints right away on the
+    /// worker, while edited sheets wait one idle second so typing (and
+    /// big pastes) stay smooth and squiggles lag words, not letters.
     /// Split out so it can borrow sheets and grammar state separately.
     fn refresh_grammar_for_sheets(
         sheets: &[Sheet],
@@ -3686,26 +3732,153 @@ blockquote {
         let Some(sheet) = sheets.get(sel) else {
             return;
         };
+        if !grammar.enabled || sheet.content.chars().count() > grammar::MAX_LINT_CHARS {
+            grammar.cache.remove(&sel);
+            grammar.pending.remove(&sel);
+            grammar.inflight.remove(&sel);
+            return;
+        }
         let hash = Self::hash_bytes(sheet.content.as_bytes());
+        if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
+            grammar.pending.remove(&sel);
+            return;
+        }
+        // Collect finished background lints. Only results matching the
+        // current content hash and generation land in the cache; older
+        // ones are stale and drop.
+        if let Some(worker) = grammar.worker.as_ref() {
+            while let Ok(res) = worker.results.try_recv() {
+                grammar.inflight.remove(&res.sheet);
+                if res.generation != grammar.generation {
+                    continue;
+                }
+                if let Some(current) = sheets.get(res.sheet) {
+                    if Self::hash_bytes(current.content.as_bytes()) == res.hash {
+                        grammar.cache.insert(
+                            res.sheet,
+                            CachedLint {
+                                hash: res.hash,
+                                issues: res.issues,
+                            },
+                        );
+                        grammar.pending.remove(&res.sheet);
+                    }
+                }
+            }
+            if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
+                grammar.pending.remove(&sel);
+                return;
+            }
+        }
+        // This exact content is already queued or running.
+        if grammar.inflight.get(&sel) == Some(&hash) {
+            return;
+        }
+        // Debounce: the pending clock resets on every change, so it
+        // measures one full idle second since typing stopped.
+        let now = Instant::now();
+        let last_change = match grammar.pending.entry(sel) {
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if o.get().hash != hash {
+                    o.insert(PendingLint {
+                        hash,
+                        last_change: now,
+                    });
+                    now
+                } else {
+                    o.get().last_change
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(PendingLint {
+                    hash,
+                    last_change: now,
+                });
+                now
+            }
+        };
+        if grammar.cache.contains_key(&sel) && now.duration_since(last_change) < GRAMMAR_IDLE {
+            return;
+        }
+        let worker = grammar.worker.get_or_insert_with(|| {
+            let (job_tx, job_rx) = std::sync::mpsc::channel::<LintJob>();
+            let (res_tx, res_rx) = std::sync::mpsc::channel::<LintResult>();
+            std::thread::spawn(move || Self::grammar_worker_loop(job_rx, res_tx));
+            GrammarWorker {
+                jobs: job_tx,
+                results: res_rx,
+            }
+        });
+        let adds: Vec<String> = grammar.dict_adds.iter().cloned().collect();
+        let removes: Vec<String> = grammar.dict_removes.iter().cloned().collect();
+        let job = LintJob {
+            sheet: sel,
+            hash,
+            generation: grammar.generation,
+            text: sheet.content.clone(),
+            words: grammar::effective_words(&adds, &removes),
+            ignored: grammar.ignored.clone(),
+        };
+        if worker.jobs.send(job).is_ok() {
+            grammar.inflight.insert(sel, hash);
+        } else {
+            // Worker died; drop it so the next frame rebuilds it.
+            grammar.worker = None;
+        }
+    }
+
+    /// Background lint loop for [`GrammarState::worker`]: owns one Harper
+    /// checker, rebuilding it only when the custom dictionary changes.
+    /// Jobs run strictly in order so every send gets its result and the
+    /// main thread's hash/generation checks stay decisive.
+    fn grammar_worker_loop(
+        jobs: std::sync::mpsc::Receiver<LintJob>,
+        results: std::sync::mpsc::Sender<LintResult>,
+    ) {
+        let mut checker: Option<grammar::Checker> = None;
+        let mut built_for: u64 = 0;
+        while let Ok(job) = jobs.recv() {
+            let fingerprint = grammar::dictionary_fingerprint(&job.words);
+            let active = match checker.as_mut() {
+                Some(c) if built_for == fingerprint => c,
+                _ => {
+                    checker = Some(grammar::Checker::new(&job.words));
+                    built_for = fingerprint;
+                    checker.as_mut().expect("just built")
+                }
+            };
+            let issues = active.lint(&job.text, &job.ignored);
+            let res = LintResult {
+                sheet: job.sheet,
+                hash: job.hash,
+                generation: job.generation,
+                issues,
+            };
+            if results.send(res).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Synchronous lint for tests: the same result as the worker path,
+    /// but immediate and deterministic (no debounce, no threads).
+    #[cfg(test)]
+    fn lint_grammar_for_tests(sheets: &[Sheet], grammar: &mut GrammarState, sel: usize) {
+        let Some(sheet) = sheets.get(sel) else {
+            return;
+        };
         if !grammar.enabled || sheet.content.chars().count() > grammar::MAX_LINT_CHARS {
             grammar.cache.remove(&sel);
             return;
         }
+        let hash = Self::hash_bytes(sheet.content.as_bytes());
         if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
             return;
         }
         let adds: Vec<String> = grammar.dict_adds.iter().cloned().collect();
         let removes: Vec<String> = grammar.dict_removes.iter().cloned().collect();
         let words = grammar::effective_words(&adds, &removes);
-        let fingerprint = grammar::dictionary_fingerprint(&words);
-        let checker = match grammar.checker.as_mut() {
-            Some(c) if grammar.built_for == fingerprint => c,
-            _ => {
-                grammar.checker = Some(grammar::Checker::new(&words));
-                grammar.built_for = fingerprint;
-                grammar.checker.as_mut().expect("just built")
-            }
-        };
+        let mut checker = grammar::Checker::new(&words);
         let issues = checker.lint(&sheet.content, &grammar.ignored);
         grammar.cache.insert(sel, CachedLint { hash, issues });
     }
@@ -6742,11 +6915,13 @@ blockquote {
                     self.grammar.ignored.insert((message, covered));
                     // Drop the cached pass so the flag vanishes now.
                     self.grammar.cache.remove(&sel);
+                    self.grammar.generation += 1;
                 }
                 GrammarAction::LearnWord(word) => {
                     self.grammar.dict_removes.remove(&word);
                     self.grammar.dict_adds.insert(word);
                     self.grammar.cache.remove(&sel);
+                    self.grammar.generation += 1;
                     self.save_library();
                     self.status = "Added to dictionary".to_string();
                 }
@@ -11694,6 +11869,7 @@ blockquote {
                     .changed()
                 {
                     self.grammar.cache.clear();
+                    self.grammar.generation += 1;
                     self.save_library();
                 }
                 ui.horizontal(|ui| {
@@ -11722,6 +11898,7 @@ blockquote {
                         self.grammar.dict_adds.remove(&w);
                         self.grammar.dict_removes.insert(w);
                         self.grammar.cache.clear();
+                        self.grammar.generation += 1;
                         self.save_library();
                         self.status = "Removed from dictionary".to_string();
                     }
@@ -13111,6 +13288,9 @@ impl eframe::App for WritingApp {
                                 let caret_right = caret_left
                                     + depth as f32 * 14.0
                                     + 14.0;
+                                // Whether the group name is clipped with an
+                                // ellipsis (set inside the row closure).
+                                let mut name_clipped = false;
                                 let mut resp = full_width_row(
                                     ui,
                                     drag_id,
@@ -13189,20 +13369,40 @@ impl eframe::App for WritingApp {
                                         } else {
                                             child.add_space(14.0);
                                         }
-                                        full_width_row_label(
-                                            child,
-                                            RichText::new(format!(
-                                                "{}  {}",
-                                                icon::FOLDER,
-                                                name
-                                            ))
-                                            .size(15.0)
-                                            .color(if selected {
-                                                bright
-                                            } else {
-                                                row_text
-                                            }),
-                                        );
+                                        // Long names truncate with an ellipsis
+                                        // instead of spilling past the row
+                                        // highlight; the full name shows on
+                                        // hover (tooltips wait ~0.5s).
+                                        let full_label =
+                                            format!("{}  {}", icon::FOLDER, name);
+                                        let label_color = if selected {
+                                            bright
+                                        } else {
+                                            row_text
+                                        };
+                                        let room = child.available_width() - 4.0;
+                                        let full_width = child.fonts(|f| {
+                                            f.layout(
+                                                full_label.clone(),
+                                                egui::FontId::proportional(15.0),
+                                                label_color,
+                                                f32::INFINITY,
+                                            )
+                                            .rect
+                                            .width()
+                                        });
+                                        name_clipped = full_width > room;
+                                        let mut group_label = egui::Label::new(
+                                            RichText::new(full_label)
+                                                .size(15.0)
+                                                .color(label_color),
+                                        )
+                                        .selectable(false)
+                                        .sense(egui::Sense::hover());
+                                        if name_clipped {
+                                            group_label = group_label.truncate();
+                                        }
+                                        child.add(group_label);
                                     },
                                 );
                                 let in_caret = has_children
@@ -13219,6 +13419,8 @@ impl eframe::App for WritingApp {
                                     } else {
                                         "Expand group"
                                     });
+                                } else if name_clipped {
+                                    resp = resp.on_hover_text(name.clone());
                                 }
                                 if resp.clicked() {
                                     action = Some(if in_caret {
@@ -18403,11 +18605,11 @@ mod tests {
         app.sheets[0].content = "Teh test.\n".to_string();
         // Disabled: nothing cached.
         app.grammar.enabled = false;
-        WritingApp::refresh_grammar_for_sheets(&app.sheets, &mut app.grammar, 0);
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
         assert!(app.grammar.cache.get(&0).is_none());
         // Enabled: spelling issue appears and sticks in cache.
         app.grammar.enabled = true;
-        WritingApp::refresh_grammar_for_sheets(&app.sheets, &mut app.grammar, 0);
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
         let cached = app.grammar.cache.get(&0).expect("lint cached");
         assert!(cached
             .issues
@@ -18415,11 +18617,11 @@ mod tests {
             .any(|i| i.kind == grammar::IssueKind::Spelling && i.covered == "Teh"));
         // Same content: cache entry reused, no recompute needed.
         let hash_before = cached.hash;
-        WritingApp::refresh_grammar_for_sheets(&app.sheets, &mut app.grammar, 0);
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
         assert_eq!(app.grammar.cache.get(&0).unwrap().hash, hash_before);
         // New content: recomputed.
         app.sheets[0].content = "All clean here.\n".to_string();
-        WritingApp::refresh_grammar_for_sheets(&app.sheets, &mut app.grammar, 0);
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
         assert!(app.grammar.cache.get(&0).unwrap().issues.is_empty());
     }
 
@@ -18429,7 +18631,7 @@ mod tests {
         let mut app = sample_app();
         app.sheets[0].content = "Teh test.\n".to_string();
         app.grammar.enabled = true;
-        WritingApp::refresh_grammar_for_sheets(&app.sheets, &mut app.grammar, 0);
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
         let issue = app.grammar.cache.get(&0).unwrap().issues.iter().find(|i| i.covered == "Teh").unwrap().clone();
         let suggestion = issue.suggestions.into_iter().find(|s| matches!(
             s,
@@ -18537,6 +18739,21 @@ mod tests {
             .get_by_role(egui::accesskit::Role::MultilineTextInput)
             .type_text(" Teh");
         harness.run();
+
+        // The lint runs on a background worker (never blocking typing),
+        // so wait for the typo to be flagged before querying the popup.
+        let mut flagged = false;
+        for _ in 0..200 {
+            harness.run();
+            let st = harness.state();
+            let sel = st.selected_sheet;
+            if st.grammar.cache.get(&sel).map(|c| !c.issues.is_empty()).unwrap_or(false) {
+                flagged = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(flagged, "background lint never flagged the typo");
 
         // The fix popup offers the correction; taking it fixes the sheet.
         let fix = harness.get_by_label("→ The");
