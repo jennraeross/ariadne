@@ -12207,6 +12207,10 @@ blockquote {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_min_width(600.0);
+                // Roomier modal type: everything without an explicit size
+                // inherits this instead of the default body text.
+                ui.style_mut().override_font_id =
+                    Some(egui::FontId::proportional(16.0));
                 ui.horizontal(|ui| {
                     // Left nav: one tab per settings area.
                     ui.vertical(|ui| {
@@ -12219,7 +12223,10 @@ blockquote {
                             SettingsTab::Sync,
                         ] {
                             if ui
-                                .selectable_label(self.settings_tab == tab, tab.title())
+                                .selectable_label(
+                                    self.settings_tab == tab,
+                                    RichText::new(tab.title()).size(17.0),
+                                )
                                 .clicked()
                             {
                                 self.settings_tab = tab;
@@ -12236,7 +12243,7 @@ blockquote {
                             .show(ui, |ui| {
                                 match self.settings_tab {
                                 SettingsTab::Appearance => {
-                ui.label(RichText::new("Theme").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Theme").size(16.0).color(self.app_theme.text_dim()));
                 ui.horizontal(|ui| {
                     for theme in [AppTheme::Dark, AppTheme::Light] {
                         if ui
@@ -12250,7 +12257,7 @@ blockquote {
                 });
                                 }
                                 SettingsTab::Editor => {
-                ui.label(RichText::new("Editor").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Editor").size(16.0).color(self.app_theme.text_dim()));
                 ui.horizontal(|ui| {
                     ui.label("Font:");
                     let current = self
@@ -12352,7 +12359,7 @@ blockquote {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(420.0);
                 // iCloud sync for the iCloud section (Documents stays local).
-                ui.label(RichText::new("Sync").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Sync").size(16.0).color(self.app_theme.text_dim()));
                 let using_drive = Self::icloud_drive_dir().is_some();
                 let on_drive = Self::icloud_store_dir(self.icloud_dir.as_deref())
                     .map(|d| Some(d) == Self::icloud_drive_dir().map(|dd| dd.join("Ariadne")))
@@ -12399,7 +12406,7 @@ blockquote {
                 // OAuth in the browser; tokens stay in the OS keychain.
                 ui.label(
                     RichText::new("Google Drive")
-                        .small()
+                        .size(16.0)
                         .color(self.app_theme.text_dim()),
                 );
                 let gdrive_status = match self.gdrive.mode {
@@ -12647,6 +12654,10 @@ blockquote {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_min_width(560.0);
+                // Bound the content height so the style list has a full
+                // column to expand into (an auto-sized window is
+                // unbounded, which collapses scroll areas to content).
+                ui.set_min_height(460.0);
                 let targets = self.export_targets();
                 let count = targets.len();
                 ui.label(
@@ -12675,7 +12686,12 @@ blockquote {
                         ui.set_max_width(240.0);
                         ui.label(RichText::new("Style").small().color(self.app_theme.text_dim()));
                         ScrollArea::vertical()
-                            .max_height(300.0)
+                            // Tall enough to fill the column at the modal's
+                            // default size: the row is tall (driven by the
+                            // right pane) but the list won't claim the
+                            // leftover height on its own.
+                            .min_scrolled_height(280.0)
+                            .max_height(420.0)
                             .auto_shrink([false; 2])
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
@@ -13210,7 +13226,14 @@ impl WritingApp {
     /// a progress bar against the current selection, and counts.
     fn show_goals_sidebar(&mut self, ui: &mut egui::Ui) {
         let dim = self.app_theme.text_dim();
-        ui.label(RichText::new("Writing goals").size(12.5).color(dim));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Writing goals").size(12.5).color(dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Close goals").clicked() {
+                    self.goals_visible = false;
+                }
+            });
+        });
         ui.add_space(8.0);
         let words = self.selection_words();
         if self.word_goal == 0 {
@@ -13287,7 +13310,14 @@ impl WritingApp {
     /// spelling + grammar; this panel owns clarity and concision.
     fn show_style_sidebar(&mut self, ui: &mut egui::Ui) {
         let dim = self.app_theme.text_dim();
-        ui.label(RichText::new("Style").size(12.5).color(dim));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Style").size(12.5).color(dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Close style").clicked() {
+                    self.grammar.style_visible = false;
+                }
+            });
+        });
         ui.add_space(8.0);
         if !self.grammar.enabled {
             ui.label("Turn on “Check spelling and grammar as I type” in Settings to see style suggestions.");
