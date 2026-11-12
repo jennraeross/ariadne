@@ -966,6 +966,20 @@ impl SettingsTab {
     }
 }
 
+/// One runnable entry in the command palette.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaletteCommand {
+    NewSheet,
+    ToggleSidebars,
+    History,
+    Export,
+    Goals,
+    Style,
+    Settings,
+    SettingsTab(SettingsTab),
+    ToggleTheme,
+}
+
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum GdriveMode {
     #[default]
@@ -11936,6 +11950,90 @@ blockquote {
         self.search_cursor = 0;
     }
 
+    /// Shortcut label with friendlier key names than egui's defaults
+    /// ("⌘," instead of "⌘Comma").
+    fn shortcut_label(
+        ctx: &egui::Context,
+        mods: egui::Modifiers,
+        key: egui::Key,
+    ) -> String {
+        ctx.format_shortcut(&egui::KeyboardShortcut::new(mods, key))
+            .replace("Comma", ",")
+            .replace("Slash", "/")
+    }
+
+    /// (Title, optional shortcut, action) for every palette command.
+    /// Shortcuts mirror the headerbar buttons.
+    fn palette_commands() -> Vec<(&'static str, Option<(egui::Modifiers, egui::Key)>, PaletteCommand)> {
+        use egui::Modifiers as M;
+        vec![
+            ("New sheet", Some((M::COMMAND, egui::Key::N)), PaletteCommand::NewSheet),
+            ("Toggle sidebars", Some((M::COMMAND, egui::Key::B)), PaletteCommand::ToggleSidebars),
+            ("Open settings", Some((M::COMMAND, egui::Key::Comma)), PaletteCommand::Settings),
+            ("Settings: Appearance", None, PaletteCommand::SettingsTab(SettingsTab::Appearance)),
+            ("Settings: Editor", None, PaletteCommand::SettingsTab(SettingsTab::Editor)),
+            ("Settings: Checking", None, PaletteCommand::SettingsTab(SettingsTab::Checking)),
+            ("Settings: Sync", None, PaletteCommand::SettingsTab(SettingsTab::Sync)),
+            ("Toggle theme", None, PaletteCommand::ToggleTheme),
+            ("Share / export", Some((M::COMMAND, egui::Key::E)), PaletteCommand::Export),
+            ("Show history", Some((M::COMMAND, egui::Key::Y)), PaletteCommand::History),
+            ("Writing goals", Some((M::COMMAND, egui::Key::G)), PaletteCommand::Goals),
+            ("Style suggestions", Some((M::COMMAND, egui::Key::Slash)), PaletteCommand::Style),
+        ]
+    }
+
+    /// Run a palette command (same effects as the headerbar buttons).
+    fn run_palette_command(&mut self, cmd: PaletteCommand) {
+        match cmd {
+            PaletteCommand::NewSheet => self.create_sheet(),
+            PaletteCommand::ToggleSidebars => {
+                let show = !(self.library_visible && self.sheets_visible);
+                self.library_visible = show;
+                self.sheets_visible = show;
+                self.save_library();
+            }
+            PaletteCommand::History => {
+                self.history_open = !self.history_open;
+            }
+            PaletteCommand::Export => {
+                self.show_export_popover = !self.show_export_popover;
+            }
+            PaletteCommand::Goals => {
+                self.goals_visible = !self.goals_visible;
+                if self.goals_visible {
+                    self.grammar.style_visible = false;
+                    self.goal_draft = if self.word_goal == 0 {
+                        String::new()
+                    } else {
+                        self.word_goal.to_string()
+                    };
+                }
+            }
+            PaletteCommand::Style => {
+                self.grammar.style_visible = !self.grammar.style_visible;
+                if self.grammar.style_visible {
+                    self.goals_visible = false;
+                }
+                self.save_library();
+            }
+            PaletteCommand::Settings => {
+                self.settings_open = true;
+            }
+            PaletteCommand::SettingsTab(tab) => {
+                self.settings_tab = tab;
+                self.settings_open = true;
+            }
+            PaletteCommand::ToggleTheme => {
+                self.app_theme = if self.app_theme == AppTheme::Dark {
+                    AppTheme::Light
+                } else {
+                    AppTheme::Dark
+                };
+                self.save_library();
+            }
+        }
+    }
+
     /// Char-offset ranges of `query` in `content`, non-overlapping.
     /// Case-insensitive unless `case` is set (per-char folding keeps
     /// indices aligned with the source text).
@@ -12151,6 +12249,7 @@ blockquote {
         }
         let mut open = true;
         let mut jump: Option<usize> = None;
+        let mut run: Option<PaletteCommand> = None;
         egui::Window::new("Search sheets")
             .open(&mut open)
             .collapsible(false)
@@ -12173,7 +12272,7 @@ blockquote {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.search_query)
                         .id(field)
-                        .hint_text("Search sheets…")
+                        .hint_text("Type a command or search sheets…")
                         .font(egui::FontId::proportional(26.0))
                         .margin(egui::Vec2::new(12.0, 10.0))
                         .desired_width(f32::INFINITY),
@@ -12184,35 +12283,65 @@ blockquote {
                 let confirm = resp.lost_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let query = self.search_query.trim().to_string();
-                if !query.is_empty() {
-                    let hits: Vec<usize> = self
-                        .sheets
+                // Sheets matching the query, plus palette commands (all of
+                // them when the query is empty).
+                let sheet_hits: Vec<usize> = if query.is_empty() {
+                    Vec::new()
+                } else {
+                    self.sheets
                         .iter()
                         .enumerate()
                         .filter(|(_, s)| !s.trashed && Self::sheet_matches(s, &query))
                         .map(|(i, _)| i)
-                        .collect();
-                    if confirm && !hits.is_empty() {
-                        let at = self.search_cursor.min(hits.len() - 1);
-                        jump = Some(hits[at]);
+                        .collect()
+                };
+                let commands = Self::palette_commands();
+                let needle = query.to_lowercase();
+                let cmd_hits: Vec<usize> = commands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (title, _, _))| {
+                        needle.is_empty()
+                            || title.to_lowercase().contains(&needle as &str)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let total = sheet_hits.len() + cmd_hits.len();
+                if total > 0 {
+                    self.search_cursor = self.search_cursor.min(total - 1);
+                } else {
+                    self.search_cursor = 0;
+                }
+                if confirm && total > 0 {
+                    let at = self.search_cursor.min(total - 1);
+                    if at < sheet_hits.len() {
+                        jump = Some(sheet_hits[at]);
+                    } else if let Some(&ci) = cmd_hits.get(at - sheet_hits.len()) {
+                        run = Some(commands[ci].2);
                     }
-                    if go_up && !hits.is_empty() {
-                        self.search_cursor = self
-                            .search_cursor
-                            .checked_sub(1)
-                            .unwrap_or(hits.len() - 1)
-                            .min(hits.len() - 1);
-                    }
-                    if go_down && !hits.is_empty() {
-                        self.search_cursor =
-                            (self.search_cursor + 1) % hits.len();
-                    }
-                    ui.separator();
-                    ScrollArea::vertical()
-                        .max_height(380.0)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            for (n, idx) in hits.iter().enumerate() {
+                }
+                if go_up && total > 0 {
+                    self.search_cursor = self
+                        .search_cursor
+                        .checked_sub(1)
+                        .unwrap_or(total - 1)
+                        .min(total - 1);
+                }
+                if go_down && total > 0 {
+                    self.search_cursor = (self.search_cursor + 1) % total;
+                }
+                ui.separator();
+                ScrollArea::vertical()
+                    .max_height(380.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        if !sheet_hits.is_empty() {
+                            ui.label(
+                                RichText::new("Sheets")
+                                    .small()
+                                    .color(self.app_theme.text_dim()),
+                            );
+                            for (n, idx) in sheet_hits.iter().enumerate() {
                                 let (title, group) = self
                                     .sheets
                                     .get(*idx)
@@ -12237,27 +12366,67 @@ blockquote {
                                     jump = Some(*idx);
                                 }
                             }
-                            if hits.is_empty() {
-                                ui.label(
-                                    RichText::new("No sheets match")
-                                        .small()
-                                        .color(self.app_theme.text_dim()),
-                                );
+                        }
+                        if !cmd_hits.is_empty() {
+                            ui.label(
+                                RichText::new("Commands")
+                                    .small()
+                                    .color(self.app_theme.text_dim()),
+                            );
+                            for (m, ci) in cmd_hits.iter().enumerate() {
+                                let (title, shortcut, cmd) = &commands[*ci];
+                                let n = sheet_hits.len() + m;
+                                let mut run_here = false;
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            n == self.search_cursor,
+                                            RichText::new(*title).size(17.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        run_here = true;
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if let Some((mods, key)) = shortcut {
+                                                ui.label(
+                                                    RichText::new(Self::shortcut_label(
+                                                        ui.ctx(),
+                                                        *mods,
+                                                        *key,
+                                                    ))
+                                                    .small()
+                                                    .color(self.app_theme.text_faint()),
+                                                );
+                                            }
+                                        },
+                                    );
+                                });
+                                if run_here {
+                                    run = Some(*cmd);
+                                }
                             }
-                        });
-                } else {
-                    ui.label(
-                        RichText::new("Type to search titles and text.")
-                            .small()
-                            .color(self.app_theme.text_dim()),
-                    );
-                }
+                        }
+                        if total == 0 {
+                            ui.label(
+                                RichText::new("No matches")
+                                    .small()
+                                    .color(self.app_theme.text_dim()),
+                            );
+                        }
+                    });
                 if cancel {
                     self.close_search();
                 }
             });
         if let Some(idx) = jump {
             self.select_single_sheet(idx);
+            self.close_search();
+        }
+        if let Some(cmd) = run {
+            self.run_palette_command(cmd);
             self.close_search();
         }
         if !open {
@@ -13782,7 +13951,10 @@ impl eframe::App for WritingApp {
             } else {
                 (
                     ctx.input_mut(|i| {
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)
+                        i.consume_key(
+                            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                            egui::Key::P,
+                        )
                     }),
                     ctx.input_mut(|i| {
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)
@@ -13817,15 +13989,15 @@ impl eframe::App for WritingApp {
         let key_find = ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)
         });
-        // Tooltip hint helper: renders as ⌘K on macOS, Ctrl+K elsewhere.
-        let hint = |ctx: &egui::Context, label: &str, key: egui::Key| {
-            format!(
-                "{label} ({})",
-                ctx.format_shortcut(&egui::KeyboardShortcut::new(
-                    egui::Modifiers::COMMAND,
-                    key
-                ))
-            )
+        // Tooltip hint helper: renders as ⌘P on macOS, Ctrl+P elsewhere.
+        let hint = |ctx: &egui::Context,
+                    label: &str,
+                    mods: egui::Modifiers,
+                    key: egui::Key| {
+            format!("{label} ({})", Self::shortcut_label(ctx, mods, key))
+        };
+        let hint_cmd = |ctx: &egui::Context, label: &str, key: egui::Key| {
+            hint(ctx, label, egui::Modifiers::COMMAND, key)
         };
 
         egui::TopBottomPanel::top("top")
@@ -13849,9 +14021,9 @@ impl eframe::App for WritingApp {
                         RichText::new(icon::SIDEBAR).size(17.0),
                     )
                     .on_hover_text(if self.library_visible && self.sheets_visible {
-                        hint(ui.ctx(), "Hide sidebars", egui::Key::B)
+                        hint_cmd(ui.ctx(), "Hide sidebars", egui::Key::B)
                     } else {
-                        hint(ui.ctx(), "Show sidebars", egui::Key::B)
+                        hint_cmd(ui.ctx(), "Show sidebars", egui::Key::B)
                     })
                     .clicked()
                         || key_sidebars
@@ -13871,7 +14043,14 @@ impl eframe::App for WritingApp {
                                     ui,
                                     RichText::new(icon::MAGNIFYING_GLASS).size(17.0),
                                 )
-                                .on_hover_text(hint(ui.ctx(), "Search sheets", egui::Key::K))
+                                .on_hover_text(
+                                    hint(
+                                        ui.ctx(),
+                                        "Command palette",
+                                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                                        egui::Key::P,
+                                    ),
+                                )
                                 .clicked()
                                     || key_search
                                 {
@@ -13887,7 +14066,7 @@ impl eframe::App for WritingApp {
                                     ui,
                                     RichText::new(icon::FILE_PLUS).size(17.0),
                                 )
-                                .on_hover_text(hint(ui.ctx(), "New sheet", egui::Key::N))
+                                .on_hover_text(hint_cmd(ui.ctx(), "New sheet", egui::Key::N))
                                 .clicked()
                                     || key_new
                                 {
@@ -13905,7 +14084,7 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::GEAR).size(17.0),
                         )
-                        .on_hover_text(hint(ui.ctx(), "Settings", egui::Key::Comma))
+                        .on_hover_text(hint_cmd(ui.ctx(), "Settings", egui::Key::Comma))
                         .clicked()
                             || key_settings
                         {
@@ -13931,7 +14110,7 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::TARGET).size(17.0),
                         )
-                        .on_hover_text(hint(ui.ctx(), "Writing goals", egui::Key::G))
+                        .on_hover_text(hint_cmd(ui.ctx(), "Writing goals", egui::Key::G))
                         .clicked()
                             || key_goals
                         {
@@ -13952,7 +14131,7 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::BOOK_OPEN).size(17.0),
                         )
-                        .on_hover_text(hint(ui.ctx(), "Style suggestions", egui::Key::Slash))
+                        .on_hover_text(hint_cmd(ui.ctx(), "Style suggestions", egui::Key::Slash))
                         .clicked()
                             || key_style
                         {
@@ -13967,7 +14146,7 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::CLOCK_COUNTER_CLOCKWISE).size(17.0),
                         )
-                            .on_hover_text(hint(ui.ctx(), "History", egui::Key::Y))
+                            .on_hover_text(hint_cmd(ui.ctx(), "History", egui::Key::Y))
                             .clicked()
                                 || key_history
                         {
@@ -13977,7 +14156,7 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::EXPORT).size(17.0),
                         )
-                            .on_hover_text(hint(ui.ctx(), "Share / export", egui::Key::E))
+                            .on_hover_text(hint_cmd(ui.ctx(), "Share / export", egui::Key::E))
                             .clicked()
                                 || key_export
                         {
