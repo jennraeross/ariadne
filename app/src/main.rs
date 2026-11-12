@@ -856,6 +856,9 @@ struct WritingApp {
     /// Current search text; while non-empty the sheets panel shows only
     /// matches. Session-only: cleared when the popup closes.
     search_query: String,
+    /// Highlighted search result for arrow-key navigation. Session-only:
+    /// reset whenever the query changes.
+    search_cursor: usize,
     /// Request keyboard focus in the search field on the next frame.
     search_focus: bool,
     /// Whether the history popup is open. Session-only.
@@ -2156,6 +2159,7 @@ impl WritingApp {
             show_export_popover: std::env::var("ARIADNE_SCREENSHOT_POPOVER").is_ok(),
             search_open: false,
             search_query: String::new(),
+            search_cursor: 0,
             search_focus: false,
             history_open: false,
             group_rename: None,
@@ -11889,11 +11893,12 @@ blockquote {
     fn close_search(&mut self) {
         self.search_open = false;
         self.search_query.clear();
+        self.search_cursor = 0;
     }
 
-    /// Sheet search popup: a text field plus a clickable result list.
-    /// Typing filters the sheets panel live; Enter jumps to the first hit,
-    /// Esc closes and clears.
+    /// Sheet search in a Spotlight-style bar: a large top-centered field
+    /// plus a clickable result list. Typing filters the sheets panel live;
+    /// Up/Down moves the highlight and Enter jumps to it, Esc closes.
     fn show_search_popup(&mut self, ctx: &egui::Context) {
         if !self.search_open {
             return;
@@ -11903,19 +11908,33 @@ blockquote {
         egui::Window::new("Search sheets")
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .default_size(Vec2::new(360.0, 80.0))
+            .resizable(false)
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 90.0))
             .show(ctx, |ui| {
+                ui.set_min_width(640.0);
                 let field = egui::Id::new("sheet_search_field");
                 if self.search_focus {
                     ui.memory_mut(|m| m.request_focus(field));
                     self.search_focus = false;
                 }
                 // Enter commits singleline edits (the field loses focus):
-                // jump to the first hit. Read before the field consumes it.
+                // jump to the highlighted hit. Read keys before the field
+                // consumes them.
                 let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                let resp = ui.add(egui::TextEdit::singleline(&mut self.search_query).id(field));
+                let go_up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                let go_down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .id(field)
+                        .hint_text("Search sheets…")
+                        .font(egui::FontId::proportional(26.0))
+                        .margin(egui::Vec2::new(12.0, 10.0))
+                        .desired_width(f32::INFINITY),
+                );
+                if resp.changed() {
+                    self.search_cursor = 0;
+                }
                 let confirm = resp.lost_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let query = self.search_query.trim().to_string();
@@ -11928,14 +11947,26 @@ blockquote {
                         .map(|(i, _)| i)
                         .collect();
                     if confirm && !hits.is_empty() {
-                        jump = Some(hits[0]);
+                        let at = self.search_cursor.min(hits.len() - 1);
+                        jump = Some(hits[at]);
+                    }
+                    if go_up && !hits.is_empty() {
+                        self.search_cursor = self
+                            .search_cursor
+                            .checked_sub(1)
+                            .unwrap_or(hits.len() - 1)
+                            .min(hits.len() - 1);
+                    }
+                    if go_down && !hits.is_empty() {
+                        self.search_cursor =
+                            (self.search_cursor + 1) % hits.len();
                     }
                     ui.separator();
                     ScrollArea::vertical()
-                        .max_height(300.0)
+                        .max_height(380.0)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            for idx in &hits {
+                            for (n, idx) in hits.iter().enumerate() {
                                 let (title, group) = self
                                     .sheets
                                     .get(*idx)
@@ -11950,7 +11981,11 @@ blockquote {
                                     })
                                     .unwrap_or_else(|| ("Untitled".to_string(), String::new()));
                                 if ui
-                                    .selectable_label(false, format!("{title}  ·  {group}"))
+                                    .selectable_label(
+                                        n == self.search_cursor,
+                                        RichText::new(format!("{title}  ·  {group}"))
+                                            .size(17.0),
+                                    )
                                     .clicked()
                                 {
                                     jump = Some(*idx);
@@ -15052,6 +15087,7 @@ mod tests {
             show_export_popover: false,
             search_open: false,
             search_query: String::new(),
+            search_cursor: 0,
             search_focus: false,
             history_open: false,
             group_rename: None,
@@ -16048,6 +16084,7 @@ mod tests {
             show_export_popover: false,
             search_open: false,
             search_query: String::new(),
+            search_cursor: 0,
             search_focus: false,
             history_open: false,
             group_rename: None,
