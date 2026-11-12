@@ -6869,6 +6869,14 @@ blockquote {
     }
 
 
+    /// Half a viewport of breathing room so the typewriter caret can
+    /// actually reach the vertical center on the first and last lines.
+    /// Must be called inside scroll content, where the clip rect is the
+    /// visible viewport.
+    fn typewriter_pad(ui: &mut egui::Ui) {
+        ui.add_space((ui.clip_rect().height() / 2.0).max(0.0));
+    }
+
     /// Center content in a readable-measure column. Must be used where
     /// vertical space is already bounded (e.g. inside a scroll area);
     /// wrapping a bare panel collapses the content height.
@@ -15472,11 +15480,20 @@ impl eframe::App for WritingApp {
                     let sel = targets[0];
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                         Self::centered_measure(ui, 720.0, |ui| {
+                            if self.typewriter {
+                                Self::typewriter_pad(ui);
+                            }
                             self.edit_sheet_body(ui, sel, true);
+                            if self.typewriter {
+                                Self::typewriter_pad(ui);
+                            }
                         });
                     });
                 } else {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        if self.typewriter {
+                            Self::typewriter_pad(ui);
+                        }
                         for (n, idx) in targets.iter().enumerate() {
                             if n > 0 {
                                 ui.add_space(16.0);
@@ -15498,6 +15515,9 @@ impl eframe::App for WritingApp {
                                 ui.add_space(4.0);
                                 self.edit_sheet_body(ui, *idx, false);
                             });
+                        }
+                        if self.typewriter {
+                            Self::typewriter_pad(ui);
                         }
                     });
                 }
@@ -19758,6 +19778,20 @@ mod tests {
     /// egui with `Widget XXXX changed layer_id ... from Background to
     /// Tooltip` because the drag ghost `Area` reused the row's interact id;
     /// it must now complete without panicking.
+    /// Step the harness until a labeled node exists (bounded wait).
+    /// AccessKit trees can lag a frame or two under parallel-test load, so
+    /// querying right after a single `run()` flakes on busy machines.
+    fn wait_for_label<App>(harness: &mut egui_kittest::Harness<'_, App>, label: &str) {
+        use egui_kittest::kittest::Queryable as _;
+        for _ in 0..100 {
+            harness.run();
+            if harness.query_all_by_label(label).next().is_some() {
+                return;
+            }
+        }
+        panic!("timed out waiting for labeled node: {label}");
+    }
+
     #[test]
     fn repro_full_app_sheet_drag() {
         use egui_kittest::Harness;
@@ -19766,9 +19800,9 @@ mod tests {
         let _storage = isolate_storage();
         let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
         harness.set_size(egui::vec2(1100.0, 720.0));
-        harness.run();
 
         // First sheet card title in the default library.
+        wait_for_label(&mut harness, "Welcome");
         let node = harness.get_by_label("Welcome");
         let bounds = node.raw_bounds().expect("title label has bounds");
         let start = egui::pos2(
@@ -19847,13 +19881,12 @@ mod tests {
         let _storage = isolate_storage();
         let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
         harness.set_size(egui::vec2(1100.0, 720.0));
-        harness.run();
-
         // Drag "Notes" onto the bottom half of "Drafts" (after it).
         // Row labels are "<folder-icon>  <name>"; the exact string is
         // unique (sheet previews never carry the icon).
         let notes_label =
             format!("{}  {}", egui_phosphor::regular::FOLDER, "Notes");
+        wait_for_label(&mut harness, &notes_label);
         let node = harness.get_by_label(&notes_label);
         let bounds = node.raw_bounds().expect("group label has bounds");
         let start = egui::pos2(
