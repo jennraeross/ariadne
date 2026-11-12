@@ -12083,7 +12083,7 @@ blockquote {
         let mut close = false;
         let dim = self.app_theme.text_dim();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("History").size(12.5).color(dim));
+            ui.label(RichText::new("History").size(14.0).color(dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("×").on_hover_text("Close history").clicked() {
                     close = true;
@@ -12131,7 +12131,7 @@ blockquote {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         for (n, snap) in list.iter().enumerate().rev() {
                             ui.horizontal(|ui| {
                                 ui.label(format!(
@@ -12219,7 +12219,10 @@ blockquote {
                             SettingsTab::Sync,
                         ] {
                             if ui
-                                .selectable_label(self.settings_tab == tab, tab.title())
+                                .selectable_label(
+                                    self.settings_tab == tab,
+                                    RichText::new(tab.title()).size(15.0),
+                                )
                                 .clicked()
                             {
                                 self.settings_tab = tab;
@@ -12236,7 +12239,7 @@ blockquote {
                             .show(ui, |ui| {
                                 match self.settings_tab {
                                 SettingsTab::Appearance => {
-                ui.label(RichText::new("Theme").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Theme").size(14.0).color(self.app_theme.text_dim()));
                 ui.horizontal(|ui| {
                     for theme in [AppTheme::Dark, AppTheme::Light] {
                         if ui
@@ -12250,7 +12253,7 @@ blockquote {
                 });
                                 }
                                 SettingsTab::Editor => {
-                ui.label(RichText::new("Editor").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Editor").size(14.0).color(self.app_theme.text_dim()));
                 ui.horizontal(|ui| {
                     ui.label("Font:");
                     let current = self
@@ -12352,7 +12355,7 @@ blockquote {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(420.0);
                 // iCloud sync for the iCloud section (Documents stays local).
-                ui.label(RichText::new("Sync").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Sync").size(14.0).color(self.app_theme.text_dim()));
                 let using_drive = Self::icloud_drive_dir().is_some();
                 let on_drive = Self::icloud_store_dir(self.icloud_dir.as_deref())
                     .map(|d| Some(d) == Self::icloud_drive_dir().map(|dd| dd.join("Ariadne")))
@@ -12399,7 +12402,7 @@ blockquote {
                 // OAuth in the browser; tokens stay in the OS keychain.
                 ui.label(
                     RichText::new("Google Drive")
-                        .small()
+                        .size(14.0)
                         .color(self.app_theme.text_dim()),
                 );
                 let gdrive_status = match self.gdrive.mode {
@@ -13210,7 +13213,7 @@ impl WritingApp {
     /// a progress bar against the current selection, and counts.
     fn show_goals_sidebar(&mut self, ui: &mut egui::Ui) {
         let dim = self.app_theme.text_dim();
-        ui.label(RichText::new("Writing goals").size(12.5).color(dim));
+        ui.label(RichText::new("Writing goals").size(14.0).color(dim));
         ui.add_space(8.0);
         let words = self.selection_words();
         if self.word_goal == 0 {
@@ -13287,7 +13290,7 @@ impl WritingApp {
     /// spelling + grammar; this panel owns clarity and concision.
     fn show_style_sidebar(&mut self, ui: &mut egui::Ui) {
         let dim = self.app_theme.text_dim();
-        ui.label(RichText::new("Style").size(12.5).color(dim));
+        ui.label(RichText::new("Style").size(14.0).color(dim));
         ui.add_space(8.0);
         if !self.grammar.enabled {
             ui.label("Turn on “Check spelling and grammar as I type” in Settings to see style suggestions.");
@@ -13318,7 +13321,7 @@ impl WritingApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.spacing_mut().item_spacing.y = 6.0;
                 let mut jump: Option<(usize, usize)> = None;
                 let mut apply: Option<(usize, usize, usize, grammar::AppliedSuggestion)> = None;
                 for issue in issues.iter().take(100) {
@@ -13638,10 +13641,10 @@ impl eframe::App for WritingApp {
                 let scroll = ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.spacing_mut().item_spacing.y = 5.0;
                         // Section: smart filters.
                         ui.label(
-                            RichText::new("Library").size(12.5).color(dim),
+                            RichText::new("Library").size(14.0).color(dim),
                         );
                         for (fi, f) in [
                             SmartFilter::All,
@@ -13655,13 +13658,13 @@ impl eframe::App for WritingApp {
                             let selected =
                                 self.selection == SidebarSelection::Filter(f);
                             let label = RichText::new(format!("{}  {}", f.icon(), f.title()))
-                                .size(15.0)
+                                .size(16.0)
                                 .color(if selected { self.app_theme.text_bright() } else { row_text });
                             let resp = full_width_row(
                                 ui,
                                 egui::Id::new(("filter-row", fi)),
                                 egui::Sense::click(),
-                                24.0,
+                                28.0,
                                 selected,
                                 |child| full_width_row_label(child, label),
                             );
@@ -13672,7 +13675,7 @@ impl eframe::App for WritingApp {
                                 action = Some(TreeAction::Select(SidebarSelection::Filter(f)));
                             }
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(12.0);
                         for section in Self::visible_sections() {
                             // Section header doubles as the drop target for
                             // the section top level (un-nest to the end).
@@ -13680,7 +13683,7 @@ impl eframe::App for WritingApp {
                                 .horizontal(|ui| {
                                     ui.label(
                                         RichText::new(section.title())
-                                            .size(12.5)
+                                            .size(14.0)
                                             .color(dim),
                                     );
                                     ui.with_layout(
@@ -13822,7 +13825,7 @@ impl eframe::App for WritingApp {
                                 let bright = self.app_theme.text_bright();
                                 // Caret clicks toggle; everything else selects.
                                 // (Caret edge derived from the row geometry;
-                                // kept in sync with the 24px row height and
+                                // kept in sync with the 28px row height and
                                 // indent below.)
                                 let caret_left = ui
                                     .available_rect_before_wrap()
@@ -13838,7 +13841,7 @@ impl eframe::App for WritingApp {
                                     ui,
                                     drag_id,
                                     egui::Sense::click_and_drag(),
-                                    24.0,
+                                    28.0,
                                     selected,
                                     |child| {
                                         if renaming {
@@ -13906,7 +13909,7 @@ impl eframe::App for WritingApp {
                                             full_width_row_label(
                                                 child,
                                                 RichText::new(caret)
-                                                    .size(14.0)
+                                                    .size(15.0)
                                                     .color(dim),
                                             );
                                         } else {
@@ -13927,7 +13930,7 @@ impl eframe::App for WritingApp {
                                         let full_width = child.fonts(|f| {
                                             f.layout(
                                                 full_label.clone(),
-                                                egui::FontId::proportional(15.0),
+                                                egui::FontId::proportional(16.0),
                                                 label_color,
                                                 f32::INFINITY,
                                             )
@@ -13937,7 +13940,7 @@ impl eframe::App for WritingApp {
                                         name_clipped = full_width > room;
                                         let mut group_label = egui::Label::new(
                                             RichText::new(full_label)
-                                                .size(15.0)
+                                                .size(16.0)
                                                 .color(label_color),
                                         )
                                         .selectable(false)
@@ -14296,13 +14299,13 @@ impl eframe::App for WritingApp {
                     .inner_margin(egui::Margin {
                         left: 12,
                         right: 10,
-                        top: 8,
-                        bottom: 8,
+                        top: 12,
+                        bottom: 12,
                     })
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(context_name).strong().size(13.0).color(self.app_theme.text_faint()));
+                            ui.label(RichText::new(context_name).strong().size(14.5).color(self.app_theme.text_faint()));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -14417,7 +14420,7 @@ impl eframe::App for WritingApp {
                 let scroll = ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         for idx in visible.clone() {
                             let (display_title, preview) = self
                                 .sheets
@@ -14440,10 +14443,10 @@ impl eframe::App for WritingApp {
                                     .fill(bg)
                                     .corner_radius(8.0)
                                     .inner_margin(egui::Margin {
-                                        left: 12,
-                                        right: 10,
-                                        top: 10,
-                                        bottom: 10,
+                                        left: 14,
+                                        right: 12,
+                                        top: 14,
+                                        bottom: 14,
                                     })
                                     .outer_margin(egui::Margin {
                                         left: 8,
@@ -14455,16 +14458,16 @@ impl eframe::App for WritingApp {
                                         ui.set_min_width(width - 38.0);
                                         ui.set_max_width(width - 38.0);
                                         ui.vertical(|ui| {
-                                            ui.spacing_mut().item_spacing.y = 4.0;
+                                            ui.spacing_mut().item_spacing.y = 6.0;
                                             ui.label(
                                                 RichText::new(display_title.clone())
                                                     .strong()
-                                                    .size(14.0)
+                                                    .size(15.0)
                                                     .color(self.app_theme.text_bright()),
                                             );
                                             ui.label(
                                                 RichText::new(preview.clone())
-                                                    .size(12.5)
+                                                    .size(14.0)
                                                     .color(self.app_theme.text_faint()),
                                             );
                                         });
