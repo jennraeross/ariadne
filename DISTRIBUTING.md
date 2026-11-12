@@ -11,12 +11,12 @@ to a GitHub Release.
 2. Commit and push to `main`.
 3. Tag and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
    The tag must equal the `Cargo.toml` version or the workflow fails fast.
-4. One-time repo setup: add the `GOOGLE_CLIENT_ID` secret (Settings →
-   Secrets and variables → Actions). It is baked into release builds as
-   `ARIADNE_GOOGLE_CLIENT_ID` and enables Settings → Sync → Connect
-   Google Drive. Builds without it still work; Google Drive just shows as
-   unconfigured. The secret is a public OAuth client ID (Desktop app type,
-   PKCE, no client secret) — safe to embed, but kept out of the repo.
+4. One-time repo setup: add the `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+   secrets (Settings → Secrets and variables → Actions). They are baked into
+   release builds as `ARIADNE_GOOGLE_CLIENT_ID` / `ARIADNE_GOOGLE_CLIENT_SECRET`
+   and enable Settings → Sync → Connect Google Drive. Google's token endpoint
+   requires the Desktop-app client secret even with PKCE, so both are needed.
+   Builds without them still work; Google Drive just shows as unconfigured.
 4. Watch the `Release` workflow; when green, the GitHub Release page has:
    - macOS: `ariadne-<version>-macos-universal.dmg` containing
      `Ariadne.app` (arm64 + x86_64 universal, unsigned — right-click →

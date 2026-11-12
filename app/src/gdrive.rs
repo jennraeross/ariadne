@@ -11,10 +11,12 @@
 //! the worker through [`DriveJob`] / [`DriveEvent`] channels.
 //!
 //! Auth is OAuth 2.0 for a Desktop (installed-app) client with PKCE and a
-//! loopback redirect — no client secret is embedded or needed. The shared
-//! client ID is baked in at build time from `ARIADNE_GOOGLE_CLIENT_ID`
-//! (a GitHub secret in CI); without it the feature reports itself as
-//! unconfigured instead of failing. Tokens live in the OS keychain.
+//! loopback redirect. Google's token endpoint still requires the Desktop
+//! client secret alongside PKCE, so both the client ID and the client secret
+//! are baked in at build time from `ARIADNE_GOOGLE_CLIENT_ID` and
+//! `ARIADNE_GOOGLE_CLIENT_SECRET` (GitHub secrets in CI); without them the
+//! feature reports itself as unconfigured instead of failing.
+//! Tokens live in the OS keychain.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -42,6 +44,13 @@ const REFRESH_GRACE_SECS: u64 = 120;
 /// shows Google Drive as unconfigured.
 pub fn client_id() -> Option<String> {
     option_env!("ARIADNE_GOOGLE_CLIENT_ID").map(|s| s.to_string())
+}
+
+/// Shared OAuth client secret for the Desktop client, baked in at build
+/// time. Google's token endpoint requires it even with PKCE, so both the
+/// ID and the secret must be present for the feature to configure.
+pub fn client_secret() -> Option<String> {
+    option_env!("ARIADNE_GOOGLE_CLIENT_SECRET").map(|s| s.to_string())
 }
 
 /// OAuth tokens with an absolute expiry, JSON-serializable for storage.
@@ -252,6 +261,7 @@ pub fn spawn_worker(
 
 struct Worker {
     client_id: String,
+    client_secret: String,
     tokens: Option<GoogleTokens>,
     token_store: Box<dyn TokenStore>,
     http: reqwest::blocking::Client,
@@ -262,7 +272,7 @@ fn worker_loop(
     rx: std::sync::mpsc::Receiver<DriveJob>,
     tx: &std::sync::mpsc::Sender<DriveEvent>,
 ) {
-    let Some(client_id) = client_id() else {
+    let (Some(client_id), Some(client_secret)) = (client_id(), client_secret()) else {
         // No client configured: every job fails fast with the same note.
         for job in rx {
             let _ = &job;
@@ -274,6 +284,7 @@ fn worker_loop(
     };
     let mut w = Worker {
         client_id,
+        client_secret,
         tokens: token_store.load(),
         token_store,
         http: reqwest::blocking::Client::builder()
@@ -307,7 +318,10 @@ impl Worker {
     }
 
     fn login(&mut self, tx: &std::sync::mpsc::Sender<DriveEvent>) -> DriveEvent {
-        use oauth2::{AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl};
+        use oauth2::{
+            AuthType, AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
+            RedirectUrl, Scope, TokenUrl,
+        };
         use oauth2::basic::BasicClient;
 
         // Bind loopback first so the redirect URI carries the real port.
@@ -333,6 +347,8 @@ impl Worker {
             Err(e) => return DriveEvent::AuthFailed(format!("Bad redirect URI: {e}")),
         };
         let client = BasicClient::new(ClientId::new(self.client_id.clone()))
+            .set_client_secret(ClientSecret::new(self.client_secret.clone()))
+            .set_auth_type(AuthType::RequestBody)
             .set_auth_uri(auth_url)
             .set_token_uri(token_url)
             .set_redirect_uri(redirect_url);
@@ -482,7 +498,12 @@ impl Worker {
             None => return Err(DriveEvent::SignedOut),
         };
         if tokens.expired() {
-            tokens = match refresh_tokens(&self.http, &self.client_id, &tokens.refresh_token) {
+            tokens = match refresh_tokens(
+                &self.http,
+                &self.client_id,
+                &self.client_secret,
+                &tokens.refresh_token,
+            ) {
                 Ok(t) => t,
                 Err(_) => {
                     self.tokens = None;
@@ -654,16 +675,16 @@ pub fn open_url(url: &str) {
 }
 
 /// Explain the most common token-endpoint misconfiguration in plain
-/// language: a Web-application client ID (which mandates a secret) was
-/// used where a Desktop-app client ID (PKCE, no secret) is required.
+/// language, keeping the raw detail so a correct Desktop-app ID that still
+/// fails stays debuggable.
 fn friendly_token_error(action: &str, e: &impl std::fmt::Display) -> String {
     let msg = e.to_string();
     if msg.contains("client_secret") {
-        return "Google rejected the sign-in: this looks like a Web-application \
-            OAuth client ID, which requires a client secret. Create a \
-            Desktop-app client ID instead (APIs & Services → Credentials) \
-            and update GOOGLE_CLIENT_ID."
-            .to_string();
+        return format!(
+            "Google rejected the sign-in ({msg}). If this is a Web-application \
+            OAuth client ID, create a Desktop-app client ID instead \
+            (APIs & Services → Credentials) and update GOOGLE_CLIENT_ID."
+        );
     }
     format!("Token {action} failed: {msg}")
 }
@@ -713,15 +734,18 @@ fn wait_for_code(
 fn refresh_tokens(
     http: &reqwest::blocking::Client,
     client_id: &str,
+    client_secret: &str,
     refresh_token: &str,
 ) -> Result<GoogleTokens, String> {
     use oauth2::basic::BasicClient;
-    use oauth2::{AuthUrl, ClientId, RefreshToken, TokenUrl};
+    use oauth2::{AuthType, AuthUrl, ClientId, ClientSecret, RefreshToken, TokenUrl};
     let auth_url = AuthUrl::new(AUTH_URL.to_string())
         .map_err(|e| format!("Bad auth endpoint: {e}"))?;
     let token_url = TokenUrl::new(TOKEN_URL.to_string())
         .map_err(|e| format!("Bad token endpoint: {e}"))?;
     let client = BasicClient::new(ClientId::new(client_id.to_string()))
+        .set_client_secret(ClientSecret::new(client_secret.to_string()))
+        .set_auth_type(AuthType::RequestBody)
         .set_auth_uri(auth_url)
         .set_token_uri(token_url);
     let token = client
@@ -811,8 +835,13 @@ impl<'a> DriveHttp<'a> {
         let Some(refresh) = refresh else {
             return Err("unauthorized".to_string());
         };
-        let tokens = refresh_tokens(&self.worker.http, &self.worker.client_id, &refresh)
-            .map_err(|e| format!("Re-auth needed: {e}"))?;
+        let tokens = refresh_tokens(
+            &self.worker.http,
+            &self.worker.client_id,
+            &self.worker.client_secret,
+            &refresh,
+        )
+        .map_err(|e| format!("Re-auth needed: {e}"))?;
         self.worker.token_store.save(&tokens);
         self.worker.tokens = Some(tokens.clone());
         let resp = retry(&self.worker.http, tokens.access_token, url)
@@ -1101,8 +1130,12 @@ impl DriveHttp<'_> {
             let Some(refresh) = refresh else {
                 return Err("unauthorized".to_string());
             };
-            let tokens =
-                refresh_tokens(&self.worker.http, &self.worker.client_id, &refresh)
+            let tokens = refresh_tokens(
+                &self.worker.http,
+                &self.worker.client_id,
+                &self.worker.client_secret,
+                &refresh,
+            )
                     .map_err(|e| format!("Re-auth needed: {e}"))?;
             self.worker.token_store.save(&tokens);
             let token = tokens.access_token.clone();

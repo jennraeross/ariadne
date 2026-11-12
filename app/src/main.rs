@@ -4736,7 +4736,7 @@ blockquote {
     const GDRIVE_POLL_SECS: f64 = 30.0;
 
     fn gdrive_configured() -> bool {
-        gdrive::client_id().is_some()
+        gdrive::client_id().is_some() && gdrive::client_secret().is_some()
     }
 
     /// Spawn the sync worker on first use and learn the auth state.
@@ -4873,8 +4873,11 @@ blockquote {
                 if then_push {
                     if let Some((json, files)) = self.gdrive_build_push() {
                         // Push supersedes the save-time dirty flag: it was
-                        // built from just-merged memory.
+                        // built from just-merged memory. The Pull job is done,
+                        // so clear busy before queueing the push (gdrive_send
+                        // refuses while busy).
                         self.gdrive.pending_push = false;
+                        self.gdrive.busy = false;
                         self.gdrive_send(gdrive::DriveJob::PushNow {
                             store_json: json,
                             files,
