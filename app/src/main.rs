@@ -6840,6 +6840,21 @@ blockquote {
     }
 
 
+    /// Center content in a readable-measure column. Must be used where
+    /// vertical space is already bounded (e.g. inside a scroll area);
+    /// wrapping a bare panel collapses the content height.
+    fn centered_measure(ui: &mut egui::Ui, max_w: f32, content: impl FnOnce(&mut egui::Ui)) {
+        let w = ui.available_width().min(max_w);
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+            ui.vertical(|ui| {
+                ui.set_min_width(w);
+                ui.set_max_width(w);
+                content(ui);
+            });
+        });
+    }
+
     /// Editor (with margin `#` markers and the custom caret overlay)
     /// for a single sheet. `fill` stretches it to the available size in
     /// single-sheet mode; in the multi-sheet view each editor keeps its
@@ -15304,7 +15319,9 @@ impl eframe::App for WritingApp {
                 } else if targets.len() == 1 {
                     let sel = targets[0];
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        self.edit_sheet_body(ui, sel, true);
+                        Self::centered_measure(ui, 720.0, |ui| {
+                            self.edit_sheet_body(ui, sel, true);
+                        });
                     });
                 } else {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -15314,19 +15331,21 @@ impl eframe::App for WritingApp {
                                 ui.separator();
                                 ui.add_space(8.0);
                             }
-                            let title = self
-                                .sheets
-                                .get(*idx)
-                                .map(|s| Self::inferred_title(&s.content))
-                                .unwrap_or_else(|| "Untitled".to_string());
-                            ui.label(
-                                RichText::new(title)
-                                    .strong()
-                                    .size(20.0)
-                                    .color(self.app_theme.text_bright()),
-                            );
-                            ui.add_space(4.0);
-                            self.edit_sheet_body(ui, *idx, false);
+                            Self::centered_measure(ui, 720.0, |ui| {
+                                let title = self
+                                    .sheets
+                                    .get(*idx)
+                                    .map(|s| Self::inferred_title(&s.content))
+                                    .unwrap_or_else(|| "Untitled".to_string());
+                                ui.label(
+                                    RichText::new(title)
+                                        .strong()
+                                        .size(20.0)
+                                        .color(self.app_theme.text_bright()),
+                                );
+                                ui.add_space(4.0);
+                                self.edit_sheet_body(ui, *idx, false);
+                            });
                         }
                     });
                 }
