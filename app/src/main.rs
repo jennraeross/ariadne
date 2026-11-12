@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+mod grammar;
 
 mod gdrive;
 
@@ -376,6 +378,19 @@ impl AppTheme {
         }
     }
 
+    /// Spelling squiggle in the editor overlay.
+    fn grammar_spelling(self) -> Color32 {
+        match self {
+            AppTheme::Dark => Color32::from_rgb(224, 108, 117),
+            AppTheme::Light => Color32::from_rgb(178, 58, 72),
+        }
+    }
+
+    /// Grammar squiggle in the editor overlay (accent blue).
+    fn grammar_issue(self) -> Color32 {
+        self.accent()
+    }
+
     /// Editor `#` margin glyphs drawn in the overlay.
     fn ed_margin_mark(self) -> Color32 {
         match self {
@@ -655,6 +670,20 @@ struct SavedLibrary {
     /// older saves.
     #[serde(default)]
     icloud_dir: Option<String>,
+    /// Check spelling and grammar as you type. Absent in older saves: on.
+    #[serde(default = "default_true")]
+    grammar_enabled: bool,
+    /// Whether the style sidebar is shown. Remembered across runs.
+    #[serde(default)]
+    style_visible: bool,
+    /// Custom dictionary additions, synced across devices via the union
+    /// merge below (either side may add words independently).
+    #[serde(default)]
+    dictionary_adds: Vec<String>,
+    /// Words removed from the custom dictionary. A word in both lists
+    /// counts as removed, so un-learning propagates too.
+    #[serde(default)]
+    dictionary_removes: Vec<String>,
     /// Set when loading merged in remote changes: the app saves immediately
     /// to converge the stores. Session-only, never persisted.
     #[serde(skip)]
@@ -867,6 +896,9 @@ struct WritingApp {
     show_conflicts: bool,
     /// Google Drive sync session. Session-only: tokens stay in the keychain.
     gdrive: GdriveSync,
+    /// Grammar state: checker, per-sheet lint cache, ignores. The
+    /// dictionary words themselves live here too (persisted + synced).
+    grammar: GrammarState,
 }
 
 /// Google Drive connection state. Session-only.
@@ -917,6 +949,93 @@ struct GdriveWorker {
     rx: std::sync::mpsc::Receiver<gdrive::DriveEvent>,
     #[allow(dead_code)]
     handle: std::thread::JoinHandle<()>,
+}
+
+/// Grammar checking session: a background Harper worker over the
+/// effective custom dictionary, plus a per-sheet lint cache keyed by
+/// content hash so idle frames cost nothing.
+#[derive(Default)]
+struct GrammarState {
+    /// Sheet index -> last lint result.
+    cache: std::collections::HashMap<usize, CachedLint>,
+    /// Session-only ignores, keyed by (message, covered text).
+    ignored: std::collections::HashSet<(String, String)>,
+    /// Master toggle (persisted).
+    enabled: bool,
+    /// Custom dictionary additions (persisted + synced).
+    dict_adds: std::collections::BTreeSet<String>,
+    /// Custom dictionary removals; beats additions on both sides.
+    dict_removes: std::collections::BTreeSet<String>,
+    /// Style sidebar visibility (persisted).
+    style_visible: bool,
+    /// Lazy background lint worker; never blocks the UI thread.
+    worker: Option<GrammarWorker>,
+    /// Sheet index -> latest un-linted content, with last-change time.
+    pending: std::collections::HashMap<usize, PendingLint>,
+    /// Sheet index -> content hash currently queued or running.
+    inflight: std::collections::HashMap<usize, u64>,
+    /// Bumped whenever the ignore set or dictionary changes so stale
+    /// in-flight results are discarded instead of cached.
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct CachedLint {
+    hash: u64,
+    issues: Vec<grammar::Issue>,
+}
+
+/// How long after the last keystroke a re-lint waits: squiggles lag
+/// typing instead of flickering mid-word, and big pastes settle before
+/// the checker runs.
+const GRAMMAR_IDLE: Duration = Duration::from_secs(1);
+
+/// Most recent un-linted content for one sheet, with last-change time.
+struct PendingLint {
+    hash: u64,
+    last_change: Instant,
+}
+
+/// One background lint request (all owned: crosses threads).
+struct LintJob {
+    sheet: usize,
+    hash: u64,
+    generation: u64,
+    text: String,
+    words: std::collections::BTreeSet<String>,
+    ignored: std::collections::HashSet<(String, String)>,
+}
+
+/// A finished background lint, matched to content by hash and to the
+/// ignore/dictionary state by generation.
+struct LintResult {
+    sheet: usize,
+    hash: u64,
+    generation: u64,
+    issues: Vec<grammar::Issue>,
+}
+
+/// Lone background lint thread: owns the Harper checker (rebuilt only
+/// when the custom dictionary changes) so the UI thread never blocks,
+/// however large the paste.
+struct GrammarWorker {
+    jobs: std::sync::mpsc::Sender<LintJob>,
+    results: std::sync::mpsc::Receiver<LintResult>,
+}
+
+/// A grammar fix to apply after the overlay pass (the overlay only reads).
+enum GrammarAction {
+    Apply {
+        sheet: usize,
+        start: usize,
+        end: usize,
+        suggestion: grammar::AppliedSuggestion,
+    },
+    Ignore {
+        message: String,
+        covered: String,
+    },
+    LearnWord(String),
 }
 
 #[derive(Clone)]
@@ -2034,8 +2153,12 @@ impl WritingApp {
             last_sync_check: 0.0,
             show_conflicts: false,
             gdrive: GdriveSync::default(),
+            grammar: GrammarState::default(),
             icloud_dir: None,
         };
+        // Checking is on for fresh installs; a saved preference (if any)
+        // overrides below.
+        app.grammar.enabled = true;
         let mut dirty_after_load = false;
         if let Some(saved) = Self::load_library() {
             app.groups = saved.groups;
@@ -2060,6 +2183,10 @@ impl WritingApp {
             app.editor_font_family = saved.editor_font_family;
             app.tombstones = saved.tombstones;
             app.icloud_dir = saved.icloud_dir;
+            app.grammar.enabled = saved.grammar_enabled;
+            app.grammar.style_visible = saved.style_visible;
+            app.grammar.dict_adds = saved.dictionary_adds.into_iter().collect();
+            app.grammar.dict_removes = saved.dictionary_removes.into_iter().collect();
             // A load that merged remote changes converges the stores below.
             dirty_after_load = saved.dirty;
             // The goals sidebar is session-only: it always starts collapsed.
@@ -3635,6 +3762,319 @@ blockquote {
         }
     }
 
+    /// Sheet the style sidebar and grammar popup work on: the focused
+    /// export target, falling back to the first one.
+    fn grammar_focused_sheet(&self) -> Option<usize> {
+        let targets = self.export_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        if targets.contains(&self.selected_sheet) {
+            Some(self.selected_sheet)
+        } else {
+            Some(targets[0])
+        }
+    }
+
+    /// Queue a background re-lint of `sel` when its content changed.
+    /// Never blocks: a sheet with no cached pass lints right away on the
+    /// worker, while edited sheets wait one idle second so typing (and
+    /// big pastes) stay smooth and squiggles lag words, not letters.
+    /// Split out so it can borrow sheets and grammar state separately.
+    fn refresh_grammar_for_sheets(
+        sheets: &[Sheet],
+        grammar: &mut GrammarState,
+        sel: usize,
+    ) {
+        let Some(sheet) = sheets.get(sel) else {
+            return;
+        };
+        if !grammar.enabled || sheet.content.chars().count() > grammar::MAX_LINT_CHARS {
+            grammar.cache.remove(&sel);
+            grammar.pending.remove(&sel);
+            grammar.inflight.remove(&sel);
+            return;
+        }
+        let hash = Self::hash_bytes(sheet.content.as_bytes());
+        if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
+            grammar.pending.remove(&sel);
+            return;
+        }
+        // Collect finished background lints. Only results matching the
+        // current content hash and generation land in the cache; older
+        // ones are stale and drop.
+        if let Some(worker) = grammar.worker.as_ref() {
+            while let Ok(res) = worker.results.try_recv() {
+                grammar.inflight.remove(&res.sheet);
+                if res.generation != grammar.generation {
+                    continue;
+                }
+                if let Some(current) = sheets.get(res.sheet) {
+                    if Self::hash_bytes(current.content.as_bytes()) == res.hash {
+                        grammar.cache.insert(
+                            res.sheet,
+                            CachedLint {
+                                hash: res.hash,
+                                issues: res.issues,
+                            },
+                        );
+                        grammar.pending.remove(&res.sheet);
+                    }
+                }
+            }
+            if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
+                grammar.pending.remove(&sel);
+                return;
+            }
+        }
+        // This exact content is already queued or running.
+        if grammar.inflight.get(&sel) == Some(&hash) {
+            return;
+        }
+        // Debounce: the pending clock resets on every change, so it
+        // measures one full idle second since typing stopped.
+        let now = Instant::now();
+        let last_change = match grammar.pending.entry(sel) {
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if o.get().hash != hash {
+                    o.insert(PendingLint {
+                        hash,
+                        last_change: now,
+                    });
+                    now
+                } else {
+                    o.get().last_change
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(PendingLint {
+                    hash,
+                    last_change: now,
+                });
+                now
+            }
+        };
+        if grammar.cache.contains_key(&sel) && now.duration_since(last_change) < GRAMMAR_IDLE {
+            return;
+        }
+        let worker = grammar.worker.get_or_insert_with(|| {
+            let (job_tx, job_rx) = std::sync::mpsc::channel::<LintJob>();
+            let (res_tx, res_rx) = std::sync::mpsc::channel::<LintResult>();
+            std::thread::spawn(move || Self::grammar_worker_loop(job_rx, res_tx));
+            GrammarWorker {
+                jobs: job_tx,
+                results: res_rx,
+            }
+        });
+        let adds: Vec<String> = grammar.dict_adds.iter().cloned().collect();
+        let removes: Vec<String> = grammar.dict_removes.iter().cloned().collect();
+        let job = LintJob {
+            sheet: sel,
+            hash,
+            generation: grammar.generation,
+            text: sheet.content.clone(),
+            words: grammar::effective_words(&adds, &removes),
+            ignored: grammar.ignored.clone(),
+        };
+        if worker.jobs.send(job).is_ok() {
+            grammar.inflight.insert(sel, hash);
+        } else {
+            // Worker died; drop it so the next frame rebuilds it.
+            grammar.worker = None;
+        }
+    }
+
+    /// Background lint loop for [`GrammarState::worker`]: owns one Harper
+    /// checker, rebuilding it only when the custom dictionary changes.
+    /// Jobs run strictly in order so every send gets its result and the
+    /// main thread's hash/generation checks stay decisive.
+    fn grammar_worker_loop(
+        jobs: std::sync::mpsc::Receiver<LintJob>,
+        results: std::sync::mpsc::Sender<LintResult>,
+    ) {
+        let mut checker: Option<grammar::Checker> = None;
+        let mut built_for: u64 = 0;
+        while let Ok(job) = jobs.recv() {
+            let fingerprint = grammar::dictionary_fingerprint(&job.words);
+            let active = match checker.as_mut() {
+                Some(c) if built_for == fingerprint => c,
+                _ => {
+                    checker = Some(grammar::Checker::new(&job.words));
+                    built_for = fingerprint;
+                    checker.as_mut().expect("just built")
+                }
+            };
+            let issues = active.lint(&job.text, &job.ignored);
+            let res = LintResult {
+                sheet: job.sheet,
+                hash: job.hash,
+                generation: job.generation,
+                issues,
+            };
+            if results.send(res).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Synchronous lint for tests: the same result as the worker path,
+    /// but immediate and deterministic (no debounce, no threads).
+    #[cfg(test)]
+    fn lint_grammar_for_tests(sheets: &[Sheet], grammar: &mut GrammarState, sel: usize) {
+        let Some(sheet) = sheets.get(sel) else {
+            return;
+        };
+        if !grammar.enabled || sheet.content.chars().count() > grammar::MAX_LINT_CHARS {
+            grammar.cache.remove(&sel);
+            return;
+        }
+        let hash = Self::hash_bytes(sheet.content.as_bytes());
+        if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
+            return;
+        }
+        let adds: Vec<String> = grammar.dict_adds.iter().cloned().collect();
+        let removes: Vec<String> = grammar.dict_removes.iter().cloned().collect();
+        let words = grammar::effective_words(&adds, &removes);
+        let mut checker = grammar::Checker::new(&words);
+        let issues = checker.lint(&sheet.content, &grammar.ignored);
+        grammar.cache.insert(sel, CachedLint { hash, issues });
+    }
+
+    /// Cached lint issues for one sheet, split by surface.
+    fn grammar_inline_issues(grammar: &GrammarState, sel: usize) -> Vec<grammar::Issue> {
+        grammar
+            .cache
+            .get(&sel)
+            .map(|c| {
+                c.issues
+                    .iter()
+                    .filter(|i| i.kind != grammar::IssueKind::Style)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn grammar_style_issues(grammar: &GrammarState, sel: usize) -> Vec<grammar::Issue> {
+        grammar
+            .cache
+            .get(&sel)
+            .map(|c| {
+                c.issues
+                    .iter()
+                    .filter(|i| i.kind == grammar::IssueKind::Style)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Wavy underline segments for one char range, in screen space.
+    /// Multi-row spans underline each overlapped row; rows are clamped to
+    /// the span's start/end carets so whitespace isn't painted.
+    fn grammar_underline(
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        start: usize,
+        end: usize,
+    ) -> Vec<(egui::Pos2, egui::Pos2)> {
+        use egui::text::CCursor;
+        let end = end.max(start);
+        let start_c = galley.from_ccursor(CCursor::new(start));
+        let end_c = galley.from_ccursor(CCursor::new(end));
+        let (r0, r1) = (start_c.rcursor.row, end_c.rcursor.row);
+        let mut out = Vec::new();
+        for (ri, r) in galley.rows.iter().enumerate() {
+            if ri < r0 || ri > r1 {
+                continue;
+            }
+            let mut xs: Vec<f32> = r
+                .glyphs
+                .iter()
+                .flat_map(|g| [g.pos.x, g.pos.x + g.advance_width])
+                .collect();
+            if xs.is_empty() {
+                continue;
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let row_left = xs[0];
+            let row_right = xs[xs.len() - 1];
+            let x0 = if ri == r0 {
+                galley.pos_from_ccursor(CCursor::new(start)).center().x
+            } else {
+                row_left
+            };
+            let x1 = if ri == r1 {
+                galley.pos_from_ccursor(CCursor::new(end)).center().x
+            } else {
+                row_right
+            };
+            let (x0, mut x1) = (x0.min(x1), x0.max(x1));
+            if x1 - x0 < 3.0 {
+                x1 = x0 + 3.0;
+            }
+            let y = galley_pos.y + r.rect.max.y - 2.0;
+            out.push((
+                egui::pos2(galley_pos.x + x0, y),
+                egui::pos2(galley_pos.x + x1, y),
+            ));
+        }
+        out
+    }
+
+    /// Shorten a suggestion label for the fix popup.
+    fn truncate_suggestion(text: &str) -> String {
+        const MAX: usize = 40;
+        if text.chars().count() <= MAX {
+            return text.to_string();
+        }
+        let mut out: String = text.chars().take(MAX - 1).collect();
+        out.push('…');
+        out
+    }
+
+    /// Whether covered text is a single dictionary-able word.
+    fn is_single_word(text: &str) -> bool {
+        let t = text.trim();
+        !t.is_empty() && t.chars().count() <= 60 && !t.contains(char::is_whitespace)
+    }
+
+    /// Apply one suggestion to a sheet, move the caret past the fix, and
+    /// save. Returns false when the span no longer applies.
+    fn apply_grammar_suggestion(
+        &mut self,
+        ctx: &egui::Context,
+        sel: usize,
+        start: usize,
+        end: usize,
+        suggestion: &grammar::AppliedSuggestion,
+    ) -> bool {
+        let Some(sheet) = self.sheets.get_mut(sel) else {
+            return false;
+        };
+        let Some(next) = grammar::apply_at(&sheet.content, start, end, suggestion) else {
+            return false;
+        };
+        let advance = match suggestion {
+            grammar::AppliedSuggestion::Replace(t) => start + t.chars().count(),
+            grammar::AppliedSuggestion::InsertAfter(t) => end + t.chars().count(),
+            grammar::AppliedSuggestion::Remove => start,
+        };
+        sheet.content = next;
+        sheet.modified = SystemTime::now();
+        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        if let Some(mut state) = egui::TextEdit::load_state(ctx, edit_id) {
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(advance),
+            )));
+            egui::TextEdit::store_state(ctx, edit_id, state);
+            ctx.memory_mut(|m| m.request_focus(edit_id));
+        }
+        self.save_library();
+        self.status = "Applied suggestion".to_string();
+        true
+    }
+
     /// Plain click: focus exactly one sheet.
     fn select_single_sheet(&mut self, idx: usize) {
         if idx >= self.sheets.len() {
@@ -4317,6 +4757,8 @@ blockquote {
                 &mut self.groups,
                 &mut self.sheets,
                 &mut self.tombstones,
+                &mut self.grammar.dict_adds,
+                &mut self.grammar.dict_removes,
                 &dest_lib,
                 &mut self.sync_hashes,
                 "icloud",
@@ -4718,6 +5160,8 @@ blockquote {
                 &mut self.groups,
                 &mut self.sheets,
                 &mut self.tombstones,
+                &mut self.grammar.dict_adds,
+                &mut self.grammar.dict_removes,
                 &ipath,
                 &mut self.sync_hashes,
                 "icloud",
@@ -4860,6 +5304,8 @@ blockquote {
                         &mut self.groups,
                         &mut self.sheets,
                         &mut self.tombstones,
+                        &mut self.grammar.dict_adds,
+                        &mut self.grammar.dict_removes,
                         &bytes,
                         &mut self.sync_hashes,
                         "gdrive",
@@ -4945,6 +5391,10 @@ blockquote {
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
+            grammar_enabled: self.grammar.enabled,
+            style_visible: self.grammar.style_visible,
+            dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
+            dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
             version: 1,
         };
@@ -5023,7 +5473,7 @@ blockquote {
         // a merged save rather than a blind overwrite.
         let mut synced_note = false;
         if let Some(ref ipath) = icloud_path {
-            if Self::merge_store_file(&mut self.groups, &mut self.sheets, &mut self.tombstones, ipath, &mut self.sync_hashes, "icloud") {
+            if Self::merge_store_file(&mut self.groups, &mut self.sheets, &mut self.tombstones, &mut self.grammar.dict_adds, &mut self.grammar.dict_removes, ipath, &mut self.sync_hashes, "icloud") {
                 synced_note = true;
             }
         }
@@ -5084,6 +5534,10 @@ blockquote {
             selected_sheet_id,
             selected_sheets_ids,
             icloud_dir: anchor,
+            grammar_enabled: self.grammar.enabled,
+            style_visible: self.grammar.style_visible,
+            dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
+            dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
         };
         if let Ok(text) = serde_json::to_string_pretty(&local_saved) {
@@ -5124,6 +5578,10 @@ blockquote {
                     selected_sheet_id: None,
                     selected_sheets_ids: Vec::new(),
                     icloud_dir: None,
+                    grammar_enabled: true,
+                    style_visible: false,
+                    dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
+                    dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
                     dirty: false,
                     version: 1,
                 };
@@ -5152,6 +5610,8 @@ blockquote {
         groups: &mut Vec<Group>,
         sheets: &mut Vec<Sheet>,
         tombs: &mut Vec<Tombstone>,
+        dict_adds: &mut std::collections::BTreeSet<String>,
+        dict_removes: &mut std::collections::BTreeSet<String>,
         path: &std::path::Path,
         sync_hashes: &mut std::collections::HashMap<String, u64>,
         key: &str,
@@ -5159,7 +5619,16 @@ blockquote {
         let Ok(bytes) = std::fs::read(path) else {
             return false;
         };
-        Self::merge_store_bytes(groups, sheets, tombs, &bytes, sync_hashes, key)
+        Self::merge_store_bytes(
+            groups,
+            sheets,
+            tombs,
+            dict_adds,
+            dict_removes,
+            &bytes,
+            sync_hashes,
+            key,
+        )
     }
 
     /// Merge downloaded store bytes (file or Drive payload) into memory.
@@ -5169,6 +5638,8 @@ blockquote {
         groups: &mut Vec<Group>,
         sheets: &mut Vec<Sheet>,
         tombs: &mut Vec<Tombstone>,
+        dict_adds: &mut std::collections::BTreeSet<String>,
+        dict_removes: &mut std::collections::BTreeSet<String>,
         bytes: &[u8],
         sync_hashes: &mut std::collections::HashMap<String, u64>,
         key: &str,
@@ -5187,6 +5658,13 @@ blockquote {
         // Baseline what we saw: identical bytes skip the merge next time
         // without needing a save to record the hash first.
         sync_hashes.insert(key.to_string(), hash);
+        // Custom dictionary words union across stores, same as tombstones.
+        grammar::merge_word_sets(
+            dict_adds,
+            dict_removes,
+            &store.dictionary_adds,
+            &store.dictionary_removes,
+        );
         // Files are section-pure by construction; the merge itself is
         // UUID-based and needs no section filtering.
         let mut pseudo = SavedLibrary {
@@ -5216,6 +5694,10 @@ blockquote {
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
+            grammar_enabled: true,
+            style_visible: false,
+            dictionary_adds: store.dictionary_adds,
+            dictionary_removes: store.dictionary_removes,
             dirty: false,
         };
         // Remap the file-local cross-refs to merged space via UUIDs, so the
@@ -5382,6 +5864,25 @@ blockquote {
                         saved.groups = groups;
                         saved.sheets = sheets;
                         saved.tombstones = tombs;
+                        // Custom dictionary words union across stores.
+                        let mut adds: std::collections::BTreeSet<String> = saved
+                            .dictionary_adds
+                            .iter()
+                            .cloned()
+                            .collect();
+                        let mut removes: std::collections::BTreeSet<String> = saved
+                            .dictionary_removes
+                            .iter()
+                            .cloned()
+                            .collect();
+                        grammar::merge_word_sets(
+                            &mut adds,
+                            &mut removes,
+                            &istore.dictionary_adds,
+                            &istore.dictionary_removes,
+                        );
+                        saved.dictionary_adds = adds.into_iter().collect();
+                        saved.dictionary_removes = removes.into_iter().collect();
                     }
                 }
             }
@@ -5402,6 +5903,24 @@ blockquote {
                             saved.groups = groups;
                             saved.sheets = sheets;
                             saved.tombstones = tombs;
+                            let mut adds: std::collections::BTreeSet<String> = saved
+                                .dictionary_adds
+                                .iter()
+                                .cloned()
+                                .collect();
+                            let mut removes: std::collections::BTreeSet<String> = saved
+                                .dictionary_removes
+                                .iter()
+                                .cloned()
+                                .collect();
+                            grammar::merge_word_sets(
+                                &mut adds,
+                                &mut removes,
+                                &cstore.dictionary_adds,
+                                &cstore.dictionary_removes,
+                            );
+                            saved.dictionary_adds = adds.into_iter().collect();
+                            saved.dictionary_removes = removes.into_iter().collect();
                         }
                     }
                 }
@@ -5902,7 +6421,13 @@ blockquote {
                         let mut fmt = base.clone();
                         fmt.color = theme.ed_strike();
                         fmt.strikethrough = Stroke::new(1.0, theme.ed_strike());
+                        // The `~~` markers stay in the job (dimmed, like
+                        // bold/italic): dropping them would shift every
+                        // galley char offset after them and misalign the
+                        // spelling squiggles on that line.
+                        job.append("~~", 0.0, dim_marker.clone());
                         job.append(inner, 0.0, fmt);
+                        job.append("~~", 0.0, dim_marker.clone());
                         i += end + 4;
                         continue;
                     }
@@ -6266,7 +6791,11 @@ blockquote {
     /// natural height so all selected sheets share one scroll view.
     fn edit_sheet_body(&mut self, ui: &mut egui::Ui, sel: usize, fill: bool) {
         let mut pending_url: Option<String> = None;
+        let mut pending_grammar: Option<GrammarAction> = None;
         let mut edited = false;
+        // Lint before interacting: hash-gated, so unchanged text costs
+        // nothing and squiggles are ready for the overlay below.
+        Self::refresh_grammar_for_sheets(&self.sheets, &mut self.grammar, sel);
         let base_size = self.editor_font_size;
         let theme = self.app_theme;
         let editor = self.editor_font(ui.ctx(), base_size);
@@ -6615,6 +7144,111 @@ blockquote {
                         }
                     }
                 }
+                // Grammar squiggles plus the fix popup. Issues are cached
+                // per sheet (hash-gated in `refresh_grammar_for_sheets`), so
+                // this pass is pure painting plus one caret lookup.
+                let mut grammar_action: Option<GrammarAction> = None;
+                if self.grammar.enabled {
+                    let issues = Self::grammar_inline_issues(&self.grammar, sel);
+                    for issue in &issues {
+                        let color = match issue.kind {
+                            grammar::IssueKind::Spelling => theme.grammar_spelling(),
+                            _ => theme.grammar_issue(),
+                        };
+                        for (a, b) in
+                            Self::grammar_underline(&galley, galley_pos, issue.start, issue.end)
+                        {
+                            let mut pts = vec![a];
+                            let mut x = a.x + 3.0;
+                            let mut up = false;
+                            while x < b.x {
+                                pts.push(egui::pos2(x, a.y + if up { 0.0 } else { 1.5 }));
+                                x += 3.0;
+                                up = !up;
+                            }
+                            pts.push(egui::pos2(b.x, a.y));
+                            ui.painter().line(pts, egui::Stroke::new(1.0, color));
+                        }
+                    }
+                    // Fix popup when the caret sits inside a flagged span.
+                    if let Some(state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                        if let Some(range) = state.cursor.char_range() {
+                            if range.primary.index == range.secondary.index {
+                                let at = range.primary.index;
+                                if let Some(hit) = issues
+                                    .iter()
+                                    .find(|i| i.start <= at && at <= i.end)
+                                    .cloned()
+                                {
+                                    let caret_rect = galley.pos_from_ccursor(
+                                        egui::text::CCursor::new(at),
+                                    );
+                                    let anchor = egui::pos2(
+                                        galley_pos.x + caret_rect.center().x + 8.0,
+                                        galley_pos.y + caret_rect.max.y + 4.0,
+                                    );
+                                    egui::Area::new(egui::Id::new((
+                                        "grammar-popup",
+                                        sel,
+                                    )))
+                                    .order(egui::Order::Tooltip)
+                                    .fixed_pos(anchor)
+                                    .show(ui.ctx(), |ui| {
+                                        egui::Frame::popup(ui.style())
+                                            .show(ui, |ui| {
+                                                ui.set_max_width(300.0);
+                                                ui.label(
+                                                    RichText::new(hit.message.clone()).small(),
+                                                );
+                                                for s in &hit.suggestions {
+                                                    let label = match s {
+                                                        grammar::AppliedSuggestion::Replace(t) => {
+                                                            format!("→ {}", Self::truncate_suggestion(t))
+                                                        }
+                                                        grammar::AppliedSuggestion::InsertAfter(t) => {
+                                                            format!("+ {}", Self::truncate_suggestion(t))
+                                                        }
+                                                        grammar::AppliedSuggestion::Remove => {
+                                                            "Remove".to_string()
+                                                        }
+                                                    };
+                                                    if ui.button(label).clicked() {                                                grammar_action = Some(GrammarAction::Apply {
+                                                            sheet: sel,
+                                                            start: hit.start,
+                                                            end: hit.end,
+                                                            suggestion: s.clone(),
+                                                        });
+                                                    }
+                                                }
+                                                ui.horizontal(|ui| {
+                                                    if ui.small_button("Ignore").clicked() {
+                                                        grammar_action = Some(GrammarAction::Ignore {
+                                                            message: hit.message.clone(),
+                                                            covered: hit.covered.clone(),
+                                                        });
+                                                    }
+                                                    if hit.kind == grammar::IssueKind::Spelling
+                                                        && Self::is_single_word(&hit.covered)
+                                                    {
+                                                        if ui.small_button("Add to dictionary").clicked() {
+                                                            grammar_action = Some(
+                                                                GrammarAction::LearnWord(
+                                                                    hit.covered.clone(),
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(action) = grammar_action {
+                    pending_grammar = Some(action);
+                }
             }
             if resp.clicked()
                 && ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
@@ -6641,6 +7275,32 @@ blockquote {
         if let Some(url) = pending_url {
             ui.ctx().open_url(egui::OpenUrl::same_tab(url.clone()));
             self.status = format!("Opened link {url}");
+        }
+        if let Some(action) = pending_grammar {
+            match action {
+                GrammarAction::Apply {
+                    sheet,
+                    start,
+                    end,
+                    suggestion,
+                } => {
+                    self.apply_grammar_suggestion(ui.ctx(), sheet, start, end, &suggestion);
+                }
+                GrammarAction::Ignore { message, covered } => {
+                    self.grammar.ignored.insert((message, covered));
+                    // Drop the cached pass so the flag vanishes now.
+                    self.grammar.cache.remove(&sel);
+                    self.grammar.generation += 1;
+                }
+                GrammarAction::LearnWord(word) => {
+                    self.grammar.dict_removes.remove(&word);
+                    self.grammar.dict_adds.insert(word);
+                    self.grammar.cache.remove(&sel);
+                    self.grammar.generation += 1;
+                    self.save_library();
+                    self.status = "Added to dictionary".to_string();
+                }
+            }
         }
     }
 
@@ -11580,6 +12240,50 @@ blockquote {
                     self.save_library();
                 }
                 ui.separator();
+                // Grammar checking: master toggle plus the synced custom
+                // dictionary (words added from the fix popup land here and
+                // can be removed again, which also syncs).
+                ui.label(RichText::new("Checking").small().color(self.app_theme.text_dim()));
+                if ui
+                    .checkbox(&mut self.grammar.enabled, "Check spelling and grammar as I type")
+                    .changed()
+                {
+                    self.grammar.cache.clear();
+                    self.grammar.generation += 1;
+                    self.save_library();
+                }
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Dictionary: {} word{}",
+                        self.grammar.dict_adds.len(),
+                        if self.grammar.dict_adds.len() == 1 { "" } else { "s" }
+                    ));
+                });
+                if !self.grammar.dict_adds.is_empty() {
+                    let mut remove_word: Option<String> = None;
+                    egui::ScrollArea::vertical()
+                        .max_height(90.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for w in self.grammar.dict_adds.iter() {
+                                ui.horizontal(|ui| {
+                                    ui.label(w);
+                                    if ui.small_button("×").on_hover_text(format!("Remove “{w}” from the dictionary")).clicked() {
+                                        remove_word = Some(w.clone());
+                                    }
+                                });
+                            }
+                        });
+                    if let Some(w) = remove_word {
+                        self.grammar.dict_adds.remove(&w);
+                        self.grammar.dict_removes.insert(w);
+                        self.grammar.cache.clear();
+                        self.grammar.generation += 1;
+                        self.save_library();
+                        self.status = "Removed from dictionary".to_string();
+                    }
+                }
+                ui.separator();
                 // iCloud sync for the iCloud section (Documents stays local).
                 ui.label(RichText::new("Sync").small().color(self.app_theme.text_dim()));
                 let using_drive = Self::icloud_drive_dir().is_some();
@@ -12502,6 +13206,164 @@ impl WritingApp {
             });
         }
     }
+    /// Style sidebar: Harper's style-bucket lints for the focused sheet,
+    /// with click-to-jump and one-click fixes. Inline squiggles stay
+    /// spelling + grammar; this panel owns clarity and concision.
+    fn show_style_sidebar(&mut self, ui: &mut egui::Ui) {
+        let dim = self.app_theme.text_dim();
+        ui.label(RichText::new("Style").size(12.5).color(dim));
+        ui.add_space(8.0);
+        if !self.grammar.enabled {
+            ui.label("Turn on “Check spelling and grammar as I type” in Settings to see style suggestions.");
+            return;
+        }
+        let Some(sel) = self.grammar_focused_sheet() else {
+            ui.label("No sheet open.");
+            return;
+        };
+        // Lint on open so the panel is never stale (hash-gated: free when
+        // nothing changed).
+        Self::refresh_grammar_for_sheets(&self.sheets, &mut self.grammar, sel);
+        let issues = Self::grammar_style_issues(&self.grammar, sel);
+        if issues.is_empty() {
+            ui.label("No style suggestions for this sheet. Clear, concise prose.");
+            return;
+        }
+        ui.label(
+            RichText::new(if issues.len() == 1 {
+                "1 suggestion".to_string()
+            } else {
+                format!("{} suggestions", issues.len())
+            })
+            .small()
+            .color(dim),
+        );
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let mut jump: Option<(usize, usize)> = None;
+                let mut apply: Option<(usize, usize, usize, grammar::AppliedSuggestion)> = None;
+                for issue in issues.iter().take(100) {
+                    let excerpt = if issue.covered.chars().count() > 90 {
+                        let mut s: String = issue.covered.chars().take(89).collect();
+                        s.push('…');
+                        s
+                    } else {
+                        issue.covered.clone()
+                    };
+                    // Card look matches the sheet cards: inset rounded frame
+                    // with comfortable padding instead of a bare separator.
+                    let card_width = ui.available_width();
+                    let bg = self.app_theme.card_selected();
+                    egui::Frame::new()
+                        .fill(bg)
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 10,
+                            top: 10,
+                            bottom: 10,
+                        })
+                        .outer_margin(egui::Margin {
+                            left: 8,
+                            right: 8,
+                            top: 4,
+                            bottom: 4,
+                        })
+                        .show(ui, |ui| {
+                            ui.set_min_width(card_width - 38.0);
+                            ui.set_max_width(card_width - 38.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                // The problem, stated plainly and large.
+                                ui.label(
+                                    RichText::new(issue.message.clone())
+                                        .strong()
+                                        .size(14.0)
+                                        .color(self.app_theme.text_bright()),
+                                );
+                                // The flagged passage, dimmer and secondary.
+                                ui.label(
+                                    RichText::new(format!("“{excerpt}”"))
+                                        .size(12.5)
+                                        .italics()
+                                        .color(self.app_theme.text_faint()),
+                                );
+                                // The recommended fix, as the primary action.
+                                let mut primary: Option<&grammar::AppliedSuggestion> =
+                                    None;
+                                if let Some(first) = issue.suggestions.first() {
+                                    let label = match first {
+                                        grammar::AppliedSuggestion::Replace(t) => {
+                                            format!("Apply: {}", Self::truncate_suggestion(t))
+                                        }
+                                        grammar::AppliedSuggestion::InsertAfter(t) => {
+                                            format!("Apply: +{}", Self::truncate_suggestion(t))
+                                        }
+                                        grammar::AppliedSuggestion::Remove => {
+                                            "Apply: remove".to_string()
+                                        }
+                                    };
+                                    if ui
+                                        .add_sized(
+                                            Vec2::new(ui.available_width(), 26.0),
+                                            egui::Button::new(
+                                                RichText::new(label).strong().size(13.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        primary = Some(first);
+                                    }
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.small_button("Show in editor").clicked() {
+                                        jump = Some((sel, issue.start));
+                                    }
+                                    for s in issue.suggestions.iter().skip(1).take(2) {
+                                        let label = match s {
+                                            grammar::AppliedSuggestion::Replace(t) => {
+                                                format!("→ {}", Self::truncate_suggestion(t))
+                                            }
+                                            grammar::AppliedSuggestion::InsertAfter(t) => {
+                                                format!("+ {}", Self::truncate_suggestion(t))
+                                            }
+                                            grammar::AppliedSuggestion::Remove => {
+                                                "Remove".to_string()
+                                            }
+                                        };
+                                        if ui.small_button(label).clicked() {
+                                            apply = Some((
+                                                sel,
+                                                issue.start,
+                                                issue.end,
+                                                s.clone(),
+                                            ));
+                                        }
+                                    }
+                                });
+                                if let Some(first) = primary {
+                                    apply = Some((sel, issue.start, issue.end, first.clone()));
+                                }
+                            });
+                        })
+                        .response;
+                }
+                if issues.len() > 100 {
+                    ui.label(
+                        RichText::new(format!("…and {} more", issues.len() - 100)).small().color(dim),
+                    );
+                }
+                if let Some((s, at)) = jump {
+                    self.jump_to_offset(ui.ctx(), s, at);
+                }
+                if let Some((s, start, end, suggestion)) = apply {
+                    self.apply_grammar_suggestion(ui.ctx(), s, start, end, &suggestion);
+                }
+            });
+    }
 }
 
 impl eframe::App for WritingApp {
@@ -12621,6 +13483,8 @@ impl eframe::App for WritingApp {
                         {
                             self.goals_visible = !self.goals_visible;
                             if self.goals_visible {
+                                // One right panel at a time.
+                                self.grammar.style_visible = false;
                                 // Start editing from the current target (or
                                 // blank when none is set yet).
                                 self.goal_draft = if self.word_goal == 0 {
@@ -12629,6 +13493,20 @@ impl eframe::App for WritingApp {
                                     self.word_goal.to_string()
                                 };
                             }
+                        }
+                        if Self::header_button(
+                            ui,
+                            RichText::new(icon::BOOK_OPEN).size(17.0),
+                        )
+                        .on_hover_text("Style suggestions")
+                        .clicked()
+                        {
+                            self.grammar.style_visible = !self.grammar.style_visible;
+                            if self.grammar.style_visible {
+                                // One right panel at a time.
+                                self.goals_visible = false;
+                            }
+                            self.save_library();
                         }
                         if Self::header_button(
                             ui,
@@ -12877,6 +13755,9 @@ impl eframe::App for WritingApp {
                                 let caret_right = caret_left
                                     + depth as f32 * 14.0
                                     + 14.0;
+                                // Whether the group name is clipped with an
+                                // ellipsis (set inside the row closure).
+                                let mut name_clipped = false;
                                 let mut resp = full_width_row(
                                     ui,
                                     drag_id,
@@ -12955,20 +13836,40 @@ impl eframe::App for WritingApp {
                                         } else {
                                             child.add_space(14.0);
                                         }
-                                        full_width_row_label(
-                                            child,
-                                            RichText::new(format!(
-                                                "{}  {}",
-                                                icon::FOLDER,
-                                                name
-                                            ))
-                                            .size(15.0)
-                                            .color(if selected {
-                                                bright
-                                            } else {
-                                                row_text
-                                            }),
-                                        );
+                                        // Long names truncate with an ellipsis
+                                        // instead of spilling past the row
+                                        // highlight; the full name shows on
+                                        // hover (tooltips wait ~0.5s).
+                                        let full_label =
+                                            format!("{}  {}", icon::FOLDER, name);
+                                        let label_color = if selected {
+                                            bright
+                                        } else {
+                                            row_text
+                                        };
+                                        let room = child.available_width() - 4.0;
+                                        let full_width = child.fonts(|f| {
+                                            f.layout(
+                                                full_label.clone(),
+                                                egui::FontId::proportional(15.0),
+                                                label_color,
+                                                f32::INFINITY,
+                                            )
+                                            .rect
+                                            .width()
+                                        });
+                                        name_clipped = full_width > room;
+                                        let mut group_label = egui::Label::new(
+                                            RichText::new(full_label)
+                                                .size(15.0)
+                                                .color(label_color),
+                                        )
+                                        .selectable(false)
+                                        .sense(egui::Sense::hover());
+                                        if name_clipped {
+                                            group_label = group_label.truncate();
+                                        }
+                                        child.add(group_label);
                                     },
                                 );
                                 let in_caret = has_children
@@ -12985,6 +13886,8 @@ impl eframe::App for WritingApp {
                                     } else {
                                         "Expand group"
                                     });
+                                } else if name_clipped {
+                                    resp = resp.on_hover_text(name.clone());
                                 }
                                 if resp.clicked() {
                                     action = Some(if in_caret {
@@ -13438,7 +14341,7 @@ impl eframe::App for WritingApp {
                 let scroll = ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.spacing_mut().item_spacing.y = 4.0;
                         for idx in visible.clone() {
                             let (display_title, preview) = self
                                 .sheets
@@ -13459,16 +14362,22 @@ impl eframe::App for WritingApp {
                             let render_card = |ui: &mut egui::Ui| {
                                 egui::Frame::new()
                                     .fill(bg)
+                                    .corner_radius(8.0)
                                     .inner_margin(egui::Margin {
                                         left: 12,
                                         right: 10,
                                         top: 10,
                                         bottom: 10,
                                     })
-                                    .outer_margin(egui::Margin::same(0))
+                                    .outer_margin(egui::Margin {
+                                        left: 8,
+                                        right: 8,
+                                        top: 4,
+                                        bottom: 4,
+                                    })
                                     .show(ui, |ui| {
-                                        ui.set_min_width(width - 22.0);
-                                        ui.set_max_width(width - 22.0);
+                                        ui.set_min_width(width - 38.0);
+                                        ui.set_max_width(width - 38.0);
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 4.0;
                                             ui.label(
@@ -13627,7 +14536,6 @@ impl eframe::App for WritingApp {
                             if resp.hovered() {
                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
-                            ui.separator();
                         }
                         if let Some((rect, after)) = mark {
                             let y = if after {
@@ -13687,6 +14595,13 @@ impl eframe::App for WritingApp {
             .default_width(230.0)
             .show_animated(ctx, self.goals_visible, |ui| {
                 self.show_goals_sidebar(ui);
+            });
+
+        let _ = egui::SidePanel::right("style")
+            .resizable(true)
+            .default_width(260.0)
+            .show_animated(ctx, self.grammar.style_visible, |ui| {
+                self.show_style_sidebar(ui);
             });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -13813,7 +14728,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, default_editor_font_size, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -14039,6 +14954,7 @@ mod tests {
             last_sync_check: 0.0,
             show_conflicts: false,
             gdrive: GdriveSync::default(),
+            grammar: GrammarState::default(),
             icloud_dir: None,
         }
     }
@@ -14645,6 +15561,10 @@ mod tests {
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
+            grammar_enabled: true,
+            style_visible: false,
+            dictionary_adds: Vec::new(),
+            dictionary_removes: Vec::new(),
             dirty: false,
         };
         let text = serde_json::to_string(&saved).unwrap();
@@ -15029,6 +15949,7 @@ mod tests {
             last_sync_check: 0.0,
             show_conflicts: false,
             gdrive: GdriveSync::default(),
+            grammar: GrammarState::default(),
             icloud_dir: None,
         };
         app.selection = SidebarSelection::Group(1);
@@ -18230,17 +19151,25 @@ mod tests {
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
+            grammar_enabled: true,
+            style_visible: false,
+            dictionary_adds: Vec::new(),
+            dictionary_removes: Vec::new(),
             dirty: false,
         };
         let bytes = serde_json::to_vec(&store).unwrap();
         let mut groups = Vec::new();
         let mut sheets = Vec::new();
         let mut tombs = Vec::new();
+        let mut adds = std::collections::BTreeSet::new();
+        let mut removes = std::collections::BTreeSet::new();
         let mut hashes = std::collections::HashMap::new();
         assert!(WritingApp::merge_store_bytes(
             &mut groups,
             &mut sheets,
             &mut tombs,
+            &mut adds,
+            &mut removes,
             &bytes,
             &mut hashes,
             "gdrive"
@@ -18252,6 +19181,8 @@ mod tests {
             &mut groups,
             &mut sheets,
             &mut tombs,
+            &mut adds,
+            &mut removes,
             &bytes,
             &mut hashes,
             "gdrive"
@@ -18261,10 +19192,179 @@ mod tests {
             &mut groups,
             &mut sheets,
             &mut tombs,
+            &mut adds,
+            &mut removes,
             b"not json",
             &mut hashes,
             "other"
         ));
+    }
+    /// The squiggle overlay maps Harper's source char offsets through the
+    /// editor galley, so the layouter must preserve every source char
+    /// exactly once, in order. Dropped or duplicated chars shift every
+    /// squiggle after them on that line.
+    #[test]
+    fn markdown_layouter_preserves_source_chars() {
+        egui::__run_test_ui(|ui| {
+            let lines = [
+                "plain Teh here",
+                "# Heading Teh",
+                "## Sub Teh head",
+                "### Deep Teh head",
+                "> quote Teh here",
+                "- item Teh here",
+                "* star Teh here",
+                "1. numbered Teh here",
+                "12. numbered Teh here",
+                "- [ ] task Teh here",
+                "- [x] done Teh here",
+                "inline `code Teh` here",
+                "**bold Teh** here",
+                "__bold Teh__ here",
+                "*italic Teh* here",
+                "_italic Teh_ here",
+                "~~strike Teh~~ here",
+                "[link Teh](https://example.com) here",
+                "bare https://example.com Teh here",
+                "mixed **bold** and *italic* and `code` Teh here",
+                "```",
+                "code Teh block",
+                "```",
+                "",
+                "   ",
+                "after blank Teh here",
+            ];
+            let text = lines.join("\n") + "\n";
+            let galley = WritingApp::markdown_layouter(
+                ui,
+                &text,
+                600.0,
+                17.0,
+                AppTheme::Light,
+                egui::FontId::proportional(17.0),
+            );
+            assert_eq!(
+                galley.job.text, text,
+                "layouter must preserve every source char in order"
+            );
+        });
+    }
+
+    #[test]
+    fn grammar_refresh_caches_and_respects_toggle() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "Teh test.\n".to_string();
+        // Disabled: nothing cached.
+        app.grammar.enabled = false;
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
+        assert!(app.grammar.cache.get(&0).is_none());
+        // Enabled: spelling issue appears and sticks in cache.
+        app.grammar.enabled = true;
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
+        let cached = app.grammar.cache.get(&0).expect("lint cached");
+        assert!(cached
+            .issues
+            .iter()
+            .any(|i| i.kind == grammar::IssueKind::Spelling && i.covered == "Teh"));
+        // Same content: cache entry reused, no recompute needed.
+        let hash_before = cached.hash;
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
+        assert_eq!(app.grammar.cache.get(&0).unwrap().hash, hash_before);
+        // New content: recomputed.
+        app.sheets[0].content = "All clean here.\n".to_string();
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
+        assert!(app.grammar.cache.get(&0).unwrap().issues.is_empty());
+    }
+
+    #[test]
+    fn grammar_apply_moves_caret_and_saves() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "Teh test.\n".to_string();
+        app.grammar.enabled = true;
+        WritingApp::lint_grammar_for_tests(&app.sheets, &mut app.grammar, 0);
+        let issue = app.grammar.cache.get(&0).unwrap().issues.iter().find(|i| i.covered == "Teh").unwrap().clone();
+        let suggestion = issue.suggestions.into_iter().find(|s| matches!(
+            s,
+            grammar::AppliedSuggestion::Replace(t) if t == "The"
+        )).expect("a 'The' fix");
+        let ctx = egui::Context::default();
+        assert!(app.apply_grammar_suggestion(&ctx, 0, issue.start, issue.end, &suggestion));
+        assert_eq!(app.sheets[0].content, "The test.\n");
+    }
+
+    #[test]
+    fn grammar_dictionary_merges_across_stores() {
+        let _storage = isolate_storage();
+        let dir = std::env::temp_dir().join("ariadne-grammar-merge-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.json");
+        let store = SavedLibrary {
+            version: 1,
+            groups: Vec::new(),
+            sheets: Vec::new(),
+            selection: SidebarSelection::Filter(SmartFilter::All),
+            selected_sheet: 0,
+            selected_sheets: Vec::new(),
+            export_css: String::new(),
+            export_css_name: String::new(),
+            style_guide_added: true,
+            style_guide_version: 0,
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
+            export_format: ExportFormat::default(),
+            editor_font_size: default_editor_font_size(),
+            sidebars_visible: true,
+            library_visible: None,
+            sheets_visible: None,
+            word_goal: 0,
+            app_theme: AppTheme::default(),
+            editor_font_family: None,
+            tombstones: Vec::new(),
+            sheet_order: Vec::new(),
+            selection_id: None,
+            selected_sheet_id: None,
+            selected_sheets_ids: Vec::new(),
+            icloud_dir: None,
+            grammar_enabled: true,
+            style_visible: false,
+            dictionary_adds: vec!["bort".to_string()],
+            dictionary_removes: vec![" Wort ".to_string()],
+            dirty: false,
+        };
+        std::fs::write(&path, serde_json::to_string(&store).unwrap()).unwrap();
+        let mut groups = Vec::new();
+        let mut sheets = Vec::new();
+        let mut tombs = Vec::new();
+        let mut adds = std::collections::BTreeSet::from(["alpha".to_string()]);
+        let mut removes = std::collections::BTreeSet::new();
+        let mut hashes = std::collections::HashMap::new();
+        // Dictionary-only merges report no structural change but still union.
+        WritingApp::merge_store_file(
+            &mut groups,
+            &mut sheets,
+            &mut tombs,
+            &mut adds,
+            &mut removes,
+            &path,
+            &mut hashes,
+            "gdrive",
+        );
+        assert!(adds.contains("alpha") && adds.contains("bort"));
+        assert!(removes.contains(" Wort "));
+        assert!(!WritingApp::merge_store_file(
+            &mut groups,
+            &mut sheets,
+            &mut tombs,
+            &mut adds,
+            &mut removes,
+            &path,
+            &mut hashes,
+            "gdrive",
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -18352,6 +19452,10 @@ mod tests {
             tombstones: Vec::new(),
             sheet_order: Vec::new(),
             icloud_dir: None,
+            grammar_enabled: true,
+            style_visible: false,
+            dictionary_adds: Vec::new(),
+            dictionary_removes: Vec::new(),
             dirty: false,
         };
         let bytes = serde_json::to_vec(&remote).unwrap();
@@ -18367,6 +19471,58 @@ mod tests {
         assert!(app.gdrive.remote_exists);
         assert!(!app.gdrive.busy);
     }
+    /// End-to-end fix flow: type a typo, put the caret inside it, take the
+    /// popup's suggestion, and land on fixed text.
+    #[test]
+    fn grammar_fix_popup_repairs_typo() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let _storage = isolate_storage();
+        let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
+        harness.set_size(egui::vec2(1100.0, 720.0));
+        harness.run();
+
+        // Focus the editor and append a typo at the end; the caret lands
+        // right after it (the flagged span's edge), which opens the fix
+        // popup. Nodes are re-queried per step: holding one borrows the
+        // harness.
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .type_text(" Teh");
+        harness.run();
+
+        // The lint runs on a background worker (never blocking typing),
+        // so wait for the typo to be flagged before querying the popup.
+        let mut flagged = false;
+        for _ in 0..200 {
+            harness.run();
+            let st = harness.state();
+            let sel = st.selected_sheet;
+            if st.grammar.cache.get(&sel).map(|c| !c.issues.is_empty()).unwrap_or(false) {
+                flagged = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(flagged, "background lint never flagged the typo");
+
+        // The fix popup offers the correction; taking it fixes the sheet.
+        let fix = harness.get_by_label("→ The");
+        fix.click();
+        harness.run();
+
+        let content = harness.state().sheets[harness.state().selected_sheet].content.clone();
+        assert!(
+            content.ends_with("The"),
+            "fix did not apply, content ends with: {content:?}",
+        );
+    }
+
     #[test]
     fn group_rename_trims_and_saves() {
         let _storage = isolate_storage();

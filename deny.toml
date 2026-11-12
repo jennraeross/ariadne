@@ -37,6 +37,11 @@ confidence-threshold = 0.8
 # Weak file-level copyleft: fine to link, notices stay intact.
 exceptions = [
   { allow = ["MPL-2.0"], crate = "option-ext" },
+  # harper-core transitive deps (terminal colors, CSS number parsing):
+  # linked unmodified, same weak-copyleft terms as above.
+  { allow = ["MPL-2.0"], crate = "colored" },
+  { allow = ["MPL-2.0"], crate = "cssparser" },
+  { allow = ["MPL-2.0"], crate = "dtoa-short" },
 ]
 
 [advisories]
@@ -54,6 +59,13 @@ ignore = [
   # files and local D-Bus introspection XML — no untrusted input.
   { id = "RUSTSEC-2026-0194", reason = "no fixed 0.30 release; local-only XML input" },
   { id = "RUSTSEC-2026-0195", reason = "no fixed 0.30 release; local-only XML input" },
+  # zip 8.6.0 is pinned by harper-core, which uses it only to read its own
+  # bundled linguistic data into memory (weirpack); the app never extracts
+  # archives to disk, so extraction advisories are unreachable.
+  { id = "RUSTSEC-2026-0367", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  { id = "RUSTSEC-2026-0368", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  { id = "RUSTSEC-2026-0369", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  { id = "RUSTSEC-2026-0429", reason = "harper-core reads bundled data in-memory; no archive extraction" },
 ]
 
 [bans]
