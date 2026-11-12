@@ -673,6 +673,14 @@ struct SavedLibrary {
     /// Check spelling and grammar as you type. Absent in older saves: on.
     #[serde(default = "default_true")]
     grammar_enabled: bool,
+    /// Typewriter scrolling: keep the caret line centered. Absent in
+    /// older saves: off.
+    #[serde(default)]
+    typewriter: bool,
+    /// Focus mode: dim paragraphs outside the caret's. Absent in older
+    /// saves: off.
+    #[serde(default)]
+    focus_mode: bool,
     /// Whether the style sidebar is shown. Remembered across runs.
     #[serde(default)]
     style_visible: bool,
@@ -809,6 +817,10 @@ struct WritingApp {
     export_format: ExportFormat,
     /// Editor text size in points. Adjustable from Settings.
     editor_font_size: f32,
+    /// Typewriter scrolling: keep the caret line centered. Remembered.
+    typewriter: bool,
+    /// Focus mode: dim paragraphs outside the caret's. Remembered.
+    focus_mode: bool,
     /// Whether the library sidebar is shown. Remembered across runs;
     /// toggled from the headerbar or with a two-finger swipe.
     library_visible: bool,
@@ -867,6 +879,10 @@ struct WritingApp {
     find_index: usize,
     find_matches: Vec<(usize, usize)>,
     find_scroll: bool,
+    /// Typewriter scrolling + focus mode (Settings → Editor). Remembered.
+    /// Last centered (sheet, galley row), so scrolling only recenters on
+    /// caret moves and never fights the mouse wheel. Session-only.
+    typewriter_last: Option<(usize, usize)>,
     /// Request keyboard focus in the search field on the next frame.
     search_focus: bool,
     /// Whether the history popup is open. Session-only.
@@ -2166,6 +2182,8 @@ impl WritingApp {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            typewriter: false,
+            focus_mode: false,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -2182,6 +2200,7 @@ impl WritingApp {
             search_open: false,
             search_query: String::new(),
             search_cursor: 0,
+            typewriter_last: None,
             find_open: false,
             find_query: String::new(),
             find_case: false,
@@ -2239,6 +2258,8 @@ impl WritingApp {
             app.tombstones = saved.tombstones;
             app.icloud_dir = saved.icloud_dir;
             app.grammar.enabled = saved.grammar_enabled;
+        app.typewriter = saved.typewriter;
+        app.focus_mode = saved.focus_mode;
             app.grammar.style_visible = saved.style_visible;
             app.grammar.dict_adds = saved.dictionary_adds.into_iter().collect();
             app.grammar.dict_removes = saved.dictionary_removes.into_iter().collect();
@@ -5447,6 +5468,8 @@ blockquote {
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
             grammar_enabled: self.grammar.enabled,
+            typewriter: self.typewriter,
+            focus_mode: self.focus_mode,
             style_visible: self.grammar.style_visible,
             dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
@@ -5590,6 +5613,8 @@ blockquote {
             selected_sheets_ids,
             icloud_dir: anchor,
             grammar_enabled: self.grammar.enabled,
+            typewriter: self.typewriter,
+            focus_mode: self.focus_mode,
             style_visible: self.grammar.style_visible,
             dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
@@ -5634,6 +5659,8 @@ blockquote {
                     selected_sheets_ids: Vec::new(),
                     icloud_dir: None,
                     grammar_enabled: true,
+                    typewriter: false,
+                    focus_mode: false,
                     style_visible: false,
                     dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
                     dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
@@ -5750,6 +5777,8 @@ blockquote {
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
             grammar_enabled: true,
+            typewriter: false,
+            focus_mode: false,
             style_visible: false,
             dictionary_adds: store.dictionary_adds,
             dictionary_removes: store.dictionary_removes,
@@ -7211,6 +7240,70 @@ blockquote {
                             } else {
                                 (1.0 - phase) as f32
                             });
+                        }
+                    }
+                }
+                // Typewriter scrolling keeps the caret line centered, and
+                // focus mode dims paragraphs outside the caret's. Both run
+                // off the live caret, so mouse-wheel scrolling is left
+                // alone until the caret moves again.
+                if self.typewriter || self.focus_mode {
+                    if let Some(state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                        let at = state
+                            .cursor
+                            .char_range()
+                            .map(|r| r.primary.index)
+                            .unwrap_or(0);
+                        use egui::text::CCursor;
+                        let row = galley.from_ccursor(CCursor::new(at)).rcursor.row;
+                        if self.typewriter {
+                            let key = (sel, row);
+                            if self.typewriter_last != Some(key) {
+                                self.typewriter_last = Some(key);
+                                if let Some(r) = galley.rows.get(row) {
+                                    ui.scroll_to_rect(
+                                        egui::Rect::from_min_max(
+                                            galley_pos + r.rect.min.to_vec2(),
+                                            galley_pos + r.rect.max.to_vec2(),
+                                        ),
+                                        Some(egui::Align::Center),
+                                    );
+                                }
+                            }
+                        } else {
+                            self.typewriter_last = None;
+                        }
+                        if self.focus_mode {
+                            // `sheet` is already mutably borrowed above.
+                            let (s, e) =
+                                Self::paragraph_at(&sheet.content.clone(), at);
+                            let rects = Self::find_highlight_rects(&galley, galley_pos, s, e);
+                            if !rects.is_empty() {
+                                let dim = egui::Color32::from_black_alpha(90);
+                                let clip = ui.clip_rect();
+                                let first = rects.first().unwrap();
+                                let last = rects.last().unwrap();
+                                if first.min.y > clip.min.y {
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(clip.min.x, clip.min.y),
+                                            egui::pos2(clip.max.x, first.min.y),
+                                        ),
+                                        0.0,
+                                        dim,
+                                    );
+                                }
+                                if last.max.y < clip.max.y {
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(clip.min.x, last.max.y),
+                                            egui::pos2(clip.max.x, clip.max.y),
+                                        ),
+                                        0.0,
+                                        dim,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -12131,6 +12224,51 @@ blockquote {
         out
     }
 
+    /// Char-offset range of the block (blank-line-delimited) containing
+    /// `at`. Headings, list items and code fences each count as their own
+    /// block; a caret on a blank line selects just that line.
+    fn paragraph_at(content: &str, at: usize) -> (usize, usize) {
+        let chars: Vec<char> = content.chars().collect();
+        let at = at.min(chars.len());
+        let mut starts = vec![0usize];
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '\n' {
+                starts.push(i + 1);
+            }
+        }
+        let line_end = |l: usize| {
+            if l + 1 < starts.len() {
+                starts[l + 1] - 1
+            } else {
+                chars.len()
+            }
+        };
+        let mut line = 0;
+        for (i, &s) in starts.iter().enumerate() {
+            if s <= at {
+                line = i;
+            } else {
+                break;
+            }
+        }
+        let blank = |l: usize| {
+            let (s, e) = (starts[l], line_end(l));
+            chars[s..e].iter().all(|c| c.is_whitespace())
+        };
+        if blank(line) {
+            return (starts[line], line_end(line));
+        }
+        let mut first = line;
+        while first > 0 && !blank(first - 1) {
+            first -= 1;
+        }
+        let mut last = line;
+        while last + 1 < starts.len() && !blank(last + 1) {
+            last += 1;
+        }
+        (starts[first], line_end(last))
+    }
+
     /// Select a find hit in the editor; the editor scrolls to it on paint.
     fn select_find_match(&mut self, ctx: &egui::Context, sel: usize) {
         let Some(&(s, e)) = self.find_matches.get(self.find_index) else {
@@ -12774,6 +12912,20 @@ blockquote {
                 });
                 if ui.button("Reset to default").clicked() {
                     self.editor_font_size = default_editor_font_size();
+                    self.save_library();
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Reading").size(16.0).color(self.app_theme.text_dim()));
+                if ui
+                    .checkbox(&mut self.typewriter, "Typewriter scrolling (keep the caret line centered)")
+                    .changed()
+                {
+                    self.save_library();
+                }
+                if ui
+                    .checkbox(&mut self.focus_mode, "Focus mode (dim paragraphs outside the caret's)")
+                    .changed()
+                {
                     self.save_library();
                 }
                                 }
@@ -15586,6 +15738,8 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            typewriter: false,
+            focus_mode: false,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -15600,6 +15754,7 @@ mod tests {
             search_open: false,
             search_query: String::new(),
             search_cursor: 0,
+            typewriter_last: None,
             find_open: false,
             find_query: String::new(),
             find_case: false,
@@ -16234,6 +16389,8 @@ mod tests {
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
             grammar_enabled: true,
+            typewriter: false,
+            focus_mode: false,
             style_visible: false,
             dictionary_adds: Vec::new(),
             dictionary_removes: Vec::new(),
@@ -16589,6 +16746,8 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            typewriter: false,
+            focus_mode: false,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -16603,6 +16762,7 @@ mod tests {
             search_open: false,
             search_query: String::new(),
             search_cursor: 0,
+            typewriter_last: None,
             find_open: false,
             find_query: String::new(),
             find_case: false,
@@ -19832,6 +19992,8 @@ mod tests {
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
             grammar_enabled: true,
+            typewriter: false,
+            focus_mode: false,
             style_visible: false,
             dictionary_adds: Vec::new(),
             dictionary_removes: Vec::new(),
@@ -20009,6 +20171,8 @@ mod tests {
             selected_sheets_ids: Vec::new(),
             icloud_dir: None,
             grammar_enabled: true,
+            typewriter: false,
+            focus_mode: false,
             style_visible: false,
             dictionary_adds: vec!["bort".to_string()],
             dictionary_removes: vec![" Wort ".to_string()],
@@ -20133,6 +20297,8 @@ mod tests {
             sheet_order: Vec::new(),
             icloud_dir: None,
             grammar_enabled: true,
+            typewriter: false,
+            focus_mode: false,
             style_visible: false,
             dictionary_adds: Vec::new(),
             dictionary_removes: Vec::new(),
@@ -20220,6 +20386,20 @@ mod tests {
             vec![(0, 2)]
         );
         assert!(WritingApp::find_matches("hi", "hello", false).is_empty());
+    }
+
+    #[test]
+    fn paragraph_at_selects_blank_line_blocks() {
+        // Two paragraphs plus a trailing blank line.
+        let text = "First.\nStill first.\n\nSecond.";
+        // Inside the first block.
+        assert_eq!(WritingApp::paragraph_at(text, 0), (0, 19));
+        assert_eq!(WritingApp::paragraph_at(text, 10), (0, 19));
+        // On the blank line: just that line.
+        assert_eq!(WritingApp::paragraph_at(text, 20), (20, 20));
+        // Second block to end of text (clamped).
+        assert_eq!(WritingApp::paragraph_at(text, 21), (21, 28));
+        assert_eq!(WritingApp::paragraph_at(text, 100), (21, 28));
     }
 
     #[test]
