@@ -859,6 +859,14 @@ struct WritingApp {
     /// Highlighted search result for arrow-key navigation. Session-only:
     /// reset whenever the query changes.
     search_cursor: usize,
+    /// In-document find bar: open state, query, case toggle, current hit,
+    /// and highlight ranges for the selected sheet. Session-only.
+    find_open: bool,
+    find_query: String,
+    find_case: bool,
+    find_index: usize,
+    find_matches: Vec<(usize, usize)>,
+    find_scroll: bool,
     /// Request keyboard focus in the search field on the next frame.
     search_focus: bool,
     /// Whether the history popup is open. Session-only.
@@ -2160,6 +2168,12 @@ impl WritingApp {
             search_open: false,
             search_query: String::new(),
             search_cursor: 0,
+            find_open: false,
+            find_query: String::new(),
+            find_case: false,
+            find_index: 0,
+            find_matches: Vec::new(),
+            find_scroll: false,
             search_focus: false,
             history_open: false,
             group_rename: None,
@@ -7171,6 +7185,32 @@ blockquote {
                         }
                     }
                 }
+                // In-document find highlights: wash every hit, stronger
+                // current match. Painted under the grammar squiggles.
+                if self.find_open && sel == self.selected_sheet && !self.find_matches.is_empty() {
+                    let n = self.find_matches.len();
+                    let cur = self.find_index.min(n - 1);
+                    for (i, &(s, e)) in self.find_matches.iter().enumerate() {
+                        let fill = if i == cur {
+                            theme.accent().linear_multiply(0.35)
+                        } else {
+                            theme.accent_soft()
+                        };
+                        for r in Self::find_highlight_rects(&galley, galley_pos, s, e) {
+                            ui.painter().rect_filled(r, 2.0, fill);
+                        }
+                    }
+                    if self.find_scroll {
+                        if let Some(&(s, e)) = self.find_matches.get(cur) {
+                            let rects =
+                                Self::find_highlight_rects(&galley, galley_pos, s, e);
+                            if let Some(r) = rects.first() {
+                                ui.scroll_to_rect(*r, Some(egui::Align::Center));
+                            }
+                        }
+                        self.find_scroll = false;
+                    }
+                }
                 // Grammar squiggles plus the fix popup. Issues are cached
                 // per sheet (hash-gated in `refresh_grammar_for_sheets`), so
                 // this pass is pure painting plus one caret lookup.
@@ -11896,6 +11936,212 @@ blockquote {
         self.search_cursor = 0;
     }
 
+    /// Char-offset ranges of `query` in `content`, non-overlapping.
+    /// Case-insensitive unless `case` is set (per-char folding keeps
+    /// indices aligned with the source text).
+    fn find_matches(content: &str, query: &str, case: bool) -> Vec<(usize, usize)> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let fold = |c: char| {
+            if case {
+                c
+            } else {
+                c.to_lowercase().next().unwrap_or(c)
+            }
+        };
+        let hay: Vec<char> = content.chars().map(fold).collect();
+        let needle: Vec<char> = query.chars().map(fold).collect();
+        if needle.is_empty() || needle.len() > hay.len() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + needle.len() <= hay.len() {
+            if hay[i..i + needle.len()] == needle[..] {
+                out.push((i, i + needle.len()));
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Filled highlight rects for one char range, in screen space.
+    /// Multi-row spans cover each overlapped row, clamped to the span's
+    /// start/end carets like the grammar underlines.
+    fn find_highlight_rects(
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        start: usize,
+        end: usize,
+    ) -> Vec<egui::Rect> {
+        use egui::text::CCursor;
+        let end = end.max(start);
+        let start_c = galley.from_ccursor(CCursor::new(start));
+        let end_c = galley.from_ccursor(CCursor::new(end));
+        let (r0, r1) = (start_c.rcursor.row, end_c.rcursor.row);
+        let mut out = Vec::new();
+        for (ri, r) in galley.rows.iter().enumerate() {
+            if ri < r0 || ri > r1 {
+                continue;
+            }
+            let mut xs: Vec<f32> = r
+                .glyphs
+                .iter()
+                .flat_map(|g| [g.pos.x, g.pos.x + g.advance_width])
+                .collect();
+            if xs.is_empty() {
+                continue;
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let x0 = if ri == r0 {
+                galley.pos_from_ccursor(CCursor::new(start)).center().x
+            } else {
+                xs[0]
+            };
+            let x1 = if ri == r1 {
+                galley.pos_from_ccursor(CCursor::new(end)).center().x
+            } else {
+                xs[xs.len() - 1]
+            };
+            let (x0, mut x1) = (x0.min(x1), x0.max(x1));
+            if x1 - x0 < 3.0 {
+                x1 = x0 + 3.0;
+            }
+            out.push(egui::Rect::from_min_max(
+                egui::pos2(galley_pos.x + x0, galley_pos.y + r.rect.min.y),
+                egui::pos2(galley_pos.x + x1, galley_pos.y + r.rect.max.y),
+            ));
+        }
+        out
+    }
+
+    /// Select a find hit in the editor; the editor scrolls to it on paint.
+    fn select_find_match(&mut self, ctx: &egui::Context, sel: usize) {
+        let Some(&(s, e)) = self.find_matches.get(self.find_index) else {
+            return;
+        };
+        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        let mut state =
+            egui::TextEdit::load_state(ctx, edit_id).unwrap_or_default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(s),
+            egui::text::CCursor::new(e),
+        )));
+        egui::TextEdit::store_state(ctx, edit_id, state);
+    }
+
+    /// Close the find bar and hand focus back to the editor.
+    fn close_find(&mut self, ctx: &egui::Context, sel: usize) {
+        self.find_open = false;
+        self.find_query.clear();
+        self.find_matches.clear();
+        self.find_index = 0;
+        self.find_scroll = false;
+        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        ctx.memory_mut(|m| m.request_focus(edit_id));
+    }
+
+    /// In-document find bar across the top of the editor.
+    fn show_find_bar(&mut self, ui: &mut egui::Ui) {
+        let sel = self.selected_sheet;
+        let content = self
+            .sheets
+            .get(sel)
+            .map(|s| s.content.clone())
+            .unwrap_or_default();
+        self.find_matches = Self::find_matches(&content, &self.find_query, self.find_case);
+        let n = self.find_matches.len();
+        if n > 0 {
+            self.find_index = self.find_index.min(n - 1);
+        } else {
+            self.find_index = 0;
+        }
+        let field = egui::Id::new("find_field");
+        // The bar owns the keyboard while open.
+        ui.memory_mut(|m| m.request_focus(field));
+        let mut go_prev = false;
+        let mut go_next = false;
+        let mut close = false;
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.find_query)
+                    .id(field)
+                    .hint_text("Find in sheet")
+                    .desired_width(280.0),
+            );
+            if resp.changed() {
+                self.find_index = 0;
+                self.find_scroll = true;
+            }
+            let count = if self.find_query.trim().is_empty() {
+                String::new()
+            } else if n == 0 {
+                "No matches".to_string()
+            } else {
+                format!("{} of {}", self.find_index + 1, n)
+            };
+            ui.label(RichText::new(count).small().color(self.app_theme.text_dim()));
+            if ui
+                .add_enabled(
+                    n > 0,
+                    egui::Button::new(RichText::new(icon::ARROW_UP).size(14.0)),
+                )
+                .on_hover_text("Previous match (Shift+Enter)")
+                .clicked()
+            {
+                go_prev = true;
+            }
+            if ui
+                .add_enabled(
+                    n > 0,
+                    egui::Button::new(RichText::new(icon::ARROW_DOWN).size(14.0)),
+                )
+                .on_hover_text("Next match (Enter)")
+                .clicked()
+            {
+                go_next = true;
+            }
+            let case = self.find_case;
+            if ui
+                .selectable_label(case, "Aa")
+                .on_hover_text("Match case")
+                .clicked()
+            {
+                self.find_case = !case;
+                self.find_scroll = true;
+            }
+            if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
+                close = true;
+            }
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let shift = ui.input(|i| i.modifiers.shift);
+            if enter && shift {
+                go_prev = true;
+            } else if enter {
+                go_next = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+        if go_prev && n > 0 {
+            self.find_index = self.find_index.checked_sub(1).unwrap_or(n - 1);
+            self.select_find_match(ui.ctx(), sel);
+            self.find_scroll = true;
+        }
+        if go_next && n > 0 {
+            self.find_index = (self.find_index + 1) % n;
+            self.select_find_match(ui.ctx(), sel);
+            self.find_scroll = true;
+        }
+        if close {
+            self.close_find(ui.ctx(), sel);
+        }
+    }
+
     /// Sheet search in a Spotlight-style bar: a large top-centered field
     /// plus a clickable result list. Typing filters the sheets panel live;
     /// Up/Down moves the highlight and Enter jumps to it, Esc closes.
@@ -13525,6 +13771,63 @@ impl eframe::App for WritingApp {
         ctx.set_visuals(self.app_theme.visuals());
         self.ensure_editor_font(ctx);
 
+        // Global headerbar shortcuts. Letter bindings all use Cmd/Ctrl so
+        // they never fire while typing plain text; consume_key keeps them
+        // from double-triggering through focused widgets. While the
+        // in-document find bar is open its own keys (Enter/Esc) own the
+        // keyboard, so the panel shortcuts stay out of the way.
+        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_settings) =
+            if self.find_open {
+                (false, false, false, false, false, false, false, false)
+            } else {
+                (
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::B)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::G)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)
+                    }),
+                )
+            };
+        let key_find = ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)
+        });
+        if key_find {
+            // Repeat presses refocus the field for a new term.
+            self.find_open = true;
+        }
+        let key_find = ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)
+        });
+        // Tooltip hint helper: renders as ⌘K on macOS, Ctrl+K elsewhere.
+        let hint = |ctx: &egui::Context, label: &str, key: egui::Key| {
+            format!(
+                "{label} ({})",
+                ctx.format_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    key
+                ))
+            )
+        };
+
         egui::TopBottomPanel::top("top")
             .frame(
                 egui::Frame::new()
@@ -13546,11 +13849,12 @@ impl eframe::App for WritingApp {
                         RichText::new(icon::SIDEBAR).size(17.0),
                     )
                     .on_hover_text(if self.library_visible && self.sheets_visible {
-                            "Hide sidebars"
-                        } else {
-                            "Show sidebars"
-                        })
-                        .clicked()
+                        hint(ui.ctx(), "Hide sidebars", egui::Key::B)
+                    } else {
+                        hint(ui.ctx(), "Show sidebars", egui::Key::B)
+                    })
+                    .clicked()
+                        || key_sidebars
                     {
                         let show = !(self.library_visible && self.sheets_visible);
                         self.library_visible = show;
@@ -13567,8 +13871,9 @@ impl eframe::App for WritingApp {
                                     ui,
                                     RichText::new(icon::MAGNIFYING_GLASS).size(17.0),
                                 )
-                                .on_hover_text("Search sheets")
+                                .on_hover_text(hint(ui.ctx(), "Search sheets", egui::Key::K))
                                 .clicked()
+                                    || key_search
                                 {
                                     if self.search_open {
                                         self.search_open = false;
@@ -13582,8 +13887,9 @@ impl eframe::App for WritingApp {
                                     ui,
                                     RichText::new(icon::FILE_PLUS).size(17.0),
                                 )
-                                .on_hover_text("New sheet")
+                                .on_hover_text(hint(ui.ctx(), "New sheet", egui::Key::N))
                                 .clicked()
+                                    || key_new
                                 {
                                     self.create_sheet();
                                 }
@@ -13599,8 +13905,9 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::GEAR).size(17.0),
                         )
-                        .on_hover_text("Settings")
+                        .on_hover_text(hint(ui.ctx(), "Settings", egui::Key::Comma))
                         .clicked()
+                            || key_settings
                         {
                             self.settings_open = !self.settings_open;
                         }
@@ -13624,8 +13931,9 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::TARGET).size(17.0),
                         )
-                        .on_hover_text("Writing goals")
+                        .on_hover_text(hint(ui.ctx(), "Writing goals", egui::Key::G))
                         .clicked()
+                            || key_goals
                         {
                             self.goals_visible = !self.goals_visible;
                             if self.goals_visible {
@@ -13644,8 +13952,9 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::BOOK_OPEN).size(17.0),
                         )
-                        .on_hover_text("Style suggestions")
+                        .on_hover_text(hint(ui.ctx(), "Style suggestions", egui::Key::Slash))
                         .clicked()
+                            || key_style
                         {
                             self.grammar.style_visible = !self.grammar.style_visible;
                             if self.grammar.style_visible {
@@ -13658,8 +13967,9 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::CLOCK_COUNTER_CLOCKWISE).size(17.0),
                         )
-                            .on_hover_text("History")
+                            .on_hover_text(hint(ui.ctx(), "History", egui::Key::Y))
                             .clicked()
+                                || key_history
                         {
                             self.history_open = !self.history_open;
                         }
@@ -13667,8 +13977,9 @@ impl eframe::App for WritingApp {
                             ui,
                             RichText::new(icon::EXPORT).size(17.0),
                         )
-                            .on_hover_text("Share / export")
+                            .on_hover_text(hint(ui.ctx(), "Share / export", egui::Key::E))
                             .clicked()
+                                || key_export
                         {
                             self.show_export_popover = !self.show_export_popover;
                         }
@@ -14794,6 +15105,9 @@ impl eframe::App for WritingApp {
                 });
             frame.show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
+                if self.find_open {
+                    self.show_find_bar(ui);
+                }
                 // Hide the native caret: egui stretches it to the full row
                 // height, which looks absurd on tall paragraph-gap rows. A
                 // fixed-height caret is drawn in the overlay below instead.
@@ -15088,6 +15402,12 @@ mod tests {
             search_open: false,
             search_query: String::new(),
             search_cursor: 0,
+            find_open: false,
+            find_query: String::new(),
+            find_case: false,
+            find_index: 0,
+            find_matches: Vec::new(),
+            find_scroll: false,
             search_focus: false,
             history_open: false,
             group_rename: None,
@@ -16085,6 +16405,12 @@ mod tests {
             search_open: false,
             search_query: String::new(),
             search_cursor: 0,
+            find_open: false,
+            find_query: String::new(),
+            find_case: false,
+            find_index: 0,
+            find_matches: Vec::new(),
+            find_scroll: false,
             search_focus: false,
             history_open: false,
             group_rename: None,
@@ -19677,6 +20003,25 @@ mod tests {
             content.ends_with("The"),
             "fix did not apply, content ends with: {content:?}",
         );
+    }
+
+    #[test]
+    fn find_matches_case_and_overlap() {
+        assert!(WritingApp::find_matches("hello", "", false).is_empty());
+        assert_eq!(
+            WritingApp::find_matches("Hello hello", "hello", false),
+            vec![(0, 5), (6, 11)]
+        );
+        assert_eq!(
+            WritingApp::find_matches("Hello hello", "hello", true),
+            vec![(6, 11)]
+        );
+        // Non-overlapping: "aa" in "aaa" matches once.
+        assert_eq!(
+            WritingApp::find_matches("aaa", "aa", false),
+            vec![(0, 2)]
+        );
+        assert!(WritingApp::find_matches("hi", "hello", false).is_empty());
     }
 
     #[test]
