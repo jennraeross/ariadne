@@ -837,6 +837,8 @@ struct WritingApp {
     preview_fonts_queued: std::collections::HashSet<String>,
     /// Whether the settings window is open. Session-only.
     settings_open: bool,
+    /// Selected tab in the settings window. Session-only.
+    settings_tab: SettingsTab,
     /// Uncommitted word-goal text typed in the goals sidebar. Committed
     /// with Set/Enter so typing never fights live updates. Session-only.
     goal_draft: String,
@@ -930,6 +932,26 @@ impl GdriveSync {
             .and_then(|t| SystemTime::now().duration_since(t).ok())
             .map(|d| d.as_secs_f64())
             .unwrap_or(f64::MAX)
+    }
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum SettingsTab {
+    #[default]
+    Appearance,
+    Editor,
+    Checking,
+    Sync,
+}
+
+impl SettingsTab {
+    fn title(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Editor => "Editor",
+            SettingsTab::Checking => "Checking",
+            SettingsTab::Sync => "Sync",
+        }
     }
 }
 
@@ -2122,6 +2144,7 @@ impl WritingApp {
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
+            settings_tab: SettingsTab::default(),
             goals_visible: false,
             goal_draft: String::new(),
             outline_open: false,
@@ -12043,11 +12066,10 @@ blockquote {
     /// History popup: automatic plus manual snapshots of the current sheet,
     /// newest first, with one-click restore. Restoring keeps the replaced
     /// text as a fresh snapshot so a misclick is itself undoable.
-    fn show_history_popup(&mut self, ctx: &egui::Context) {
-        if !self.history_open {
-            return;
-        }
-        let mut open = true;
+    /// History sidebar: snapshots for the selected sheet, newest first.
+    /// Follows the goals/style right-panel pattern; restoring a snapshot
+    /// leaves the panel open so versions can be compared.
+    fn show_history_sidebar(&mut self, ui: &mut egui::Ui) {
         let sel = self.selected_sheet;
         let title = self
             .sheets
@@ -12058,78 +12080,87 @@ blockquote {
         let mut restore: Option<(usize, usize)> = None;
         let mut snapshot_now = false;
         let mut clear = false;
-        egui::Window::new(format!("History — {title}"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size(Vec2::new(340.0, 0.0))
-            .show(ctx, |ui| {
-                let count = self
-                    .history
-                    .get(&sel)
-                    .map(|l| l.len())
-                    .unwrap_or(0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(if count == 0 {
-                            "No snapshots yet".to_string()
-                        } else if count == 1 {
-                            "1 snapshot".to_string()
-                        } else {
-                            format!("{count} snapshots")
-                        })
-                        .small()
-                        .color(self.app_theme.text_faint()),
-                    );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui.small_button("Snapshot now").clicked() {
-                                snapshot_now = true;
-                            }
-                            if count > 0 && ui.small_button("Clear").clicked() {
-                                clear = true;
-                            }
-                        },
-                    );
-                });
-                ui.separator();
-                match self.history.get(&sel) {
-                    Some(list) if !list.is_empty() => {
-                        ScrollArea::vertical()
-                            .max_height(320.0)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                for (n, snap) in list.iter().enumerate().rev() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!(
-                                            "{} · {} chars",
-                                            Self::snapshot_age(now, snap.at),
-                                            snap.content.chars().count()
-                                        ));
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui.small_button("Restore").clicked() {
-                                                    restore = Some((sel, n));
-                                                }
-                                            },
-                                        );
-                                    });
-                                }
-                            });
-                    }
-                    _ => {
-                        ui.label(
-                            RichText::new(
-                                "Snapshots appear as you edit (about every 5 minutes), or take one now.",
-                            )
-                            .small()
-                            .color(self.app_theme.text_dim()),
-                        );
-                    }
+        let mut close = false;
+        let dim = self.app_theme.text_dim();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("History").size(12.5).color(dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Close history").clicked() {
+                    close = true;
                 }
             });
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .color(self.app_theme.text_bright()),
+        );
+        let count = self
+            .history
+            .get(&sel)
+            .map(|l| l.len())
+            .unwrap_or(0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(if count == 0 {
+                    "No snapshots yet".to_string()
+                } else if count == 1 {
+                    "1 snapshot".to_string()
+                } else {
+                    format!("{count} snapshots")
+                })
+                .small()
+                .color(self.app_theme.text_faint()),
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui.small_button("Snapshot now").clicked() {
+                        snapshot_now = true;
+                    }
+                    if count > 0 && ui.small_button("Clear").clicked() {
+                        clear = true;
+                    }
+                },
+            );
+        });
+        ui.separator();
+        match self.history.get(&sel) {
+            Some(list) if !list.is_empty() => {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        for (n, snap) in list.iter().enumerate().rev() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "{} · {} chars",
+                                    Self::snapshot_age(now, snap.at),
+                                    snap.content.chars().count()
+                                ));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Restore").clicked() {
+                                            restore = Some((sel, n));
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+            }
+            _ => {
+                ui.label(
+                    RichText::new(
+                        "Snapshots appear as you edit (about every 5 minutes), or take one now.",
+                    )
+                    .small()
+                    .color(self.app_theme.text_dim()),
+                );
+            }
+        }
         if snapshot_now {
             if self.snapshot_sheet(sel) {
                 self.status = "Snapshot saved".to_string();
@@ -12144,10 +12175,10 @@ blockquote {
         }
         if let Some((idx, n)) = restore {
             if self.restore_snapshot(idx, n) {
-                self.history_open = false;
+                self.status = "Restored snapshot".to_string();
             }
         }
-        if !open {
+        if close {
             self.history_open = false;
         }
     }
@@ -12171,11 +12202,40 @@ blockquote {
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 44.0))
+            .resizable(true)
+            .default_size(Vec2::new(640.0, 500.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.set_min_width(260.0);
+                ui.set_min_width(600.0);
+                ui.horizontal(|ui| {
+                    // Left nav: one tab per settings area.
+                    ui.vertical(|ui| {
+                        ui.set_min_width(120.0);
+                        ui.add_space(4.0);
+                        for tab in [
+                            SettingsTab::Appearance,
+                            SettingsTab::Editor,
+                            SettingsTab::Checking,
+                            SettingsTab::Sync,
+                        ] {
+                            if ui
+                                .selectable_label(self.settings_tab == tab, tab.title())
+                                .clicked()
+                            {
+                                self.settings_tab = tab;
+                            }
+                        }
+                    });
+                    ui.separator();
+                    // Right content: the selected tab, scrollable.
+                    ui.vertical(|ui| {
+                        ui.set_min_width(440.0);
+                        ui.set_min_height(420.0);
+                        ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                match self.settings_tab {
+                                SettingsTab::Appearance => {
                 ui.label(RichText::new("Theme").small().color(self.app_theme.text_dim()));
                 ui.horizontal(|ui| {
                     for theme in [AppTheme::Dark, AppTheme::Light] {
@@ -12188,7 +12248,8 @@ blockquote {
                         }
                     }
                 });
-                ui.separator();
+                                }
+                                SettingsTab::Editor => {
                 ui.label(RichText::new("Editor").small().color(self.app_theme.text_dim()));
                 ui.horizontal(|ui| {
                     ui.label("Font:");
@@ -12239,7 +12300,8 @@ blockquote {
                     self.editor_font_size = default_editor_font_size();
                     self.save_library();
                 }
-                ui.separator();
+                                }
+                                SettingsTab::Checking => {
                 // Grammar checking: master toggle plus the synced custom
                 // dictionary (words added from the fix popup land here and
                 // can be removed again, which also syncs).
@@ -12283,7 +12345,12 @@ blockquote {
                         self.status = "Removed from dictionary".to_string();
                     }
                 }
-                ui.separator();
+                                }
+                                SettingsTab::Sync => {
+                // Each sync backend gets its own card so the two
+                // sections and their actions stay visually distinct.
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(420.0);
                 // iCloud sync for the iCloud section (Documents stays local).
                 ui.label(RichText::new("Sync").small().color(self.app_theme.text_dim()));
                 let using_drive = Self::icloud_drive_dir().is_some();
@@ -12324,7 +12391,10 @@ blockquote {
                         }
                     }
                 });
-                ui.separator();
+                });
+                ui.add_space(8.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(420.0);
                 // Google Drive sync for the Google Drive section. Auth is
                 // OAuth in the browser; tokens stay in the OS keychain.
                 ui.label(
@@ -12385,6 +12455,12 @@ blockquote {
                         }
                         GdriveMode::Disabled => {}
                     }
+                });
+                });
+            }
+            }
+            });
+                    });
                 });
             });
         if !open {
@@ -12566,11 +12642,11 @@ blockquote {
         egui::Window::new("Export")
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 44.0))
+            .resizable(true)
+            .default_size(Vec2::new(600.0, 540.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.set_min_width(400.0);
+                ui.set_min_width(560.0);
                 let targets = self.export_targets();
                 let count = targets.len();
                 ui.label(
@@ -12595,15 +12671,15 @@ blockquote {
                 ui.horizontal(|ui| {
                     // Left pane: style list + management.
                     ui.vertical(|ui| {
-                        ui.set_min_width(164.0);
-                        ui.set_max_width(176.0);
+                        ui.set_min_width(220.0);
+                        ui.set_max_width(240.0);
                         ui.label(RichText::new("Style").small().color(self.app_theme.text_dim()));
                         ScrollArea::vertical()
-                            .max_height(148.0)
+                            .max_height(300.0)
                             .auto_shrink([false; 2])
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
-                                    ui.set_min_width(160.0);
+                                    ui.set_min_width(216.0);
                                     for name in &styles {
                                         if ui
                                             .selectable_label(
@@ -12620,7 +12696,7 @@ blockquote {
                         ui.add_space(6.0);
                         if ui
                             .add_sized(
-                                Vec2::new(160.0, 22.0),
+                                Vec2::new(216.0, 24.0),
                                 egui::Button::new(format!(
                                     "{}  Create New Style",
                                     icon::PLUS
@@ -12718,7 +12794,7 @@ blockquote {
                     ui.separator();
                     // Right pane: format grid + actions.
                     ui.vertical(|ui| {
-                        ui.set_min_width(216.0);
+                        ui.set_min_width(300.0);
                         ui.label(RichText::new("Format").small().color(self.app_theme.text_dim()));
                         egui::Grid::new("export format grid")
                             .num_columns(2)
@@ -12734,7 +12810,7 @@ blockquote {
                                     .size(14.0);
                                     if ui
                                         .add_sized(
-                                            Vec2::new(104.0, 44.0),
+                                            Vec2::new(144.0, 48.0),
                                             egui::Button::new(label).selected(selected),
                                         )
                                         .on_hover_text(fmt.label())
@@ -12748,16 +12824,14 @@ blockquote {
                                 }
                             });
                         ui.add_space(10.0);
-                        // Main actions as icons (tooltips carry the names).
+                        ui.label(RichText::new("Output").small().color(self.app_theme.text_dim()));
+                        // Main actions as labeled buttons.
                         let can_act = !targets.is_empty();
-                        ui.horizontal(|ui| {
-                            ui.add_space(4.0);
+                        ui.vertical(|ui| {
                             if ui
                                 .add_enabled(
                                     can_act,
-                                    egui::Button::new(
-                                        RichText::new(icon::EYE).size(16.0),
-                                    ),
+                                    egui::Button::new(format!("{}  Preview", icon::EYE)),
                                 )
                                 .on_hover_text("Preview before saving")
                                 .clicked()
@@ -12767,9 +12841,10 @@ blockquote {
                             if ui
                                 .add_enabled(
                                     can_act,
-                                    egui::Button::new(
-                                        RichText::new(icon::FLOPPY_DISK).size(16.0),
-                                    ),
+                                    egui::Button::new(format!(
+                                        "{}  Save to file",
+                                        icon::FLOPPY_DISK
+                                    )),
                                 )
                                 .on_hover_text("Save to a file")
                                 .clicked()
@@ -12779,9 +12854,10 @@ blockquote {
                             if ui
                                 .add_enabled(
                                     can_act,
-                                    egui::Button::new(
-                                        RichText::new(icon::SHARE_NETWORK).size(16.0),
-                                    ),
+                                    egui::Button::new(format!(
+                                        "{}  Open with default app",
+                                        icon::SHARE_NETWORK
+                                    )),
                                 )
                                 .on_hover_text("Open with the default app")
                                 .clicked()
@@ -14604,6 +14680,13 @@ impl eframe::App for WritingApp {
                 self.show_style_sidebar(ui);
             });
 
+        let _ = egui::SidePanel::right("history")
+            .resizable(true)
+            .default_width(300.0)
+            .show_animated(ctx, self.history_open, |ui| {
+                self.show_history_sidebar(ui);
+            });
+
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             let targets = self.export_targets();
             let mut words = 0usize;
@@ -14692,7 +14775,6 @@ impl eframe::App for WritingApp {
         self.show_search_popup(ctx);
         self.show_outline_popup(ctx);
         self.show_settings_popup(ctx);
-        self.show_history_popup(ctx);
         self.show_conflicts_popup(ctx);
         self.show_preview_window(ctx);
         // Window-wide drop hint, painted above everything else.
@@ -14728,7 +14810,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -14925,6 +15007,7 @@ mod tests {
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
+            settings_tab: SettingsTab::default(),
             goals_visible: false,
             goal_draft: String::new(),
             outline_open: false,
@@ -15920,6 +16003,7 @@ mod tests {
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
+            settings_tab: SettingsTab::default(),
             goals_visible: false,
             goal_draft: String::new(),
             outline_open: false,
