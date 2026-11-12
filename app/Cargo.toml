@@ -59,3 +59,5 @@ assets = [
 
 [profile.release]
 opt-level = 2
+# Keep release artifacts small (and the macOS runner's disk happier).
+strip = true

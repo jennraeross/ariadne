@@ -56,6 +56,10 @@ jobs:
           cp app/assets/icon.icns "$APP/Resources/icon.icns"
           sed "s/__VERSION__/${VERSION}/g" dist/macos/Info.plist > "$APP/Info.plist"
           printf 'APPL????' > "$APP/PkgInfo"
+          # Release target dirs (two full arch builds) fill the runner disk;
+          # the universal binary is already fused, so free the space before
+          # the DMG step (hdiutil fails with "No space left" otherwise).
+          rm -rf app/target
           ln -s /Applications staging/Applications
           hdiutil create -volname Ariadne -srcfolder staging \
             -ov -format UDZO "ariadne-${VERSION}-macos-universal.dmg"
