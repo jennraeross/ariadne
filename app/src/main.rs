@@ -11766,6 +11766,7 @@ blockquote {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .default_size(Vec2::new(480.0, 420.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -11903,6 +11904,7 @@ blockquote {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .default_size(Vec2::new(360.0, 80.0))
             .show(ctx, |ui| {
                 let field = egui::Id::new("sheet_search_field");
@@ -12025,6 +12027,7 @@ blockquote {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .default_size(Vec2::new(300.0, 140.0))
             .show(ctx, |ui| {
                 if entries.is_empty() {
@@ -12203,6 +12206,7 @@ blockquote {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .default_size(Vec2::new(640.0, 500.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -12559,7 +12563,7 @@ blockquote {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 44.0))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
@@ -12650,6 +12654,7 @@ blockquote {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .default_size(Vec2::new(600.0, 540.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
