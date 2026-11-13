@@ -15077,9 +15077,9 @@ impl eframe::App for WritingApp {
                     .fill(self.app_theme.bg_sheets())
             )
             .show_animated(ctx, self.sheets_visible, |ui| {
-                // Hover state is one frame behind: reset, paint from last
-                // frame's target, then record this frame's for the next.
-                self.sheets_hover = None;
+                // Hover paints one frame behind: read last frame's target
+                // while rendering, collect this frame's, commit at the end.
+                let mut hovered_now: Option<SheetHover> = None;
                 let context_name = self.context_name();
                 let in_trash = matches!(self.selection, SidebarSelection::Filter(SmartFilter::Trash));
                 let show_new = !matches!(
@@ -15119,7 +15119,7 @@ impl eframe::App for WritingApp {
                                             .frame(false),
                                         );
                                         if empty_resp.hovered() {
-                                            self.sheets_hover = Some(SheetHover::EmptyTrash);
+                                            hovered_now = Some(SheetHover::EmptyTrash);
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                         }
                                         if empty_resp
@@ -15144,7 +15144,7 @@ impl eframe::App for WritingApp {
                                             .frame(false),
                                         );
                                         if new_resp.hovered() {
-                                            self.sheets_hover = Some(SheetHover::NewSheet);
+                                            hovered_now = Some(SheetHover::NewSheet);
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                         }
                                         if new_resp
@@ -15434,7 +15434,7 @@ impl eframe::App for WritingApp {
                             });
                             if resp.hovered() {
                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                self.sheets_hover = Some(SheetHover::Card(idx));
+                                hovered_now = Some(SheetHover::Card(idx));
                             }
                         }
                         if let Some((rect, after)) = mark {
@@ -15455,6 +15455,8 @@ impl eframe::App for WritingApp {
                             );
                         }
                     });
+                // Commit this frame's hover target for next frame's paint.
+                self.sheets_hover = hovered_now;
                 Self::autoscroll_while_dragging(
                     ctx,
                     &scroll,
