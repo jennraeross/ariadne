@@ -415,6 +415,14 @@ impl AppTheme {
         }
     }
 
+    /// Hovered (not selected) sheet card in the sheets panel.
+    fn card_hover(self) -> Color32 {
+        match self {
+            AppTheme::Dark => Color32::from_rgb(46, 46, 47),
+            AppTheme::Light => Color32::from_rgb(240, 240, 238),
+        }
+    }
+
     /// Sheets panel surface and its header well.
     fn bg_sheets(self) -> Color32 {
         match self {
@@ -429,6 +437,16 @@ impl AppTheme {
             AppTheme::Light => self.bg_panel(),
         }
     }
+}
+
+/// Which sheets-panel control the pointer is over (last frame's hover).
+/// Cards and header buttons read it for their hover styling; it resets
+/// every frame before the panel paints.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SheetHover {
+    NewSheet,
+    EmptyTrash,
+    Card(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
@@ -833,6 +851,10 @@ struct WritingApp {
     /// Whether the writing-goal sidebar is shown. Session-only: always
     /// starts collapsed and is never persisted.
     goals_visible: bool,
+    /// Sheets-panel hover target from the previous frame (cards and header
+    /// buttons brighten on hover). Session-only, reset every frame before
+    /// the panel paints.
+    sheets_hover: Option<SheetHover>,
     /// App chrome color scheme. Remembered across runs.
     app_theme: AppTheme,
     /// Editor font family (a system font name). `None` = built-in font.
@@ -2189,6 +2211,7 @@ impl WritingApp {
             settings_open: false,
             settings_tab: SettingsTab::default(),
             goals_visible: false,
+            sheets_hover: None,
             goal_draft: String::new(),
             outline_open: false,
             swipe_accum_x: 0.0,
@@ -15054,6 +15077,9 @@ impl eframe::App for WritingApp {
                     .fill(self.app_theme.bg_sheets())
             )
             .show_animated(ctx, self.sheets_visible, |ui| {
+                // Hover state is one frame behind: reset, paint from last
+                // frame's target, then record this frame's for the next.
+                self.sheets_hover = None;
                 let context_name = self.context_name();
                 let in_trash = matches!(self.selection, SidebarSelection::Filter(SmartFilter::Trash));
                 let show_new = !matches!(
@@ -15078,26 +15104,50 @@ impl eframe::App for WritingApp {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if in_trash {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new("Empty Trash").small().color(self.app_theme.text_faint()),
-                                                )
-                                                .frame(false),
+                                        let empty_hover =
+                                            self.sheets_hover == Some(SheetHover::EmptyTrash);
+                                        let empty_resp = ui.add(
+                                            egui::Button::new(
+                                                RichText::new("Empty Trash").small().color(
+                                                    if empty_hover {
+                                                        self.app_theme.text_bright()
+                                                    } else {
+                                                        self.app_theme.text_faint()
+                                                    },
+                                                ),
                                             )
+                                            .frame(false),
+                                        );
+                                        if empty_resp.hovered() {
+                                            self.sheets_hover = Some(SheetHover::EmptyTrash);
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if empty_resp
                                             .on_hover_text("Delete everything in the trash forever")
                                             .clicked()
                                         {
                                             self.empty_trash();
                                         }
                                     } else if show_new {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new(icon::PLUS).size(14.0).color(self.app_theme.text_faint()),
-                                                )
-                                                .frame(false),
+                                        let new_hover =
+                                            self.sheets_hover == Some(SheetHover::NewSheet);
+                                        let new_resp = ui.add(
+                                            egui::Button::new(
+                                                RichText::new(icon::PLUS).size(14.0).color(
+                                                    if new_hover {
+                                                        self.app_theme.text_bright()
+                                                    } else {
+                                                        self.app_theme.text_faint()
+                                                    },
+                                                ),
                                             )
+                                            .frame(false),
+                                        );
+                                        if new_resp.hovered() {
+                                            self.sheets_hover = Some(SheetHover::NewSheet);
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if new_resp
                                             .on_hover_text("New sheet here")
                                             .clicked()
                                         {
@@ -15203,6 +15253,8 @@ impl eframe::App for WritingApp {
                             let width = ui.available_width();
                             let bg = if selected {
                                 self.app_theme.card_selected()
+                            } else if self.sheets_hover == Some(SheetHover::Card(idx)) {
+                                self.app_theme.card_hover()
                             } else {
                                 self.app_theme.bg_sheets()
                             };
@@ -15382,6 +15434,7 @@ impl eframe::App for WritingApp {
                             });
                             if resp.hovered() {
                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                self.sheets_hover = Some(SheetHover::Card(idx));
                             }
                         }
                         if let Some((rect, after)) = mark {
@@ -15801,6 +15854,7 @@ mod tests {
             settings_open: false,
             settings_tab: SettingsTab::default(),
             goals_visible: false,
+            sheets_hover: None,
             goal_draft: String::new(),
             outline_open: false,
             swipe_accum_x: 0.0,
@@ -16809,6 +16863,7 @@ mod tests {
             settings_open: false,
             settings_tab: SettingsTab::default(),
             goals_visible: false,
+            sheets_hover: None,
             goal_draft: String::new(),
             outline_open: false,
             swipe_accum_x: 0.0,
@@ -18373,6 +18428,41 @@ mod tests {
         let back = WritingApp::load_library().expect("reloads");
         assert_eq!(back.app_theme, AppTheme::Light);
         assert_eq!(back.editor_font_family.as_deref(), Some("Georgia"));
+    }
+
+    #[test]
+    fn sheet_hover_states_are_distinct_from_rest_and_selected() {
+        // Hover must read as its own state on both themes: different from
+        // the resting card and from the selected card.
+        for theme in [AppTheme::Dark, AppTheme::Light] {
+            assert_ne!(theme.card_hover(), theme.bg_sheets(), "{theme:?} hover == rest");
+            assert_ne!(
+                theme.card_hover(),
+                theme.card_selected(),
+                "{theme:?} hover == selected"
+            );
+            // Hover sits visually between resting and selected.
+            let rest = theme.bg_sheets();
+            let hover = theme.card_hover();
+            let selected = theme.card_selected();
+            for (r, h, s) in [
+                (rest.r(), hover.r(), selected.r()),
+                (rest.g(), hover.g(), selected.g()),
+                (rest.b(), hover.b(), selected.b()),
+            ] {
+                assert!(
+                    (r <= h && h <= s) || (r >= h && h >= s),
+                    "{theme:?} hover not between rest and selected"
+                );
+            }
+        }
+        // Sheets-panel hover tracking starts empty every frame.
+        assert_eq!(super::SheetHover::Card(3), super::SheetHover::Card(3));
+        assert_ne!(
+            super::SheetHover::Card(3),
+            super::SheetHover::NewSheet,
+            "hover targets must discriminate"
+        );
     }
 
     #[test]
