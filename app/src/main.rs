@@ -6318,6 +6318,27 @@ blockquote {
         }
     }
 
+    /// Fade a color toward the background for focus mode. Transparent
+    /// colors pass through untouched.
+    fn fade_toward(c: egui::Color32, bg: egui::Color32) -> egui::Color32 {
+        if c.a() == 0 {
+            return c;
+        }
+        // Sweet spot: clearly dimmed, still legible.
+        const T: f32 = 0.68;
+        let blend = |f: u8, b: u8| {
+            (f as f32 + (b as f32 - f as f32) * T)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        egui::Color32::from_rgba_unmultiplied(
+            blend(c.r(), bg.r()),
+            blend(c.g(), bg.g()),
+            blend(c.b(), bg.b()),
+            c.a(),
+        )
+    }
+
     fn markdown_layouter(
         ui: &egui::Ui,
         text: &str,
@@ -6325,6 +6346,7 @@ blockquote {
         base_size: f32,
         theme: AppTheme,
         editor: FontId,
+        dim_outside: Option<(usize, usize)>,
     ) -> Arc<egui::Galley> {
         use egui::text::{LayoutJob, TextFormat};
         let mut job = LayoutJob::default();
@@ -6762,6 +6784,35 @@ blockquote {
             }
         }
 
+        // Focus mode: fade every glyph outside the caret paragraph.
+        // Sections concatenate back to the source text, so byte ranges
+        // map onto source char indices for the overlap test.
+        if let Some((keep_s, keep_e)) = dim_outside {
+            let bg = theme.bg_app();
+            let mut starts: Vec<usize> =
+                job.text.char_indices().map(|(i, _)| i).collect();
+            starts.push(job.text.len());
+            let to_char = |b: usize| match starts.binary_search(&b) {
+                Ok(i) => i,
+                Err(i) => i.min(starts.len().saturating_sub(1)),
+            };
+            for section in &mut job.sections {
+                let (s, e) = (
+                    to_char(section.byte_range.start),
+                    to_char(section.byte_range.end),
+                );
+                if s < keep_e && keep_s < e {
+                    continue;
+                }
+                let fmt = &mut section.format;
+                fmt.color = Self::fade_toward(fmt.color, bg);
+                fmt.background = Self::fade_toward(fmt.background, bg);
+                fmt.underline.color = Self::fade_toward(fmt.underline.color, bg);
+                fmt.strikethrough.color =
+                    Self::fade_toward(fmt.strikethrough.color, bg);
+            }
+        }
+
         ui.fonts(|f| f.layout_job(job))
     }
 
@@ -7008,8 +7059,30 @@ blockquote {
                     }
                 }
             }
+            // Focus mode: dim everything outside the caret's paragraph.
+            // Computed eagerly: the TextEdit below borrows the sheet
+            // mutably, which the layouter closure cannot do.
+            // No cursor yet (fresh open, never clicked): fall back to
+            // the top so focus mode still has an active paragraph.
+            let focus_range = if self.focus_mode {
+                let at = egui::TextEdit::load_state(ui.ctx(), edit_id)
+                    .and_then(|st| st.cursor.char_range())
+                    .map(|r| r.primary.index)
+                    .unwrap_or(0);
+                Some(Self::paragraph_at(&sheet.content, at))
+            } else {
+                None
+            };
             let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                Self::markdown_layouter(ui, text, wrap_width, base_size, theme, editor.clone())
+                Self::markdown_layouter(
+                    ui,
+                    text,
+                    wrap_width,
+                    base_size,
+                    theme,
+                    editor.clone(),
+                    focus_range,
+                )
             };
             let avail = ui.available_size();
             let edit = egui::TextEdit::multiline(&mut sheet.content)
@@ -7251,12 +7324,12 @@ blockquote {
                         }
                     }
                 }
-                // Typewriter scrolling keeps the caret line centered, and
-                // focus mode dims paragraphs outside the caret's. Both run
-                // off the live caret, so mouse-wheel scrolling is left
-                // alone until the caret moves again.
-                if self.typewriter || self.focus_mode {
-                    if let Some(state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                // Typewriter scrolling keeps the caret line centered.
+                // Mouse-wheel scrolling is left alone until the caret
+                // moves again.
+                if !self.typewriter {
+                    self.typewriter_last = None;
+                } else if let Some(state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
                         let at = state
                             .cursor
                             .char_range()
@@ -7264,57 +7337,20 @@ blockquote {
                             .unwrap_or(0);
                         use egui::text::CCursor;
                         let row = galley.from_ccursor(CCursor::new(at)).rcursor.row;
-                        if self.typewriter {
-                            let key = (sel, row);
-                            if self.typewriter_last != Some(key) {
-                                self.typewriter_last = Some(key);
-                                if let Some(r) = galley.rows.get(row) {
-                                    ui.scroll_to_rect(
-                                        egui::Rect::from_min_max(
-                                            galley_pos + r.rect.min.to_vec2(),
-                                            galley_pos + r.rect.max.to_vec2(),
-                                        ),
-                                        Some(egui::Align::Center),
-                                    );
-                                }
-                            }
-                        } else {
-                            self.typewriter_last = None;
-                        }
-                        if self.focus_mode {
-                            // `sheet` is already mutably borrowed above.
-                            let (s, e) =
-                                Self::paragraph_at(&sheet.content.clone(), at);
-                            let rects = Self::find_highlight_rects(&galley, galley_pos, s, e);
-                            if !rects.is_empty() {
-                                let dim = egui::Color32::from_black_alpha(90);
-                                let clip = ui.clip_rect();
-                                let first = rects.first().unwrap();
-                                let last = rects.last().unwrap();
-                                if first.min.y > clip.min.y {
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(clip.min.x, clip.min.y),
-                                            egui::pos2(clip.max.x, first.min.y),
-                                        ),
-                                        0.0,
-                                        dim,
-                                    );
-                                }
-                                if last.max.y < clip.max.y {
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(clip.min.x, last.max.y),
-                                            egui::pos2(clip.max.x, clip.max.y),
-                                        ),
-                                        0.0,
-                                        dim,
-                                    );
-                                }
+                        let key = (sel, row);
+                        if self.typewriter_last != Some(key) {
+                            self.typewriter_last = Some(key);
+                            if let Some(r) = galley.rows.get(row) {
+                                ui.scroll_to_rect(
+                                    egui::Rect::from_min_max(
+                                        galley_pos + r.rect.min.to_vec2(),
+                                        galley_pos + r.rect.max.to_vec2(),
+                                    ),
+                                    Some(egui::Align::Center),
+                                );
                             }
                         }
                     }
-                }
                 // In-document find highlights: wash every hit, stronger
                 // current match. Painted under the grammar squiggles.
                 if self.find_open && sel == self.selected_sheet && !self.find_matches.is_empty() {
@@ -16245,7 +16281,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let galley = WritingApp::markdown_layouter(ui, text, 150.0, 17.0, AppTheme::Dark, egui::FontId::proportional(17.0));
+                let galley = WritingApp::markdown_layouter(ui, text, 150.0, 17.0, AppTheme::Dark, egui::FontId::proportional(17.0), None);
                 assert_eq!(galley.job.text, text);
             assert!(galley.rows.len() >= 6, "expected wrapped rows");
             // First row of each item paragraph: marker glyphs hang left
@@ -19540,7 +19576,7 @@ mod tests {
                 let theme = AppTheme::Dark;
                 let editor = egui::FontId::proportional(17.0);
                 let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                    WritingApp::markdown_layouter(ui, text, wrap_width, 17.0, theme, editor.clone())
+                    WritingApp::markdown_layouter(ui, text, wrap_width, 17.0, theme, editor.clone(), None)
                 };
                 let edit_id = egui::Id::new("repro-editor-full");
                 let avail = ui.available_size();
@@ -19613,7 +19649,7 @@ mod tests {
                 let theme = AppTheme::Dark;
                 let editor = egui::FontId::proportional(17.0);
                 let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                    WritingApp::markdown_layouter(ui, text, wrap_width, 17.0, theme, editor.clone())
+                    WritingApp::markdown_layouter(ui, text, wrap_width, 17.0, theme, editor.clone(), None)
                 };
                 let edit_id = egui::Id::new("repro-editor");
                 let resp = ui.add(
@@ -20079,6 +20115,64 @@ mod tests {
     /// exactly once, in order. Dropped or duplicated chars shift every
     /// squiggle after them on that line.
     #[test]
+    fn focus_mode_fades_text_outside_active_paragraph() {
+        egui::__run_test_ui(|ui| {
+            let text = "First line.\n\nSecond block here.\n";
+            let full = WritingApp::markdown_layouter(
+                ui,
+                &text.to_string(),
+                600.0,
+                17.0,
+                AppTheme::Dark,
+                egui::FontId::proportional(17.0),
+                None,
+            );
+            let dimmed = WritingApp::markdown_layouter(
+                ui,
+                &text.to_string(),
+                600.0,
+                17.0,
+                AppTheme::Dark,
+                egui::FontId::proportional(17.0),
+                Some((0, 12)),
+            );
+            // Same shape, same text.
+            assert_eq!(full.job.text, dimmed.job.text);
+            assert_eq!(full.job.sections.len(), dimmed.job.sections.len());
+            let starts: Vec<usize> = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(text.len()))
+                .collect();
+            let to_char = |b: usize| match starts.binary_search(&b) {
+                Ok(i) => i,
+                Err(i) => i.min(starts.len().saturating_sub(1)),
+            };
+            // Find a section fully inside the second paragraph.
+            let mut checked = 0;
+            for (a, b) in full.job.sections.iter().zip(dimmed.job.sections.iter()) {
+                assert_eq!(a.byte_range, b.byte_range);
+                let s = to_char(a.byte_range.start);
+                let e = to_char(a.byte_range.end);
+                // Mirror of the implementation's overlap rule.
+                if s < 12 && 0 < e {
+                    // Inside the active range (or the trailing newline):
+                    // untouched.
+                    assert_eq!(a.format.color, b.format.color);
+                } else if s < e {
+                    // Outside it: faded.
+                    assert!(
+                        b.format.color != a.format.color,
+                        "expected faded color for {a:?}"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "no second-paragraph sections found");
+        });
+    }
+
+    #[test]
     fn markdown_layouter_preserves_source_chars() {
         egui::__run_test_ui(|ui| {
             let lines = [
@@ -20117,6 +20211,7 @@ mod tests {
                 17.0,
                 AppTheme::Light,
                 egui::FontId::proportional(17.0),
+                None,
             );
             assert_eq!(
                 galley.job.text, text,
