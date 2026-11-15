@@ -13,6 +13,8 @@ mod gdrive;
 
 mod update;
 
+mod custom_theme;
+
 use gdrive::TokenStore as _;
 
 fn load_app_icon() -> Arc<egui::IconData> {
@@ -209,13 +211,63 @@ enum SidebarSelection {
     Sheet(usize),
 }
 
-/// App chrome color scheme. Dark is the original look; Light re-skins
-/// every hardcoded surface through the palette below.
+/// App chrome color scheme. Dark is the original look; the rest are
+/// popular editor palettes expressed through the same roles, so every
+/// surface re-skins through the table in [`AppTheme::palette`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 enum AppTheme {
     #[default]
     Dark,
     Light,
+    Gruvbox,
+    GruvboxLight,
+    Dracula,
+    Nord,
+    NordLight,
+    Catppuccin,
+    CatppuccinLatte,
+    RosePine,
+    RosePineDawn,
+    Everforest,
+    EverforestLight,
+    Solarized,
+    SolarizedDark,
+    TokyoNight,
+    TokyoNightDay,
+}
+
+/// One color per chrome/editor role. Adding a theme means adding one
+/// [`AppTheme::palette`] table; every accessor below reads one field.
+#[derive(Clone, Copy)]
+struct ThemePalette {
+    bg_app: Color32,
+    bg_panel: Color32,
+    text_main: Color32,
+    text_bright: Color32,
+    text_dim: Color32,
+    accent: Color32,
+    ed_text: Color32,
+    ed_marker: Color32,
+    ed_heading: Color32,
+    ed_code: Color32,
+    ed_code_bg: Color32,
+    ed_code_underline: Color32,
+    ed_quote: Color32,
+    ed_link_url: Color32,
+    ed_dim2: Color32,
+    ed_strike: Color32,
+    ed_italic: Color32,
+    ed_caret: Color32,
+    grammar_spelling: Color32,
+    ed_margin_mark: Color32,
+    text_faint: Color32,
+    card_selected: Color32,
+    card_hover: Color32,
+    bg_sheets: Color32,
+    bg_sheets_header: Color32,
+    /// Library sidebar column. Sits between the headerbar (`bg_panel`)
+    /// and the sheets panel (`bg_sheets`), distinct from both.
+    bg_sidebar: Color32,
 }
 
 impl AppTheme {
@@ -223,230 +275,742 @@ impl AppTheme {
         match self {
             AppTheme::Dark => "Dark",
             AppTheme::Light => "Light",
+            AppTheme::Gruvbox => "Gruvbox",
+            AppTheme::GruvboxLight => "Gruvbox Light",
+            AppTheme::Dracula => "Dracula",
+            AppTheme::Nord => "Nord",
+            AppTheme::NordLight => "Nord Light",
+            AppTheme::Catppuccin => "Catppuccin Mocha",
+            AppTheme::CatppuccinLatte => "Catppuccin Latte",
+            AppTheme::RosePine => "Rosé Pine",
+            AppTheme::RosePineDawn => "Rosé Pine Dawn",
+            AppTheme::Everforest => "Everforest",
+            AppTheme::EverforestLight => "Everforest Light",
+            AppTheme::Solarized => "Solarized Light",
+            AppTheme::SolarizedDark => "Solarized Dark",
+            AppTheme::TokyoNight => "Tokyo Night",
+            AppTheme::TokyoNightDay => "Tokyo Night Day",
         }
     }
 
-    /// Central editor background.
+    /// Every selectable theme, in menu order.
+    fn all() -> [AppTheme; 17] {
+        use AppTheme::*;
+        [
+            Dark,
+            Light,
+            Gruvbox,
+            GruvboxLight,
+            Dracula,
+            Nord,
+            NordLight,
+            Catppuccin,
+            CatppuccinLatte,
+            RosePine,
+            RosePineDawn,
+            Everforest,
+            EverforestLight,
+            Solarized,
+            SolarizedDark,
+            TokyoNight,
+            TokyoNightDay,
+        ]
+    }
+
+    /// Dark-section themes, in menu order.
+    fn dark_themes() -> [AppTheme; 9] {
+        use AppTheme::*;
+        [
+            Dark,
+            Gruvbox,
+            Dracula,
+            Nord,
+            Catppuccin,
+            RosePine,
+            Everforest,
+            SolarizedDark,
+            TokyoNight,
+        ]
+    }
+
+    /// Light-section themes, in menu order.
+    fn light_themes() -> [AppTheme; 8] {
+        use AppTheme::*;
+        [
+            Light,
+            GruvboxLight,
+            NordLight,
+            CatppuccinLatte,
+            RosePineDawn,
+            EverforestLight,
+            Solarized,
+            TokyoNightDay,
+        ]
+    }
+
+    /// Whether the chrome base is the dark `egui::Visuals`.
+    fn is_dark(self) -> bool {
+        !matches!(
+            self,
+            AppTheme::Light
+                | AppTheme::GruvboxLight
+                | AppTheme::NordLight
+                | AppTheme::CatppuccinLatte
+                | AppTheme::RosePineDawn
+                | AppTheme::EverforestLight
+                | AppTheme::Solarized
+                | AppTheme::TokyoNightDay
+        )
+    }
+
+    /// Full color table for this theme.
+    fn palette(self) -> ThemePalette {
+        match self {
+            AppTheme::Dark => ThemePalette {
+                bg_app: Color32::from_rgb(40, 40, 40),
+                bg_panel: Color32::from_rgb(48, 48, 49),
+                text_main: Color32::from_rgb(205, 205, 208),
+                text_bright: Color32::WHITE,
+                text_dim: Color32::from_rgb(130, 135, 145),
+                accent: Color32::from_rgb(110, 190, 235),
+                ed_text: Color32::from_rgb(210, 210, 212),
+                ed_marker: Color32::from_rgb(110, 115, 125),
+                ed_heading: Color32::from_rgb(95, 185, 250),
+                ed_code: Color32::from_rgb(155, 220, 165),
+                ed_code_bg: Color32::from_rgb(52, 52, 54),
+                ed_code_underline: Color32::from_rgb(88, 94, 108),
+                ed_quote: Color32::from_rgb(150, 160, 175),
+                ed_link_url: Color32::from_rgb(125, 165, 200),
+                ed_dim2: Color32::from_rgb(118, 123, 134),
+                ed_strike: Color32::from_rgb(175, 175, 180),
+                ed_italic: Color32::from_rgb(255, 220, 170),
+                ed_caret: Color32::from_rgb(200, 225, 255),
+                grammar_spelling: Color32::from_rgb(224, 108, 117),
+                ed_margin_mark: Color32::from_rgb(115, 121, 132),
+                text_faint: Color32::from_rgb(160, 160, 160),
+                card_selected: Color32::from_rgb(58, 58, 59),
+                card_hover: Color32::from_rgb(46, 46, 47),
+                bg_sheets: Color32::from_rgb(32, 32, 33),
+                bg_sheets_header: Color32::from_rgb(38, 38, 39),
+                bg_sidebar: Color32::from_rgb(40, 40, 41),
+            },
+            AppTheme::Light => ThemePalette {
+                bg_app: Color32::from_rgb(244, 244, 242),
+                bg_panel: Color32::from_rgb(232, 232, 230),
+                text_main: Color32::from_rgb(32, 32, 34),
+                text_bright: Color32::from_rgb(20, 20, 22),
+                text_dim: Color32::from_rgb(110, 114, 122),
+                accent: Color32::from_rgb(0, 102, 204),
+                ed_text: Color32::from_rgb(45, 45, 48),
+                ed_marker: Color32::from_rgb(130, 134, 144),
+                ed_heading: Color32::from_rgb(0, 102, 190),
+                ed_code: Color32::from_rgb(25, 120, 55),
+                ed_code_bg: Color32::from_rgb(233, 233, 234),
+                ed_code_underline: Color32::from_rgb(175, 180, 190),
+                ed_quote: Color32::from_rgb(105, 112, 128),
+                ed_link_url: Color32::from_rgb(90, 130, 175),
+                ed_dim2: Color32::from_rgb(128, 132, 142),
+                ed_strike: Color32::from_rgb(140, 140, 148),
+                ed_italic: Color32::from_rgb(160, 100, 15),
+                ed_caret: Color32::from_rgb(0, 102, 204),
+                grammar_spelling: Color32::from_rgb(178, 58, 72),
+                ed_margin_mark: Color32::from_rgb(120, 125, 135),
+                text_faint: Color32::from_rgb(105, 109, 118),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(240, 240, 238),
+                bg_sheets: Color32::from_rgb(226, 226, 224),
+                bg_sheets_header: Color32::from_rgb(232, 232, 230),
+                bg_sidebar: Color32::from_rgb(216, 216, 214),
+            },
+            AppTheme::Gruvbox => ThemePalette {
+                bg_app: Color32::from_rgb(40, 40, 40),
+                bg_panel: Color32::from_rgb(60, 56, 54),
+                text_main: Color32::from_rgb(235, 219, 178),
+                text_bright: Color32::from_rgb(251, 241, 199),
+                text_dim: Color32::from_rgb(146, 131, 116),
+                accent: Color32::from_rgb(131, 165, 152),
+                ed_text: Color32::from_rgb(235, 219, 178),
+                ed_marker: Color32::from_rgb(146, 131, 116),
+                ed_heading: Color32::from_rgb(131, 165, 152),
+                ed_code: Color32::from_rgb(184, 187, 38),
+                ed_code_bg: Color32::from_rgb(60, 56, 54),
+                ed_code_underline: Color32::from_rgb(102, 92, 84),
+                ed_quote: Color32::from_rgb(146, 131, 116),
+                ed_link_url: Color32::from_rgb(131, 165, 152),
+                ed_dim2: Color32::from_rgb(168, 153, 132),
+                ed_strike: Color32::from_rgb(146, 131, 116),
+                ed_italic: Color32::from_rgb(254, 128, 25),
+                ed_caret: Color32::from_rgb(250, 189, 47),
+                grammar_spelling: Color32::from_rgb(251, 73, 52),
+                ed_margin_mark: Color32::from_rgb(102, 92, 84),
+                text_faint: Color32::from_rgb(168, 153, 132),
+                card_selected: Color32::from_rgb(80, 73, 69),
+                card_hover: Color32::from_rgb(60, 56, 54),
+                bg_sheets: Color32::from_rgb(29, 32, 33),
+                bg_sheets_header: Color32::from_rgb(40, 40, 40),
+                bg_sidebar: Color32::from_rgb(44, 44, 43),
+            },
+            AppTheme::GruvboxLight => ThemePalette {
+                bg_app: Color32::from_rgb(251, 241, 199),
+                bg_panel: Color32::from_rgb(235, 219, 178),
+                text_main: Color32::from_rgb(60, 56, 54),
+                text_bright: Color32::from_rgb(40, 40, 40),
+                text_dim: Color32::from_rgb(146, 131, 116),
+                accent: Color32::from_rgb(69, 133, 136),
+                ed_text: Color32::from_rgb(60, 56, 54),
+                ed_marker: Color32::from_rgb(146, 131, 116),
+                ed_heading: Color32::from_rgb(7, 102, 120),
+                ed_code: Color32::from_rgb(121, 116, 14),
+                ed_code_bg: Color32::from_rgb(235, 219, 178),
+                ed_code_underline: Color32::from_rgb(146, 131, 116),
+                ed_quote: Color32::from_rgb(124, 111, 100),
+                ed_link_url: Color32::from_rgb(143, 63, 113),
+                ed_dim2: Color32::from_rgb(146, 131, 116),
+                ed_strike: Color32::from_rgb(124, 111, 100),
+                ed_italic: Color32::from_rgb(175, 58, 3),
+                ed_caret: Color32::from_rgb(69, 133, 136),
+                grammar_spelling: Color32::from_rgb(157, 0, 6),
+                ed_margin_mark: Color32::from_rgb(189, 174, 147),
+                text_faint: Color32::from_rgb(124, 111, 100),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(245, 233, 207),
+                bg_sheets: Color32::from_rgb(238, 224, 200),
+                bg_sheets_header: Color32::from_rgb(235, 219, 178),
+                bg_sidebar: Color32::from_rgb(222, 205, 164),
+            },
+            AppTheme::Dracula => ThemePalette {
+                bg_app: Color32::from_rgb(40, 42, 54),
+                bg_panel: Color32::from_rgb(68, 71, 90),
+                text_main: Color32::from_rgb(248, 248, 242),
+                text_bright: Color32::WHITE,
+                text_dim: Color32::from_rgb(98, 114, 164),
+                accent: Color32::from_rgb(189, 147, 249),
+                ed_text: Color32::from_rgb(248, 248, 242),
+                ed_marker: Color32::from_rgb(98, 114, 164),
+                ed_heading: Color32::from_rgb(139, 233, 253),
+                ed_code: Color32::from_rgb(80, 250, 123),
+                ed_code_bg: Color32::from_rgb(68, 71, 90),
+                ed_code_underline: Color32::from_rgb(98, 114, 164),
+                ed_quote: Color32::from_rgb(98, 114, 164),
+                ed_link_url: Color32::from_rgb(255, 184, 108),
+                ed_dim2: Color32::from_rgb(98, 114, 164),
+                ed_strike: Color32::from_rgb(98, 114, 164),
+                ed_italic: Color32::from_rgb(241, 250, 140),
+                ed_caret: Color32::from_rgb(248, 248, 242),
+                grammar_spelling: Color32::from_rgb(255, 85, 85),
+                ed_margin_mark: Color32::from_rgb(98, 114, 164),
+                text_faint: Color32::from_rgb(143, 147, 168),
+                card_selected: Color32::from_rgb(68, 71, 90),
+                card_hover: Color32::from_rgb(52, 55, 70),
+                bg_sheets: Color32::from_rgb(30, 31, 41),
+                bg_sheets_header: Color32::from_rgb(40, 42, 54),
+                bg_sidebar: Color32::from_rgb(38, 40, 52),
+            },
+            AppTheme::Nord => ThemePalette {
+                bg_app: Color32::from_rgb(46, 52, 64),
+                bg_panel: Color32::from_rgb(59, 66, 82),
+                text_main: Color32::from_rgb(229, 233, 240),
+                text_bright: Color32::from_rgb(236, 239, 244),
+                text_dim: Color32::from_rgb(139, 152, 184),
+                accent: Color32::from_rgb(136, 192, 208),
+                ed_text: Color32::from_rgb(229, 233, 240),
+                ed_marker: Color32::from_rgb(76, 86, 106),
+                ed_heading: Color32::from_rgb(136, 192, 208),
+                ed_code: Color32::from_rgb(163, 190, 140),
+                ed_code_bg: Color32::from_rgb(59, 66, 82),
+                ed_code_underline: Color32::from_rgb(76, 86, 106),
+                ed_quote: Color32::from_rgb(139, 152, 184),
+                ed_link_url: Color32::from_rgb(143, 188, 187),
+                ed_dim2: Color32::from_rgb(76, 86, 106),
+                ed_strike: Color32::from_rgb(97, 110, 136),
+                ed_italic: Color32::from_rgb(235, 203, 139),
+                ed_caret: Color32::from_rgb(136, 192, 208),
+                grammar_spelling: Color32::from_rgb(191, 97, 106),
+                ed_margin_mark: Color32::from_rgb(76, 86, 106),
+                text_faint: Color32::from_rgb(139, 152, 184),
+                card_selected: Color32::from_rgb(67, 76, 94),
+                card_hover: Color32::from_rgb(59, 66, 82),
+                bg_sheets: Color32::from_rgb(36, 41, 51),
+                bg_sheets_header: Color32::from_rgb(46, 52, 64),
+                bg_sidebar: Color32::from_rgb(47, 53, 66),
+            },
+            AppTheme::NordLight => ThemePalette {
+                // Unofficial: Nord ships no light variant. Snow Storm
+                // surfaces with darkened Frost/Aurora accents so text
+                // stays readable on the bright background.
+                bg_app: Color32::from_rgb(236, 239, 244),
+                bg_panel: Color32::from_rgb(229, 233, 240),
+                text_main: Color32::from_rgb(59, 66, 82),
+                text_bright: Color32::from_rgb(46, 52, 64),
+                text_dim: Color32::from_rgb(76, 86, 106),
+                accent: Color32::from_rgb(94, 129, 172),
+                ed_text: Color32::from_rgb(59, 66, 82),
+                ed_marker: Color32::from_rgb(76, 86, 106),
+                ed_heading: Color32::from_rgb(94, 129, 172),
+                ed_code: Color32::from_rgb(94, 140, 78),
+                ed_code_bg: Color32::from_rgb(229, 233, 240),
+                ed_code_underline: Color32::from_rgb(216, 222, 233),
+                ed_quote: Color32::from_rgb(76, 86, 106),
+                ed_link_url: Color32::from_rgb(63, 138, 150),
+                ed_dim2: Color32::from_rgb(123, 136, 161),
+                ed_strike: Color32::from_rgb(123, 136, 161),
+                ed_italic: Color32::from_rgb(168, 123, 0),
+                ed_caret: Color32::from_rgb(94, 129, 172),
+                grammar_spelling: Color32::from_rgb(191, 97, 106),
+                ed_margin_mark: Color32::from_rgb(216, 222, 233),
+                text_faint: Color32::from_rgb(76, 86, 106),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(229, 233, 240),
+                bg_sheets: Color32::from_rgb(223, 228, 236),
+                bg_sheets_header: Color32::from_rgb(229, 233, 240),
+                bg_sidebar: Color32::from_rgb(210, 214, 224),
+            },
+            AppTheme::Catppuccin => ThemePalette {
+                bg_app: Color32::from_rgb(30, 30, 46),
+                bg_panel: Color32::from_rgb(49, 50, 68),
+                text_main: Color32::from_rgb(205, 214, 244),
+                text_bright: Color32::WHITE,
+                text_dim: Color32::from_rgb(147, 153, 178),
+                accent: Color32::from_rgb(203, 166, 247),
+                ed_text: Color32::from_rgb(205, 214, 244),
+                ed_marker: Color32::from_rgb(108, 112, 134),
+                ed_heading: Color32::from_rgb(137, 180, 250),
+                ed_code: Color32::from_rgb(166, 227, 161),
+                ed_code_bg: Color32::from_rgb(49, 50, 68),
+                ed_code_underline: Color32::from_rgb(88, 91, 112),
+                ed_quote: Color32::from_rgb(147, 153, 178),
+                ed_link_url: Color32::from_rgb(148, 226, 213),
+                ed_dim2: Color32::from_rgb(108, 112, 134),
+                ed_strike: Color32::from_rgb(147, 153, 178),
+                ed_italic: Color32::from_rgb(250, 179, 135),
+                ed_caret: Color32::from_rgb(245, 224, 220),
+                grammar_spelling: Color32::from_rgb(243, 139, 168),
+                ed_margin_mark: Color32::from_rgb(88, 91, 112),
+                text_faint: Color32::from_rgb(166, 173, 200),
+                card_selected: Color32::from_rgb(69, 71, 90),
+                card_hover: Color32::from_rgb(49, 50, 68),
+                bg_sheets: Color32::from_rgb(17, 17, 27),
+                bg_sheets_header: Color32::from_rgb(24, 24, 37),
+                bg_sidebar: Color32::from_rgb(33, 33, 47),
+            },
+            AppTheme::CatppuccinLatte => ThemePalette {
+                bg_app: Color32::from_rgb(239, 241, 245),
+                bg_panel: Color32::from_rgb(230, 233, 239),
+                text_main: Color32::from_rgb(76, 79, 105),
+                text_bright: Color32::from_rgb(17, 17, 27),
+                text_dim: Color32::from_rgb(156, 160, 176),
+                accent: Color32::from_rgb(136, 57, 239),
+                ed_text: Color32::from_rgb(76, 79, 105),
+                ed_marker: Color32::from_rgb(156, 160, 176),
+                ed_heading: Color32::from_rgb(30, 102, 245),
+                ed_code: Color32::from_rgb(64, 160, 43),
+                ed_code_bg: Color32::from_rgb(230, 233, 239),
+                ed_code_underline: Color32::from_rgb(172, 176, 190),
+                ed_quote: Color32::from_rgb(124, 127, 147),
+                ed_link_url: Color32::from_rgb(23, 146, 153),
+                ed_dim2: Color32::from_rgb(156, 160, 176),
+                ed_strike: Color32::from_rgb(124, 127, 147),
+                ed_italic: Color32::from_rgb(254, 100, 11),
+                ed_caret: Color32::from_rgb(136, 57, 239),
+                grammar_spelling: Color32::from_rgb(210, 15, 57),
+                ed_margin_mark: Color32::from_rgb(172, 176, 190),
+                text_faint: Color32::from_rgb(108, 111, 133),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(237, 239, 244),
+                bg_sheets: Color32::from_rgb(228, 230, 237),
+                bg_sheets_header: Color32::from_rgb(230, 233, 239),
+                bg_sidebar: Color32::from_rgb(214, 217, 224),
+            },
+            AppTheme::RosePine => ThemePalette {
+                bg_app: Color32::from_rgb(25, 23, 36),
+                bg_panel: Color32::from_rgb(31, 29, 46),
+                text_main: Color32::from_rgb(224, 222, 244),
+                text_bright: Color32::WHITE,
+                text_dim: Color32::from_rgb(144, 140, 170),
+                accent: Color32::from_rgb(196, 167, 231),
+                ed_text: Color32::from_rgb(224, 222, 244),
+                ed_marker: Color32::from_rgb(110, 106, 134),
+                ed_heading: Color32::from_rgb(196, 167, 231),
+                ed_code: Color32::from_rgb(156, 207, 216),
+                ed_code_bg: Color32::from_rgb(38, 35, 58),
+                ed_code_underline: Color32::from_rgb(110, 106, 134),
+                ed_quote: Color32::from_rgb(144, 140, 170),
+                ed_link_url: Color32::from_rgb(246, 193, 119),
+                ed_dim2: Color32::from_rgb(110, 106, 134),
+                ed_strike: Color32::from_rgb(144, 140, 170),
+                ed_italic: Color32::from_rgb(246, 193, 119),
+                ed_caret: Color32::from_rgb(224, 222, 244),
+                grammar_spelling: Color32::from_rgb(235, 111, 146),
+                ed_margin_mark: Color32::from_rgb(82, 79, 103),
+                text_faint: Color32::from_rgb(165, 161, 194),
+                card_selected: Color32::from_rgb(38, 35, 58),
+                card_hover: Color32::from_rgb(31, 29, 46),
+                bg_sheets: Color32::from_rgb(20, 19, 31),
+                bg_sheets_header: Color32::from_rgb(25, 23, 36),
+                bg_sidebar: Color32::from_rgb(13, 12, 23),
+            },
+            AppTheme::RosePineDawn => ThemePalette {
+                bg_app: Color32::from_rgb(250, 244, 237),
+                bg_panel: Color32::from_rgb(242, 233, 225),
+                text_main: Color32::from_rgb(87, 82, 121),
+                text_bright: Color32::from_rgb(38, 35, 58),
+                text_dim: Color32::from_rgb(152, 147, 165),
+                accent: Color32::from_rgb(144, 122, 169),
+                ed_text: Color32::from_rgb(87, 82, 121),
+                ed_marker: Color32::from_rgb(152, 147, 165),
+                ed_heading: Color32::from_rgb(40, 105, 131),
+                ed_code: Color32::from_rgb(86, 148, 159),
+                ed_code_bg: Color32::from_rgb(242, 233, 225),
+                ed_code_underline: Color32::from_rgb(206, 202, 205),
+                ed_quote: Color32::from_rgb(121, 117, 147),
+                ed_link_url: Color32::from_rgb(234, 157, 52),
+                ed_dim2: Color32::from_rgb(152, 147, 165),
+                ed_strike: Color32::from_rgb(121, 117, 147),
+                ed_italic: Color32::from_rgb(234, 157, 52),
+                ed_caret: Color32::from_rgb(144, 122, 169),
+                grammar_spelling: Color32::from_rgb(180, 99, 122),
+                ed_margin_mark: Color32::from_rgb(206, 202, 205),
+                text_faint: Color32::from_rgb(110, 106, 134),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(247, 239, 230),
+                bg_sheets: Color32::from_rgb(240, 231, 220),
+                bg_sheets_header: Color32::from_rgb(242, 233, 225),
+                bg_sidebar: Color32::from_rgb(226, 216, 206),
+            },
+            AppTheme::Everforest => ThemePalette {
+                bg_app: Color32::from_rgb(45, 53, 59),
+                bg_panel: Color32::from_rgb(52, 63, 68),
+                text_main: Color32::from_rgb(211, 198, 170),
+                text_bright: Color32::from_rgb(245, 240, 221),
+                text_dim: Color32::from_rgb(147, 154, 141),
+                accent: Color32::from_rgb(167, 192, 128),
+                ed_text: Color32::from_rgb(211, 198, 170),
+                ed_marker: Color32::from_rgb(127, 137, 125),
+                ed_heading: Color32::from_rgb(127, 187, 179),
+                ed_code: Color32::from_rgb(167, 192, 128),
+                ed_code_bg: Color32::from_rgb(52, 63, 68),
+                ed_code_underline: Color32::from_rgb(74, 85, 91),
+                ed_quote: Color32::from_rgb(147, 154, 141),
+                ed_link_url: Color32::from_rgb(127, 187, 179),
+                ed_dim2: Color32::from_rgb(127, 137, 125),
+                ed_strike: Color32::from_rgb(157, 169, 160),
+                ed_italic: Color32::from_rgb(219, 188, 127),
+                ed_caret: Color32::from_rgb(211, 198, 170),
+                grammar_spelling: Color32::from_rgb(230, 126, 128),
+                ed_margin_mark: Color32::from_rgb(74, 85, 91),
+                text_faint: Color32::from_rgb(184, 196, 184),
+                card_selected: Color32::from_rgb(61, 72, 77),
+                card_hover: Color32::from_rgb(52, 63, 68),
+                bg_sheets: Color32::from_rgb(35, 43, 48),
+                bg_sheets_header: Color32::from_rgb(45, 53, 59),
+                bg_sidebar: Color32::from_rgb(43, 53, 58),
+            },
+            AppTheme::EverforestLight => ThemePalette {
+                bg_app: Color32::from_rgb(253, 246, 227),
+                bg_panel: Color32::from_rgb(240, 234, 211),
+                text_main: Color32::from_rgb(92, 106, 114),
+                text_bright: Color32::from_rgb(30, 35, 38),
+                text_dim: Color32::from_rgb(147, 159, 145),
+                accent: Color32::from_rgb(141, 161, 1),
+                ed_text: Color32::from_rgb(92, 106, 114),
+                ed_marker: Color32::from_rgb(147, 159, 145),
+                ed_heading: Color32::from_rgb(58, 148, 197),
+                ed_code: Color32::from_rgb(141, 161, 1),
+                ed_code_bg: Color32::from_rgb(240, 234, 211),
+                ed_code_underline: Color32::from_rgb(197, 201, 197),
+                ed_quote: Color32::from_rgb(122, 132, 120),
+                ed_link_url: Color32::from_rgb(53, 167, 124),
+                ed_dim2: Color32::from_rgb(147, 159, 145),
+                ed_strike: Color32::from_rgb(122, 132, 120),
+                ed_italic: Color32::from_rgb(223, 115, 87),
+                ed_caret: Color32::from_rgb(141, 161, 1),
+                grammar_spelling: Color32::from_rgb(248, 85, 82),
+                ed_margin_mark: Color32::from_rgb(197, 201, 197),
+                text_faint: Color32::from_rgb(111, 126, 94),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(249, 243, 230),
+                bg_sheets: Color32::from_rgb(243, 238, 219),
+                bg_sheets_header: Color32::from_rgb(240, 234, 211),
+                bg_sidebar: Color32::from_rgb(226, 219, 196),
+            },
+            AppTheme::Solarized => ThemePalette {
+                bg_app: Color32::from_rgb(253, 246, 227),
+                bg_panel: Color32::from_rgb(238, 232, 213),
+                text_main: Color32::from_rgb(88, 110, 117),
+                text_bright: Color32::from_rgb(7, 54, 66),
+                text_dim: Color32::from_rgb(147, 161, 161),
+                accent: Color32::from_rgb(38, 139, 210),
+                ed_text: Color32::from_rgb(88, 110, 117),
+                ed_marker: Color32::from_rgb(147, 161, 161),
+                ed_heading: Color32::from_rgb(38, 139, 210),
+                ed_code: Color32::from_rgb(133, 153, 0),
+                ed_code_bg: Color32::from_rgb(238, 232, 213),
+                ed_code_underline: Color32::from_rgb(147, 161, 161),
+                ed_quote: Color32::from_rgb(131, 148, 150),
+                ed_link_url: Color32::from_rgb(42, 161, 152),
+                ed_dim2: Color32::from_rgb(147, 161, 161),
+                ed_strike: Color32::from_rgb(131, 148, 150),
+                ed_italic: Color32::from_rgb(203, 75, 22),
+                ed_caret: Color32::from_rgb(38, 139, 210),
+                grammar_spelling: Color32::from_rgb(220, 50, 47),
+                ed_margin_mark: Color32::from_rgb(147, 161, 161),
+                text_faint: Color32::from_rgb(101, 123, 131),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(247, 241, 222),
+                bg_sheets: Color32::from_rgb(239, 232, 210),
+                bg_sheets_header: Color32::from_rgb(238, 232, 213),
+                bg_sidebar: Color32::from_rgb(224, 217, 198),
+            },
+            AppTheme::SolarizedDark => ThemePalette {
+                bg_app: Color32::from_rgb(0, 43, 54),
+                bg_panel: Color32::from_rgb(7, 54, 66),
+                text_main: Color32::from_rgb(131, 148, 150),
+                text_bright: Color32::from_rgb(253, 246, 227),
+                text_dim: Color32::from_rgb(88, 110, 117),
+                accent: Color32::from_rgb(38, 139, 210),
+                ed_text: Color32::from_rgb(131, 148, 150),
+                ed_marker: Color32::from_rgb(88, 110, 117),
+                ed_heading: Color32::from_rgb(38, 139, 210),
+                ed_code: Color32::from_rgb(133, 153, 0),
+                ed_code_bg: Color32::from_rgb(7, 54, 66),
+                ed_code_underline: Color32::from_rgb(88, 110, 117),
+                ed_quote: Color32::from_rgb(88, 110, 117),
+                ed_link_url: Color32::from_rgb(42, 161, 153),
+                ed_dim2: Color32::from_rgb(88, 110, 117),
+                ed_strike: Color32::from_rgb(88, 110, 117),
+                ed_italic: Color32::from_rgb(203, 75, 22),
+                ed_caret: Color32::from_rgb(38, 139, 210),
+                grammar_spelling: Color32::from_rgb(220, 50, 47),
+                ed_margin_mark: Color32::from_rgb(88, 110, 117),
+                text_faint: Color32::from_rgb(147, 161, 161),
+                card_selected: Color32::from_rgb(14, 75, 88),
+                card_hover: Color32::from_rgb(10, 62, 74),
+                bg_sheets: Color32::from_rgb(0, 33, 43),
+                bg_sheets_header: Color32::from_rgb(0, 43, 54),
+                bg_sidebar: Color32::from_rgb(3, 43, 54),
+            },
+            AppTheme::TokyoNight => ThemePalette {
+                bg_app: Color32::from_rgb(26, 27, 38),
+                bg_panel: Color32::from_rgb(36, 40, 59),
+                text_main: Color32::from_rgb(192, 202, 245),
+                text_bright: Color32::from_rgb(223, 227, 245),
+                text_dim: Color32::from_rgb(125, 134, 179),
+                accent: Color32::from_rgb(122, 162, 247),
+                ed_text: Color32::from_rgb(192, 202, 245),
+                ed_marker: Color32::from_rgb(86, 95, 137),
+                ed_heading: Color32::from_rgb(122, 162, 247),
+                ed_code: Color32::from_rgb(158, 206, 106),
+                ed_code_bg: Color32::from_rgb(36, 40, 59),
+                ed_code_underline: Color32::from_rgb(59, 66, 97),
+                ed_quote: Color32::from_rgb(154, 165, 206),
+                ed_link_url: Color32::from_rgb(125, 207, 255),
+                ed_dim2: Color32::from_rgb(86, 95, 137),
+                ed_strike: Color32::from_rgb(154, 165, 206),
+                ed_italic: Color32::from_rgb(224, 175, 104),
+                ed_caret: Color32::from_rgb(192, 202, 245),
+                grammar_spelling: Color32::from_rgb(247, 118, 142),
+                ed_margin_mark: Color32::from_rgb(59, 66, 97),
+                text_faint: Color32::from_rgb(169, 177, 214),
+                card_selected: Color32::from_rgb(47, 53, 77),
+                card_hover: Color32::from_rgb(36, 40, 59),
+                bg_sheets: Color32::from_rgb(22, 22, 30),
+                bg_sheets_header: Color32::from_rgb(26, 27, 38),
+                bg_sidebar: Color32::from_rgb(29, 31, 44),
+            },
+            AppTheme::TokyoNightDay => ThemePalette {
+                bg_app: Color32::from_rgb(225, 226, 231),
+                bg_panel: Color32::from_rgb(216, 218, 227),
+                text_main: Color32::from_rgb(55, 96, 191),
+                text_bright: Color32::from_rgb(26, 27, 38),
+                text_dim: Color32::from_rgb(132, 140, 181),
+                accent: Color32::from_rgb(46, 125, 233),
+                ed_text: Color32::from_rgb(55, 96, 191),
+                ed_marker: Color32::from_rgb(132, 140, 181),
+                ed_heading: Color32::from_rgb(46, 125, 233),
+                ed_code: Color32::from_rgb(88, 117, 57),
+                ed_code_bg: Color32::from_rgb(216, 218, 227),
+                ed_code_underline: Color32::from_rgb(180, 181, 185),
+                ed_quote: Color32::from_rgb(94, 103, 152),
+                ed_link_url: Color32::from_rgb(17, 140, 116),
+                ed_dim2: Color32::from_rgb(132, 140, 181),
+                ed_strike: Color32::from_rgb(94, 103, 152),
+                ed_italic: Color32::from_rgb(177, 92, 0),
+                ed_caret: Color32::from_rgb(46, 125, 233),
+                grammar_spelling: Color32::from_rgb(245, 42, 101),
+                ed_margin_mark: Color32::from_rgb(180, 181, 185),
+                text_faint: Color32::from_rgb(97, 114, 176),
+                card_selected: Color32::WHITE,
+                card_hover: Color32::from_rgb(222, 224, 232),
+                bg_sheets: Color32::from_rgb(214, 216, 225),
+                bg_sheets_header: Color32::from_rgb(216, 218, 227),
+                bg_sidebar: Color32::from_rgb(200, 202, 212),
+            },
+        }
+    }
+
+    /// Paint roles live on [`ResolvedTheme`]; [`ThemePalette`] holds the data.
+    // (Built-in tables, polarity, and titles follow.)
+
+
+
+
+
+    /// Built-in theme as an effectively active theme.
+    fn resolved(self) -> ResolvedTheme {
+        ResolvedTheme {
+            palette: self.palette(),
+            dark: self.is_dark(),
+        }
+    }
+
+    /// Key colors expanded from a built-in theme, as the "start from" seeds
+    /// for the builder.
+    fn custom_keys(self) -> custom_theme::CustomKeys {
+        use custom_theme::triple;
+        let p = self.palette();
+        custom_theme::CustomKeys {
+            background: triple(p.bg_app),
+            panel: triple(p.bg_panel),
+            sidebar: triple(p.bg_sidebar),
+            sheets: triple(p.bg_sheets),
+            text: triple(p.text_main),
+            dim: triple(p.text_dim),
+            accent: triple(p.accent),
+            green: triple(p.ed_code),
+            amber: triple(p.ed_italic),
+            red: triple(p.grammar_spelling),
+        }
+    }
+}
+
+/// Effectively active chrome: either a built-in theme or a user-built
+/// custom. Recomputed every frame from the setting plus customs, so the
+/// dozens of paint call sites never branch on the source.
+#[derive(Clone, Copy)]
+struct ResolvedTheme {
+    palette: ThemePalette,
+    dark: bool,
+}
+
+impl ResolvedTheme {
     fn bg_app(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(40, 40, 40),
-            AppTheme::Light => Color32::from_rgb(244, 244, 242),
-        }
+        self.palette.bg_app
     }
-
-    /// Top bar, sidebars, and popover surfaces.
     fn bg_panel(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(48, 48, 49),
-            AppTheme::Light => Color32::from_rgb(232, 232, 230),
-        }
+        self.palette.bg_panel
     }
-
-    /// Primary text.
     fn text_main(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(205, 205, 208),
-            AppTheme::Light => Color32::from_rgb(32, 32, 34),
-        }
+        self.palette.text_main
     }
-
-    /// Bright text for headings, selected rows, and the caret.
     fn text_bright(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::WHITE,
-            AppTheme::Light => Color32::from_rgb(20, 20, 22),
-        }
+        self.palette.text_bright
     }
-
-    /// Secondary text: counts, hints, section labels.
     fn text_dim(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(130, 135, 145),
-            AppTheme::Light => Color32::from_rgb(110, 114, 122),
-        }
+        self.palette.text_dim
     }
-
-    /// Accent: links, selections, progress, focus marks.
     fn accent(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(110, 190, 235),
-            AppTheme::Light => Color32::from_rgb(0, 102, 204),
-        }
+        self.palette.accent
     }
-
-    /// Soft accent fill for drop targets and highlights.
     fn accent_soft(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgba_unmultiplied(30, 144, 255, 40),
-            AppTheme::Light => Color32::from_rgba_unmultiplied(0, 102, 204, 32),
-        }
+        let a = self.accent();
+        Color32::from_rgba_unmultiplied(
+            a.r(),
+            a.g(),
+            a.b(),
+            if self.dark { 40 } else { 32 },
+        )
     }
-
     fn visuals(self) -> egui::Visuals {
-        match self {
-            AppTheme::Dark => egui::Visuals::dark(),
-            AppTheme::Light => egui::Visuals::light(),
-        }
+        let p = self.palette;
+        let mut v = if self.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        v.window_fill = p.bg_app;
+        v.panel_fill = p.bg_panel;
+        v.faint_bg_color = p.card_hover;
+        v.extreme_bg_color = p.bg_sheets;
+        v.code_bg_color = p.ed_code_bg;
+        v.override_text_color = Some(p.text_main);
+        v.hyperlink_color = p.accent;
+        v.selection.bg_fill = self.accent_soft();
+        v.selection.stroke.color = p.accent;
+        v
     }
-
-    /// Editor body text.
     fn ed_text(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(210, 210, 212),
-            AppTheme::Light => Color32::from_rgb(45, 45, 48),
-        }
+        self.palette.ed_text
     }
-
-    /// Editor `#` margin markers.
     fn ed_marker(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(110, 115, 125),
-            AppTheme::Light => Color32::from_rgb(130, 134, 144),
-        }
+        self.palette.ed_marker
     }
-
-    /// Editor headings and links.
     fn ed_heading(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(95, 185, 250),
-            AppTheme::Light => Color32::from_rgb(0, 102, 190),
-        }
+        self.palette.ed_heading
     }
-
-    /// Editor inline code and fenced blocks.
     fn ed_code(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(155, 220, 165),
-            AppTheme::Light => Color32::from_rgb(25, 120, 55),
-        }
+        self.palette.ed_code
     }
-
-    /// Editor code background wash.
     fn ed_code_bg(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(52, 52, 54),
-            AppTheme::Light => Color32::from_rgb(233, 233, 234),
-        }
+        self.palette.ed_code_bg
     }
-
-    /// Editor inline-code underline.
     fn ed_code_underline(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(88, 94, 108),
-            AppTheme::Light => Color32::from_rgb(175, 180, 190),
-        }
+        self.palette.ed_code_underline
     }
-
-    /// Editor blockquotes.
     fn ed_quote(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(150, 160, 175),
-            AppTheme::Light => Color32::from_rgb(105, 112, 128),
-        }
+        self.palette.ed_quote
     }
-
-    /// Editor link URLs (link text reuses the heading blue).
     fn ed_link_url(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(125, 165, 200),
-            AppTheme::Light => Color32::from_rgb(90, 130, 175),
-        }
+        self.palette.ed_link_url
     }
-
-    /// Editor secondary markdown punctuation.
     fn ed_dim2(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(118, 123, 134),
-            AppTheme::Light => Color32::from_rgb(128, 132, 142),
-        }
+        self.palette.ed_dim2
     }
-
-    /// Editor bold runs.
     fn ed_bold(self) -> Color32 {
-        self.text_bright()
+        self.palette.text_bright
     }
-
-    /// Editor strikethrough runs.
     fn ed_strike(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(175, 175, 180),
-            AppTheme::Light => Color32::from_rgb(140, 140, 148),
-        }
+        self.palette.ed_strike
     }
-
-    /// Editor italic runs.
     fn ed_italic(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(255, 220, 170),
-            AppTheme::Light => Color32::from_rgb(160, 100, 15),
-        }
+        self.palette.ed_italic
     }
-
-    /// Editor custom caret.
     fn ed_caret(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(200, 225, 255),
-            AppTheme::Light => Color32::from_rgb(0, 102, 204),
-        }
+        self.palette.ed_caret
     }
-
-    /// Spelling squiggle in the editor overlay.
     fn grammar_spelling(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(224, 108, 117),
-            AppTheme::Light => Color32::from_rgb(178, 58, 72),
-        }
+        self.palette.grammar_spelling
     }
-
-    /// Grammar squiggle in the editor overlay (accent blue).
     fn grammar_issue(self) -> Color32 {
         self.accent()
     }
-
-    /// Editor `#` margin glyphs drawn in the overlay.
     fn ed_margin_mark(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(115, 121, 132),
-            AppTheme::Light => Color32::from_rgb(120, 125, 135),
-        }
+        self.palette.ed_margin_mark
     }
-
-    /// Sidebar header labels and empty-trash actions.
     fn text_faint(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(160, 160, 160),
-            AppTheme::Light => Color32::from_rgb(105, 109, 118),
-        }
+        self.palette.text_faint
     }
-
-    /// Selected sheet card in the sheets panel.
     fn card_selected(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(58, 58, 59),
-            AppTheme::Light => Color32::WHITE,
-        }
+        self.palette.card_selected
     }
-
-    /// Hovered (not selected) sheet card in the sheets panel.
     fn card_hover(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(46, 46, 47),
-            AppTheme::Light => Color32::from_rgb(240, 240, 238),
-        }
+        self.palette.card_hover
     }
-
-    /// Sheets panel surface and its header well.
     fn bg_sheets(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(32, 32, 33),
-            AppTheme::Light => Color32::from_rgb(226, 226, 224),
-        }
+        self.palette.bg_sheets
     }
-
     fn bg_sheets_header(self) -> Color32 {
-        match self {
-            AppTheme::Dark => Color32::from_rgb(38, 38, 39),
-            AppTheme::Light => self.bg_panel(),
+        self.palette.bg_sheets_header
+    }
+    fn bg_sidebar(self) -> Color32 {
+        self.palette.bg_sidebar
+    }
+}
+
+impl Default for ResolvedTheme {
+    fn default() -> Self {
+        Self {
+            palette: AppTheme::Dark.palette(),
+            dark: true,
         }
     }
 }
@@ -772,6 +1336,17 @@ struct StyleEditState {
     is_new: bool,
 }
 
+/// An in-app theme editing session. The draft keys live here and are
+/// mirrored into `theme_draft` for live preview; saving persists.
+struct ThemeEditorState {
+    /// Edited theme id, or `None` for a brand-new theme.
+    id: Option<String>,
+    /// Draft display name.
+    name: String,
+    /// Draft key colors (live-previewed).
+    keys: custom_theme::CustomKeys,
+}
+
 /// Starter content for the "New style" editor.
 const STYLE_TEMPLATE: &str = "/* My style — describe it here. */\nbody {\n  color: #222233;\n  font-size: 14px;\n  line-height: 1.6;\n}\nh1 {\n  color: #b00020;\n}\na {\n  color: #0066cc;\n}\n@page {\n  size: A4;\n  margin: 2cm;\n}\n";
 
@@ -908,6 +1483,17 @@ struct WritingApp {
     sheets_hover: Option<SheetHover>,
     /// App chrome color scheme. Remembered across runs.
     app_theme: AppTheme,
+    /// Effectively active chrome (built-in or custom), recomputed every
+    /// frame. Paint code reads this; the setting above stays untouched.
+    theme: ResolvedTheme,
+    /// User-built themes, persisted per-machine in `themes.json`.
+    custom_themes: Vec<custom_theme::CustomTheme>,
+    /// Active custom theme id, if any. `None` = the built-in `app_theme`.
+    active_custom: Option<String>,
+    /// Live preview keys while the theme editor is open. Session-only.
+    theme_draft: Option<custom_theme::CustomKeys>,
+    /// Open theme editor state, if any. Session-only.
+    theme_editor: Option<ThemeEditorState>,
     /// Editor font family (a system font name). `None` = built-in font.
     /// Remembered across runs.
     editor_font_family: Option<String>,
@@ -2369,7 +2955,19 @@ impl WritingApp {
             last_window_state: Self::load_window_state(),
             last_window_save: 0.0,
             window_t0: None,
+            custom_themes: Vec::new(),
+            active_custom: None,
+            theme_draft: None,
+            theme_editor: None,
+            theme: ResolvedTheme::default(),
         };
+        // Custom themes live in a per-machine sidecar file.
+        {
+            let (themes, active) = custom_theme::load_all(Self::library_dir());
+            app.custom_themes = themes;
+            app.active_custom = active;
+            app.refresh_theme();
+        }
         // Checking is on for fresh installs; a saved preference (if any)
         // overrides below.
         app.grammar.enabled = true;
@@ -5816,6 +6414,37 @@ blockquote {
         self.gdrive.last_edit = Some(SystemTime::now());
     }
 
+    /// Recompute the effectively active chrome: the editor draft wins
+    /// while open, else the active custom theme, else the built-in.
+    fn refresh_theme(&mut self) {
+        if let Some(keys) = &self.theme_draft {
+            let (palette, dark) = custom_theme::resolve(keys);
+            self.theme = ResolvedTheme { palette, dark };
+            return;
+        }
+        let custom = self.active_custom.as_ref().and_then(|id| {
+            self.custom_themes
+                .iter()
+                .find(|t| &t.id == id)
+                .map(|t| t.keys)
+        });
+        if let Some(keys) = custom {
+            let (palette, dark) = custom_theme::resolve(&keys);
+            self.theme = ResolvedTheme { palette, dark };
+        } else {
+            self.theme = self.app_theme.resolved();
+        }
+    }
+
+    /// Persist custom themes and the active selection (per-machine file).
+    fn save_custom_themes(&mut self) {
+        custom_theme::save_all(
+            Self::library_dir(),
+            &self.custom_themes,
+            self.active_custom.as_deref(),
+        );
+    }
+
     /// Whether in-app update checks may run. Headless screenshot runs,
     /// `ARIADNE_NO_UPDATE_CHECK=1` runs, and unit tests never touch the
     /// network.
@@ -6651,19 +7280,13 @@ blockquote {
     /// Marker color for list items: green checked boxes, blue open boxes,
     /// pale blue bullets and numbers. Shared by the layouter and the
     /// margin-marker overlay so the two always agree.
-    fn list_marker_color(marker: &str, theme: AppTheme) -> Color32 {
+    fn list_marker_color(marker: &str, theme: ResolvedTheme) -> Color32 {
         if marker.contains("[x]") || marker.contains("[X]") {
-            match theme {
-                AppTheme::Dark => Color32::from_rgb(120, 200, 140),
-                AppTheme::Light => Color32::from_rgb(25, 135, 60),
-            }
+            theme.ed_code()
         } else if marker.contains("[ ]") {
             theme.accent()
         } else {
-            match theme {
-                AppTheme::Dark => Color32::from_rgb(155, 205, 245),
-                AppTheme::Light => Color32::from_rgb(70, 140, 200),
-            }
+            theme.ed_heading()
         }
     }
 
@@ -6714,7 +7337,7 @@ blockquote {
         text: &str,
         wrap_width: f32,
         base_size: f32,
-        theme: AppTheme,
+        theme: ResolvedTheme,
         editor: FontId,
         dim_outside: Option<(usize, usize)>,
     ) -> Arc<egui::Galley> {
@@ -6753,7 +7376,7 @@ blockquote {
             base: &TextFormat,
             code_color: Color32,
             code_bg: Color32,
-            theme: AppTheme,
+            theme: ResolvedTheme,
         ) {
             use egui::Stroke;
             let link_color = theme.ed_heading();
@@ -7325,7 +7948,7 @@ blockquote {
         // nothing and squiggles are ready for the overlay below.
         Self::refresh_grammar_for_sheets(&self.sheets, &mut self.grammar, sel);
         let base_size = self.editor_font_size;
-        let theme = self.app_theme;
+        let theme = self.theme;
         let editor = self.editor_font(ui.ctx(), base_size);
         // Image paste: Cmd+V with the editor focused tries the system
         // clipboard first; plain text falls through to egui untouched.
@@ -12038,7 +12661,7 @@ blockquote {
             ui.label(
                 RichText::new("Page 1 of 1 — estimated")
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
             );
             ui.add_space(4.0);
             egui::Frame::new()
@@ -12070,7 +12693,7 @@ blockquote {
             ui.label(
                 RichText::new(format!("Page {} of {page_count} — estimated", pg + 1))
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
             );
             ui.add_space(4.0);
             egui::Frame::new()
@@ -12555,11 +13178,15 @@ blockquote {
                 self.update_check_now();
             }
             PaletteCommand::ToggleTheme => {
-                self.app_theme = if self.app_theme == AppTheme::Dark {
-                    AppTheme::Light
-                } else {
-                    AppTheme::Dark
-                };
+                // Cycle through built-in themes in menu order; a built-in
+                // pick always wins over any custom.
+                let all = AppTheme::all();
+                let i = all
+                    .iter()
+                    .position(|t| *t == self.app_theme)
+                    .unwrap_or(0);
+                self.app_theme = all[(i + 1) % all.len()];
+                self.active_custom = None;
                 self.save_library();
             }
             PaletteCommand::ToggleTypewriter => {
@@ -12985,7 +13612,7 @@ blockquote {
             } else {
                 format!("{} of {}", self.find_index + 1, n)
             };
-            ui.label(RichText::new(count).small().color(self.app_theme.text_dim()));
+            ui.label(RichText::new(count).small().color(self.theme.text_dim()));
             if ui
                 .add_enabled(
                     n > 0,
@@ -13193,7 +13820,7 @@ blockquote {
                             ui.label(
                                 RichText::new("Sheets")
                                     .small()
-                                    .color(self.app_theme.text_dim()),
+                                    .color(self.theme.text_dim()),
                             );
                             for (n, idx) in sheet_hits.iter().enumerate() {
                                 let (title, group) = self
@@ -13225,7 +13852,7 @@ blockquote {
                             ui.label(
                                 RichText::new("Commands")
                                     .small()
-                                    .color(self.app_theme.text_dim()),
+                                    .color(self.theme.text_dim()),
                             );
                             for (m, ci) in cmd_hits.iter().enumerate() {
                                 let (title, shortcut, cmd) = &commands[*ci];
@@ -13252,7 +13879,7 @@ blockquote {
                                                         *key,
                                                     ))
                                                     .small()
-                                                    .color(self.app_theme.text_faint()),
+                                                    .color(self.theme.text_faint()),
                                                 );
                                             }
                                         },
@@ -13267,7 +13894,7 @@ blockquote {
                             ui.label(
                                 RichText::new("No matches")
                                     .small()
-                                    .color(self.app_theme.text_dim()),
+                                    .color(self.theme.text_dim()),
                             );
                         }
                     });
@@ -13338,7 +13965,7 @@ blockquote {
                     ui.label(
                         RichText::new("No headings in this sheet yet.")
                             .small()
-                            .color(self.app_theme.text_dim()),
+                            .color(self.theme.text_dim()),
                     );
                     return;
                 }
@@ -13388,7 +14015,7 @@ blockquote {
         let mut snapshot_now = false;
         let mut clear = false;
         let mut close = false;
-        let dim = self.app_theme.text_dim();
+        let dim = self.theme.text_dim();
         ui.horizontal(|ui| {
             ui.label(RichText::new("History").size(12.5).color(dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -13401,7 +14028,7 @@ blockquote {
         ui.label(
             RichText::new(title)
                 .strong()
-                .color(self.app_theme.text_bright()),
+                .color(self.theme.text_bright()),
         );
         let count = self
             .history
@@ -13418,7 +14045,7 @@ blockquote {
                     format!("{count} snapshots")
                 })
                 .small()
-                .color(self.app_theme.text_faint()),
+                .color(self.theme.text_faint()),
             );
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -13464,7 +14091,7 @@ blockquote {
                         "Snapshots appear as you edit (about every 5 minutes), or take one now.",
                     )
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
                 );
             }
         }
@@ -13491,6 +14118,316 @@ blockquote {
     }
     /// Settings window: app theme plus the editor font family and size.
     /// Everything applies live and is remembered across restarts.
+    /// One theme picker grid. Returns the clicked theme, if any; the
+    /// caller applies it through the deferred `apply_theme` slot.
+    fn theme_grid(
+        &self,
+        ui: &mut egui::Ui,
+        id: &str,
+        themes: &[AppTheme],
+    ) -> Option<AppTheme> {
+        let mut picked = None;
+        egui::Grid::new(id)
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                for (i, theme) in themes.iter().enumerate() {
+                    if ui
+                        .selectable_label(self.app_theme == *theme, theme.title())
+                        .on_hover_text(format!("{t} theme", t = theme.title()))
+                        .clicked()
+                    {
+                        picked = Some(*theme);
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+        picked
+    }
+
+    /// Unused theme name based on `base`, ignoring `except_id` (so saving
+    /// without renaming keeps its name).
+    fn unused_custom_name(&self, base: &str, except_id: Option<&str>) -> String {
+        let base = base.trim();
+        let base = if base.is_empty() { "Untitled" } else { base };
+        let taken: Vec<&str> = self
+            .custom_themes
+            .iter()
+            .filter(|t| Some(t.id.as_str()) != except_id)
+            .map(|t| t.name.as_str())
+            .collect();
+        if !taken.contains(&base) {
+            return base.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base} {n}");
+            if !taken.iter().any(|t| *t == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Open the theme editor: seeded from the current look for a new
+    /// theme, or from the stored theme being edited. The draft
+    /// live-previews until saved or cancelled.
+    fn open_theme_editor(&mut self, which: Option<String>) {
+        let (id, name, keys) = match which {
+            Some(id) => match self.custom_themes.iter().find(|t| t.id == id) {
+                Some(t) => (Some(t.id.clone()), t.name.clone(), t.keys),
+                None => {
+                    self.status = "That theme is gone".to_string();
+                    return;
+                }
+            },
+            None => {
+                let keys = match self.active_custom.as_ref().and_then(|aid| {
+                    self.custom_themes.iter().find(|t| &t.id == aid)
+                }) {
+                    Some(t) => t.keys,
+                    None => self.app_theme.custom_keys(),
+                };
+                (None, self.unused_custom_name("My theme", None), keys)
+            }
+        };
+        self.theme_draft = Some(keys);
+        self.theme_editor = Some(ThemeEditorState { id, name, keys });
+    }
+
+    /// Commit the editor draft: update in place or create, then activate.
+    fn save_theme_editor(&mut self) {
+        let Some(ed) = self.theme_editor.take() else {
+            return;
+        };
+        if ed.name.trim().is_empty() {
+            self.theme_editor = Some(ed);
+            self.status = "Give the theme a name first".to_string();
+            return;
+        }
+        let id = match ed.id {
+            Some(id) => {
+                let name = self.unused_custom_name(&ed.name, Some(&id));
+                if let Some(t) = self.custom_themes.iter_mut().find(|t| t.id == id) {
+                    t.name = name;
+                    t.keys = ed.keys;
+                }
+                id
+            }
+            None => {
+                let name = self.unused_custom_name(&ed.name, None);
+                let t = custom_theme::CustomTheme::new(name, ed.keys);
+                let id = t.id.clone();
+                self.custom_themes.push(t);
+                id
+            }
+        };
+        self.active_custom = Some(id);
+        self.theme_draft = None;
+        self.save_custom_themes();
+        self.status = "Theme saved".to_string();
+    }
+
+    /// Delete a custom theme, falling back to the built-in when active.
+    fn delete_custom_theme(&mut self, id: &str) {
+        let before = self.custom_themes.len();
+        self.custom_themes.retain(|t| t.id != id);
+        if self.custom_themes.len() == before {
+            return;
+        }
+        if self.active_custom.as_deref() == Some(id) {
+            self.active_custom = None;
+        }
+        if self
+            .theme_editor
+            .as_ref()
+            .and_then(|e| e.id.as_deref())
+            == Some(id)
+        {
+            self.theme_editor = None;
+            self.theme_draft = None;
+        }
+        self.save_custom_themes();
+        self.status = "Theme deleted".to_string();
+    }
+
+    /// Duplicate a custom theme under a fresh name (not activated).
+    fn duplicate_custom_theme(&mut self, id: &str) {
+        let Some(src) = self.custom_themes.iter().find(|t| t.id == id).cloned() else {
+            return;
+        };
+        let name = self.unused_custom_name(&format!("{} copy", src.name), None);
+        self.custom_themes
+            .push(custom_theme::CustomTheme::new(name.clone(), src.keys));
+        self.save_custom_themes();
+        self.status = format!("Duplicated as {name}");
+    }
+
+    /// Write a custom theme to a `.json` file.
+    fn export_custom_theme(&mut self, id: &str) {
+        let Some(t) = self.custom_themes.iter().find(|t| t.id == id) else {
+            return;
+        };
+        #[cfg(feature = "dialogs")]
+        {
+            let filename = format!("{}.json", Self::sanitize_style_name(&t.name));
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON theme", &["json"])
+                .set_file_name(filename)
+                .save_file()
+            {
+                match std::fs::write(&path, custom_theme::export_json(t)) {
+                    Ok(()) => self.status = format!("Exported {}", t.name),
+                    Err(e) => {
+                        self.status = format!("Could not write the theme file ({e})")
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dialogs"))]
+        {
+            let _ = id;
+            self.status = "Exporting a theme needs the dialogs feature".to_string();
+        }
+    }
+
+    /// Read a `.json` theme file, validate it, and activate the result.
+    fn import_custom_theme(&mut self) {
+        #[cfg(feature = "dialogs")]
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON theme", &["json"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Err(e) => {
+                    self.status = format!("Could not read the theme file ({e})")
+                }
+                Ok(text) => match custom_theme::import_json(&text) {
+                    Err(msg) => {
+                        self.status = format!("Could not import the theme: {msg}")
+                    }
+                    Ok(mut t) => {
+                        t.name = self.unused_custom_name(&t.name, None);
+                        let name = t.name.clone();
+                        let id = t.id.clone();
+                        self.custom_themes.push(t);
+                        self.active_custom = Some(id);
+                        self.save_custom_themes();
+                        self.status = format!("Imported {name}");
+                    }
+                },
+            }
+        }
+        #[cfg(not(feature = "dialogs"))]
+        {
+            self.status = "Importing a theme needs the dialogs feature".to_string();
+        }
+    }
+
+    /// Theme builder window: name, base seed, and the ten key colors.
+    /// Edits land in the draft for live preview; closing without saving
+    /// discards them.
+    fn show_theme_editor(&mut self, ctx: &egui::Context) {
+        if self.theme_editor.is_none() {
+            return;
+        }
+        let mut open = true;
+        let mut do_save = false;
+        let mut do_cancel = false;
+        let mut reseed: Option<AppTheme> = None;
+        let (mut name, mut keys) = self
+            .theme_editor
+            .as_ref()
+            .map(|e| (e.name.clone(), e.keys))
+            .unwrap_or_default();
+        egui::Window::new("Theme editor")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_size(Vec2::new(430.0, 540.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_min_width(390.0);
+                ui.style_mut().override_font_id =
+                    Some(egui::FontId::proportional(16.0));
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut name);
+                });
+                egui::ComboBox::from_id_salt("theme base")
+                    .selected_text("Start from a built-in…")
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for theme in AppTheme::all() {
+                            if ui
+                                .selectable_label(false, theme.title())
+                                .clicked()
+                            {
+                                reseed = Some(theme);
+                            }
+                        }
+                    });
+                ui.separator();
+                for (label, slot) in keys.entries() {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        let mut c = custom_theme::rgb(*slot);
+                        if ui.color_edit_button_srgba(&mut c).changed() {
+                            *slot = custom_theme::triple(c);
+                        }
+                        ui.monospace(custom_theme::to_hex(*slot));
+                    });
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save theme").clicked() {
+                        do_save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+        if !open || do_cancel {
+            self.theme_editor = None;
+            self.theme_draft = None;
+            return;
+        }
+        if do_save {
+            // Name travels through the editor state so empty-name
+            // rejection can restore the draft.
+            if let Some(ed) = self.theme_editor.as_mut() {
+                ed.name = name;
+                ed.keys = keys;
+            }
+            self.save_theme_editor();
+            return;
+        }
+        let mut preview = false;
+        if let Some(ed) = self.theme_editor.as_mut() {
+            if ed.name != name {
+                ed.name = name;
+            }
+            if ed.keys != keys {
+                ed.keys = keys;
+                preview = true;
+            }
+        }
+        if let Some(base) = reseed {
+            if let Some(ed) = self.theme_editor.as_mut() {
+                ed.keys = base.custom_keys();
+                preview = true;
+            }
+            self.status = format!("Seeded from {}", base.title());
+        }
+        if preview {
+            self.theme_draft = self.theme_editor.as_ref().map(|e| e.keys);
+        }
+    }
+
     fn show_settings_popup(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
@@ -13499,6 +14436,12 @@ blockquote {
         // Deferred so the combo rows stay read-only inside their closures.
         let mut apply_family: Option<Option<String>> = None;
         let mut apply_theme: Option<AppTheme> = None;
+        let mut apply_custom: Option<String> = None;
+        let mut open_theme_editor: Option<Option<String>> = None;
+        let mut delete_custom: Option<String> = None;
+        let mut duplicate_custom: Option<String> = None;
+        let mut export_custom: Option<String> = None;
+        let mut do_import_custom = false;
         let mut do_move_icloud = false;
         let mut do_unmove_icloud = false;
         let mut do_review_conflicts = false;
@@ -13552,21 +14495,70 @@ blockquote {
                             .show(ui, |ui| {
                                 match self.settings_tab {
                                 SettingsTab::Appearance => {
-                ui.label(RichText::new("Theme").size(16.0).color(self.app_theme.text_dim()));
-                ui.horizontal(|ui| {
-                    for theme in [AppTheme::Dark, AppTheme::Light] {
+                ui.label(RichText::new("Theme").size(16.0).color(self.theme.text_dim()));
+                ui.label(RichText::new("Dark").small().color(self.theme.text_dim()));
+                if let Some(theme) = self.theme_grid(ui, "theme grid dark", &AppTheme::dark_themes()) {
+                    apply_theme = Some(theme);
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new("Light").small().color(self.theme.text_dim()));
+                if let Some(theme) = self.theme_grid(ui, "theme grid light", &AppTheme::light_themes()) {
+                    apply_theme = Some(theme);
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new("Custom").small().color(self.theme.text_dim()));
+                let custom_ids: Vec<(String, String, bool)> = self
+                    .custom_themes
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.id.clone(),
+                            t.name.clone(),
+                            self.active_custom.as_deref() == Some(t.id.as_str()),
+                        )
+                    })
+                    .collect();
+                if custom_ids.is_empty() {
+                    ui.label(
+                        RichText::new("No custom themes yet.")
+                            .small()
+                            .color(self.theme.text_dim()),
+                    );
+                }
+                for (id, name, is_active) in custom_ids {
+                    ui.horizontal(|ui| {
                         if ui
-                            .selectable_label(self.app_theme == theme, theme.title())
-                            .on_hover_text(format!("{t} theme", t = theme.title()))
+                            .selectable_label(is_active, &name)
+                            .on_hover_text("Apply this custom theme")
                             .clicked()
                         {
-                            apply_theme = Some(theme);
+                            apply_custom = Some(id.clone());
                         }
+                        if ui.small_button("Edit").on_hover_text("Edit this theme").clicked() {
+                            open_theme_editor = Some(Some(id.clone()));
+                        }
+                        if ui.small_button("Save…").on_hover_text("Export to a file").clicked() {
+                            export_custom = Some(id.clone());
+                        }
+                        if ui.small_button("Copy").on_hover_text("Duplicate this theme").clicked() {
+                            duplicate_custom = Some(id.clone());
+                        }
+                        if ui.small_button("×").on_hover_text("Delete this theme").clicked() {
+                            delete_custom = Some(id.clone());
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("New theme…").clicked() {
+                        open_theme_editor = Some(None);
+                    }
+                    if ui.button("Import…").clicked() {
+                        do_import_custom = true;
                     }
                 });
                                 }
                                 SettingsTab::Editor => {
-                ui.label(RichText::new("Editor").size(16.0).color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Editor").size(16.0).color(self.theme.text_dim()));
                 ui.horizontal(|ui| {
                     ui.label("Font:");
                     let current = self
@@ -13617,7 +14609,7 @@ blockquote {
                     self.save_library();
                 }
                 ui.add_space(8.0);
-                ui.label(RichText::new("Reading").size(16.0).color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Reading").size(16.0).color(self.theme.text_dim()));
                 if ui
                     .checkbox(&mut self.typewriter, "Typewriter scrolling (keep the caret line centered)")
                     .on_hover_text(format!(
@@ -13653,7 +14645,7 @@ blockquote {
                 // Grammar checking: master toggle plus the synced custom
                 // dictionary (words added from the fix popup land here and
                 // can be removed again, which also syncs).
-                ui.label(RichText::new("Checking").small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Checking").small().color(self.theme.text_dim()));
                 if ui
                     .checkbox(&mut self.grammar.enabled, "Check spelling and grammar as I type")
                     .changed()
@@ -13700,7 +14692,7 @@ blockquote {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(420.0);
                 // iCloud sync for the iCloud section (Documents stays local).
-                ui.label(RichText::new("Sync").size(16.0).color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Sync").size(16.0).color(self.theme.text_dim()));
                 let using_drive = Self::icloud_drive_dir().is_some();
                 let on_drive = Self::icloud_store_dir(self.icloud_dir.as_deref())
                     .map(|d| Some(d) == Self::icloud_drive_dir().map(|dd| dd.join("Ariadne")))
@@ -13714,7 +14706,7 @@ blockquote {
                         "iCloud Drive is off; iCloud section is on this Mac only."
                     })
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
                 );
                 ui.horizontal(|ui| {
                     if !on_drive && using_drive {
@@ -13748,7 +14740,7 @@ blockquote {
                 ui.label(
                     RichText::new("Google Drive")
                         .size(16.0)
-                        .color(self.app_theme.text_dim()),
+                        .color(self.theme.text_dim()),
                 );
                 let gdrive_status = match self.gdrive.mode {
                     GdriveMode::Disabled => {
@@ -13787,7 +14779,7 @@ blockquote {
                 ui.label(
                     RichText::new(gdrive_status)
                         .small()
-                        .color(self.app_theme.text_dim()),
+                        .color(self.theme.text_dim()),
                 );
                 ui.horizontal(|ui| {
                     match self.gdrive.mode {
@@ -13811,21 +14803,21 @@ blockquote {
                 // installer for this OS. The app never replaces itself.
                 let mut do_check_updates = false;
                 let mut do_open_download: Option<String> = None;
-                ui.label(RichText::new("Updates").size(16.0).color(self.app_theme.text_dim()));
+                ui.label(RichText::new("Updates").size(16.0).color(self.theme.text_dim()));
                 ui.label(format!("Ariadne {}", update::current_version()));
                 match &self.update_state.status {
                     UpdateStatus::Idle => {
                         ui.label(
                             RichText::new("Never checked for updates in this session.")
                                 .small()
-                                .color(self.app_theme.text_dim()),
+                                .color(self.theme.text_dim()),
                         );
                     }
                     UpdateStatus::Checking => {
                         ui.label(
                             RichText::new("Checking for updates…")
                                 .small()
-                                .color(self.app_theme.text_dim()),
+                                .color(self.theme.text_dim()),
                         );
                         ui.spinner();
                     }
@@ -13833,7 +14825,7 @@ blockquote {
                         ui.label(
                             RichText::new("You are on the latest version.")
                                 .small()
-                                .color(self.app_theme.text_dim()),
+                                .color(self.theme.text_dim()),
                         );
                     }
                     UpdateStatus::Available { info } => {
@@ -13849,7 +14841,7 @@ blockquote {
                             ui.label(
                                 RichText::new(format!("{excerpt}{more}"))
                                     .small()
-                                    .color(self.app_theme.text_dim()),
+                                    .color(self.theme.text_dim()),
                             );
                         }
                         if ui.button("Download update").clicked() {
@@ -13860,7 +14852,7 @@ blockquote {
                         ui.label(
                             RichText::new(format!("Last check failed: {msg}"))
                                 .small()
-                                .color(self.app_theme.text_dim()),
+                                .color(self.theme.text_dim()),
                         );
                     }
                 }
@@ -13899,10 +14891,34 @@ blockquote {
             return;
         }
         if let Some(theme) = apply_theme {
-            if theme != self.app_theme {
+            if theme != self.app_theme || self.active_custom.is_some() {
                 self.app_theme = theme;
+                // A built-in pick wins over any custom.
+                self.active_custom = None;
                 self.save_library();
             }
+        }
+        if let Some(id) = apply_custom {
+            if self.active_custom.as_deref() != Some(id.as_str()) {
+                self.active_custom = Some(id);
+                self.save_custom_themes();
+                self.status = "Custom theme applied".to_string();
+            }
+        }
+        if let Some(which) = open_theme_editor {
+            self.open_theme_editor(which);
+        }
+        if let Some(id) = delete_custom {
+            self.delete_custom_theme(&id);
+        }
+        if let Some(id) = duplicate_custom {
+            self.duplicate_custom_theme(&id);
+        }
+        if let Some(id) = export_custom {
+            self.export_custom_theme(&id);
+        }
+        if do_import_custom {
+            self.import_custom_theme();
         }
         if let Some(family) = apply_family {
             if family != self.editor_font_family {
@@ -13988,7 +15004,7 @@ blockquote {
                         "The same sheet changed on two devices. Pick which version to keep per conflict, or keep both as separate sheets.",
                     )
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
                 );
                 ui.add_space(6.0);
                 for (wi, ci) in self.conflict_pairs() {
@@ -14011,7 +15027,7 @@ blockquote {
                                 "Current (saved {wtime}) vs copy (saved {ctime})"
                             ))
                             .small()
-                            .color(self.app_theme.text_dim()),
+                            .color(self.theme.text_dim()),
                         );
                         ui.horizontal(|ui| {
                             if ui.small_button("Keep current").clicked() {
@@ -14090,7 +15106,7 @@ blockquote {
                         format!("{count} sheets selected")
                     })
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
                 );
                 ui.add_space(4.0);
                 // Style list: built-ins first, then saved files.
@@ -14105,7 +15121,7 @@ blockquote {
                     ui.vertical(|ui| {
                         ui.set_min_width(220.0);
                         ui.set_max_width(240.0);
-                        ui.label(RichText::new("Style").small().color(self.app_theme.text_dim()));
+                        ui.label(RichText::new("Style").small().color(self.theme.text_dim()));
                         ScrollArea::vertical()
                             // Tall enough to fill the column at the modal's
                             // default size: the row is tall (driven by the
@@ -14199,7 +15215,7 @@ blockquote {
                                     format!("{} attached", self.attached_fonts.len())
                                 })
                                 .small()
-                                .color(self.app_theme.text_dim()),
+                                .color(self.theme.text_dim()),
                             );
                             if ui
                                 .add(
@@ -14232,7 +15248,7 @@ blockquote {
                     // Right pane: format grid + actions.
                     ui.vertical(|ui| {
                         ui.set_min_width(300.0);
-                        ui.label(RichText::new("Format").small().color(self.app_theme.text_dim()));
+                        ui.label(RichText::new("Format").small().color(self.theme.text_dim()));
                         egui::Grid::new("export format grid")
                             .num_columns(2)
                             .spacing([8.0, 8.0])
@@ -14261,7 +15277,7 @@ blockquote {
                                 }
                             });
                         ui.add_space(10.0);
-                        ui.label(RichText::new("Output").small().color(self.app_theme.text_dim()));
+                        ui.label(RichText::new("Output").small().color(self.theme.text_dim()));
                         // Main actions as labeled buttons.
                         let can_act = !targets.is_empty();
                         ui.vertical(|ui| {
@@ -14461,7 +15477,7 @@ blockquote {
                     if targets.len() == 1 { "sheet" } else { "sheets" },
                 ))
                 .small()
-                .color(self.app_theme.text_dim()),
+                .color(self.theme.text_dim()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Close").clicked() {
@@ -14478,7 +15494,7 @@ blockquote {
             ui.label(
                 RichText::new("Page breaks are estimates — check the actual export.")
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
             );
         }
         ui.separator();
@@ -14521,7 +15537,7 @@ blockquote {
             ui.label(
                 RichText::new("Binary output cannot be shown as text.")
                     .small()
-                    .color(self.app_theme.text_dim()),
+                    .color(self.theme.text_dim()),
             );
         }
         ui.separator();
@@ -14646,7 +15662,7 @@ impl WritingApp {
     /// Contents of the collapsible right sidebar: the word-goal target,
     /// a progress bar against the current selection, and counts.
     fn show_goals_sidebar(&mut self, ui: &mut egui::Ui) {
-        let dim = self.app_theme.text_dim();
+        let dim = self.theme.text_dim();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Writing goals").size(12.5).color(dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -14730,7 +15746,7 @@ impl WritingApp {
     /// with click-to-jump and one-click fixes. Inline squiggles stay
     /// spelling + grammar; this panel owns clarity and concision.
     fn show_style_sidebar(&mut self, ui: &mut egui::Ui) {
-        let dim = self.app_theme.text_dim();
+        let dim = self.theme.text_dim();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Style").size(12.5).color(dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -14783,7 +15799,7 @@ impl WritingApp {
                     // Card look matches the sheet cards: inset rounded frame
                     // with comfortable padding instead of a bare separator.
                     let card_width = ui.available_width();
-                    let bg = self.app_theme.card_selected();
+                    let bg = self.theme.card_selected();
                     egui::Frame::new()
                         .fill(bg)
                         .corner_radius(8.0)
@@ -14809,14 +15825,14 @@ impl WritingApp {
                                     RichText::new(issue.message.clone())
                                         .strong()
                                         .size(14.0)
-                                        .color(self.app_theme.text_bright()),
+                                        .color(self.theme.text_bright()),
                                 );
                                 // The flagged passage, dimmer and secondary.
                                 ui.label(
                                     RichText::new(format!("“{excerpt}”"))
                                         .size(12.5)
                                         .italics()
-                                        .color(self.app_theme.text_faint()),
+                                        .color(self.theme.text_faint()),
                                 );
                                 // The recommended fix, as the primary action.
                                 let mut primary: Option<&grammar::AppliedSuggestion> =
@@ -14909,7 +15925,8 @@ impl eframe::App for WritingApp {
         self.maybe_background_sync(ctx);
         self.gdrive_tick(ctx);
         self.update_tick(ctx);
-        ctx.set_visuals(self.app_theme.visuals());
+        self.refresh_theme();
+        ctx.set_visuals(self.theme.visuals());
         self.ensure_editor_font(ctx);
 
         // Global headerbar shortcuts. Letter bindings all use Cmd/Ctrl so
@@ -15002,7 +16019,7 @@ impl eframe::App for WritingApp {
         egui::TopBottomPanel::top("top")
             .frame(
                 egui::Frame::new()
-                    .fill(self.app_theme.bg_panel())
+                    .fill(self.theme.bg_panel())
                     .inner_margin(egui::Margin {
                         left: 10,
                         right: 10,
@@ -15179,6 +16196,11 @@ impl eframe::App for WritingApp {
         let _ = egui::SidePanel::left("groups")
             .resizable(true)
             .default_width(200.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(self.theme.bg_sidebar())
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
             .show_animated(ctx, self.library_visible, |ui| {
                 #[derive(Clone, Copy)]
                 enum TreeAction {
@@ -15198,8 +16220,8 @@ impl eframe::App for WritingApp {
                 let mut drop_request: Option<(usize, Option<usize>, usize)> = None;
                 // Insertion mark: row rect plus which edge (or onto).
                 let mut mark: Option<(egui::Rect, DropZone)> = None;
-                let dim = self.app_theme.text_dim();
-                let row_text = self.app_theme.text_main();
+                let dim = self.theme.text_dim();
+                let row_text = self.theme.text_main();
                 let scroll = ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -15221,7 +16243,7 @@ impl eframe::App for WritingApp {
                                 self.selection == SidebarSelection::Filter(f);
                             let label = RichText::new(format!("{}  {}", f.icon(), f.title()))
                                 .size(15.0)
-                                .color(if selected { self.app_theme.text_bright() } else { row_text });
+                                .color(if selected { self.theme.text_bright() } else { row_text });
                             let resp = full_width_row(
                                 ui,
                                 egui::Id::new(("filter-row", fi)),
@@ -15318,7 +16340,7 @@ impl eframe::App for WritingApp {
                                                     4.0,
                                                     egui::Stroke::new(
                                                         1.5_f32,
-                                                        self.app_theme.accent(),
+                                                        self.theme.accent(),
                                                     ),
                                                     egui::StrokeKind::Outside,
                                                 );
@@ -15384,7 +16406,7 @@ impl eframe::App for WritingApp {
                                 let renaming = self.group_rename.as_deref()
                                     == self.groups.get(gi).map(|g| g.id.as_str());
                                 let rename_id = egui::Id::new("group_rename_field");
-                                let bright = self.app_theme.text_bright();
+                                let bright = self.theme.text_bright();
                                 // Caret clicks toggle; everything else selects.
                                 // (Caret edge derived from the row geometry;
                                 // kept in sync with the 24px row height and
@@ -15605,7 +16627,7 @@ impl eframe::App for WritingApp {
                                                     name
                                                 ))
                                                 .size(15.0)
-                                                .color(self.app_theme.text_bright()),
+                                                .color(self.theme.text_bright()),
                                             );
                                         },
                                     );
@@ -15710,7 +16732,7 @@ impl eframe::App for WritingApp {
                         if let Some((rect, zone)) = mark {
                             let stroke = egui::Stroke::new(
                                 2.0_f32,
-                                self.app_theme.accent(),
+                                self.theme.accent(),
                             );
                             match zone {
                                 DropZone::Before => {
@@ -15754,7 +16776,7 @@ impl eframe::App for WritingApp {
                             }
                         }
                         ui.separator();
-                        ui.label(RichText::new("Cross-platform Rust app").small().color(self.app_theme.text_dim()));
+                        ui.label(RichText::new("Cross-platform Rust app").small().color(self.theme.text_dim()));
                     });
                 Self::autoscroll_while_dragging(
                     ctx,
@@ -15845,7 +16867,7 @@ impl eframe::App for WritingApp {
             .min_width(230.0)
             .frame(
                 egui::Frame::new()
-                    .fill(self.app_theme.bg_sheets())
+                    .fill(self.theme.bg_sheets())
             )
             .show_animated(ctx, self.sheets_visible, |ui| {
                 // Hover paints one frame behind: read last frame's target
@@ -15860,7 +16882,7 @@ impl eframe::App for WritingApp {
                         | SidebarSelection::Filter(SmartFilter::Last7Days)
                 );
                 egui::Frame::new()
-                    .fill(self.app_theme.bg_sheets_header())
+                    .fill(self.theme.bg_sheets_header())
                     .inner_margin(egui::Margin {
                         left: 12,
                         right: 10,
@@ -15870,7 +16892,7 @@ impl eframe::App for WritingApp {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(context_name).strong().size(13.0).color(self.app_theme.text_faint()));
+                            ui.label(RichText::new(context_name).strong().size(13.0).color(self.theme.text_faint()));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -15881,9 +16903,9 @@ impl eframe::App for WritingApp {
                                             egui::Button::new(
                                                 RichText::new("Empty Trash").small().color(
                                                     if empty_hover {
-                                                        self.app_theme.text_bright()
+                                                        self.theme.text_bright()
                                                     } else {
-                                                        self.app_theme.text_faint()
+                                                        self.theme.text_faint()
                                                     },
                                                 ),
                                             )
@@ -15906,9 +16928,9 @@ impl eframe::App for WritingApp {
                                             egui::Button::new(
                                                 RichText::new(icon::PLUS).size(14.0).color(
                                                     if new_hover {
-                                                        self.app_theme.text_bright()
+                                                        self.theme.text_bright()
                                                     } else {
-                                                        self.app_theme.text_faint()
+                                                        self.theme.text_faint()
                                                     },
                                                 ),
                                             )
@@ -15938,7 +16960,7 @@ impl eframe::App for WritingApp {
                         ui.label(
                             RichText::new("Search results")
                                 .small()
-                                .color(self.app_theme.text_faint()),
+                                .color(self.theme.text_faint()),
                         );
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
@@ -15974,7 +16996,7 @@ impl eframe::App for WritingApp {
                                 "No sheets here yet"
                             })
                             .small()
-                            .color(self.app_theme.text_dim()),
+                            .color(self.theme.text_dim()),
                         );
                     });
                     return;
@@ -16023,11 +17045,11 @@ impl eframe::App for WritingApp {
                             let selected = self.is_selected(idx);
                             let width = ui.available_width();
                             let bg = if selected {
-                                self.app_theme.card_selected()
+                                self.theme.card_selected()
                             } else if self.sheets_hover == Some(SheetHover::Card(idx)) {
-                                self.app_theme.card_hover()
+                                self.theme.card_hover()
                             } else {
-                                self.app_theme.bg_sheets()
+                                self.theme.bg_sheets()
                             };
                             let render_card = |ui: &mut egui::Ui| {
                                 egui::Frame::new()
@@ -16054,12 +17076,12 @@ impl eframe::App for WritingApp {
                                                 RichText::new(display_title.clone())
                                                     .strong()
                                                     .size(14.0)
-                                                    .color(self.app_theme.text_bright()),
+                                                    .color(self.theme.text_bright()),
                                             );
                                             ui.label(
                                                 RichText::new(preview.clone())
                                                     .size(12.5)
-                                                    .color(self.app_theme.text_faint()),
+                                                    .color(self.theme.text_faint()),
                                             );
                                         });
                                     })
@@ -16221,7 +17243,7 @@ impl eframe::App for WritingApp {
                                 ],
                                 egui::Stroke::new(
                                     2.0_f32,
-                                    self.app_theme.accent(),
+                                    self.theme.accent(),
                                 ),
                             );
                         }
@@ -16300,19 +17322,19 @@ impl eframe::App for WritingApp {
                 ui.separator();
                 ui.label(format!("{chars} characters"));
                 ui.separator();
-                ui.label(RichText::new(&self.status).small().color(self.app_theme.text_dim()));
+                ui.label(RichText::new(&self.status).small().color(self.theme.text_dim()));
             });
         });
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(self.app_theme.bg_app())
+                    .fill(self.theme.bg_app())
                     .inner_margin(0.0),
             )
             .show(ctx, |ui| {
             let frame = egui::Frame::new()
-                .fill(self.app_theme.bg_app())
+                .fill(self.theme.bg_app())
                 .inner_margin(egui::Margin {
                     left: 54,
                     right: 54,
@@ -16335,7 +17357,7 @@ impl eframe::App for WritingApp {
                         ui.label(
                             RichText::new("No sheets here yet")
                                 .small()
-                                .color(self.app_theme.text_dim()),
+                                .color(self.theme.text_dim()),
                         );
                     });
                 } else if targets.len() == 1 {
@@ -16372,7 +17394,7 @@ impl eframe::App for WritingApp {
                                     RichText::new(title)
                                         .strong()
                                         .size(20.0)
-                                        .color(self.app_theme.text_bright()),
+                                        .color(self.theme.text_bright()),
                                 );
                                 ui.add_space(4.0);
                                 self.edit_sheet_body(ui, *idx, false);
@@ -16391,11 +17413,12 @@ impl eframe::App for WritingApp {
         self.show_search_popup(ctx);
         self.show_outline_popup(ctx);
         self.show_settings_popup(ctx);
+        self.show_theme_editor(ctx);
         self.show_conflicts_popup(ctx);
         self.show_preview_window(ctx);
         // Window-wide drop hint, painted above everything else.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-            let theme = self.app_theme;
+            let theme = self.theme;
             egui::Area::new(egui::Id::new("drop overlay"))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
@@ -16426,7 +17449,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -16681,6 +17704,11 @@ mod tests {
             update_state: UpdateState::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
+            custom_themes: Vec::new(),
+            active_custom: None,
+            theme_draft: None,
+            theme_editor: None,
+            theme: ResolvedTheme::default(),
             last_window_state: None,
             last_window_save: 0.0,
             window_t0: None,
@@ -17126,7 +18154,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let galley = WritingApp::markdown_layouter(ui, text, 150.0, 17.0, AppTheme::Dark, egui::FontId::proportional(17.0), None);
+                let galley = WritingApp::markdown_layouter(ui, text, 150.0, 17.0, ResolvedTheme::default(), egui::FontId::proportional(17.0), None);
                 assert_eq!(galley.job.text, text);
             assert!(galley.rows.len() >= 6, "expected wrapped rows");
             // First row of each item paragraph: marker glyphs hang left
@@ -17755,6 +18783,11 @@ mod tests {
             update_state: UpdateState::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
+            custom_themes: Vec::new(),
+            active_custom: None,
+            theme_draft: None,
+            theme_editor: None,
+            theme: ResolvedTheme::default(),
             last_window_state: None,
             last_window_save: 0.0,
             window_t0: None,
@@ -19288,19 +20321,19 @@ mod tests {
 
     #[test]
     fn sheet_hover_states_are_distinct_from_rest_and_selected() {
-        // Hover must read as its own state on both themes: different from
+        // Hover must read as its own state on every theme: different from
         // the resting card and from the selected card.
-        for theme in [AppTheme::Dark, AppTheme::Light] {
-            assert_ne!(theme.card_hover(), theme.bg_sheets(), "{theme:?} hover == rest");
+        for theme in AppTheme::all() {
+            let p = theme.palette();
+            assert_ne!(p.card_hover, p.bg_sheets, "{theme:?} hover == rest");
             assert_ne!(
-                theme.card_hover(),
-                theme.card_selected(),
+                p.card_hover, p.card_selected,
                 "{theme:?} hover == selected"
             );
             // Hover sits visually between resting and selected.
-            let rest = theme.bg_sheets();
-            let hover = theme.card_hover();
-            let selected = theme.card_selected();
+            let rest = p.bg_sheets;
+            let hover = p.card_hover;
+            let selected = p.card_selected;
             for (r, h, s) in [
                 (rest.r(), hover.r(), selected.r()),
                 (rest.g(), hover.g(), selected.g()),
@@ -20519,7 +21552,7 @@ mod tests {
                 if state.text.is_empty() {
                     state.text = "# Welcome\n\nThis is a pure Rust workspace for writing.\n\n## What you can do\n\n- Browse groups and sheets\n".to_string();
                 }
-                let theme = AppTheme::Dark;
+                let theme = ResolvedTheme::default();
                 let editor = egui::FontId::proportional(17.0);
                 let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
                     WritingApp::markdown_layouter(ui, text, wrap_width, 17.0, theme, editor.clone(), None)
@@ -20592,7 +21625,7 @@ mod tests {
                 if state.text.is_empty() {
                     state.text = "# Welcome\n\nThis is a pure Rust workspace.\n\n## What you can do\n\n- Browse groups\n".to_string();
                 }
-                let theme = AppTheme::Dark;
+                let theme = ResolvedTheme::default();
                 let editor = egui::FontId::proportional(17.0);
                 let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
                     WritingApp::markdown_layouter(ui, text, wrap_width, 17.0, theme, editor.clone(), None)
@@ -20787,6 +21820,127 @@ mod tests {
         assert!(app.settings_open);
         assert!(app.settings_tab == SettingsTab::Updates);
         assert!(matches!(app.update_state.status, UpdateStatus::Idle));
+    }
+
+    #[test]
+    fn custom_keys_from_builtins_match_polarity() {
+        // Seeding a custom from any built-in keeps its dark/light base,
+        // so the editor preview never flips polarity on open.
+        for theme in AppTheme::all() {
+            let keys = theme.custom_keys();
+            let (_, dark) = super::custom_theme::resolve(&keys);
+            assert_eq!(dark, theme.is_dark(), "{theme:?} polarity mismatch");
+        }
+    }
+
+    #[test]
+    fn theme_editor_save_and_delete_flow() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        // A new editor seeds a live draft.
+        app.open_theme_editor(None);
+        assert!(app.theme_draft.is_some());
+        // Empty names are rejected and the draft is kept.
+        app.theme_editor.as_mut().unwrap().name.clear();
+        app.save_theme_editor();
+        assert!(app.custom_themes.is_empty());
+        assert!(app.theme_editor.is_some());
+        // A named save creates, activates, and clears the draft.
+        app.theme_editor.as_mut().unwrap().name = "Test".to_string();
+        app.save_theme_editor();
+        assert_eq!(app.custom_themes.len(), 1);
+        assert!(app.active_custom.is_some());
+        assert!(app.theme_draft.is_none());
+        let id = app.active_custom.clone().unwrap();
+        // Editing the stored theme updates it in place.
+        app.open_theme_editor(Some(id.clone()));
+        app.theme_editor.as_mut().unwrap().name = "Renamed".to_string();
+        app.save_theme_editor();
+        assert_eq!(app.custom_themes.len(), 1);
+        assert_eq!(app.custom_themes[0].name, "Renamed");
+        // Deleting clears the active pick.
+        app.delete_custom_theme(&id);
+        assert!(app.custom_themes.is_empty());
+        assert!(app.active_custom.is_none());
+    }
+
+    #[test]
+    fn theme_editor_save_button_creates_custom() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let _storage = isolate_storage();
+        let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
+        harness.set_size(egui::vec2(1100.0, 720.0));
+        harness.run();
+        harness.state_mut().open_theme_editor(None);
+        harness.run();
+        wait_for_label(&mut harness, "Save theme");
+        harness.get_by_label("Save theme").simulate_click();
+        harness.run();
+        harness.run();
+        assert_eq!(harness.state().custom_themes.len(), 1);
+        assert!(harness.state().active_custom.is_some());
+    }
+
+    #[test]
+    fn theme_grid_renders_and_switches_every_theme() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let _storage = isolate_storage();
+        let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
+        harness.set_size(egui::vec2(1100.0, 720.0));
+        // Appearance is the default settings tab: the theme grid renders
+        // on open.
+        harness.state_mut().settings_open = true;
+        harness.run();
+
+        for theme in AppTheme::all() {
+            // Every theme paints full frames without panicking, with
+            // readable text and the expected dark/light polarity.
+            harness.state_mut().app_theme = theme;
+            harness.run();
+            harness.run();
+            let p = theme.palette();
+            assert_ne!(p.text_main, p.bg_app, "{theme:?} text unreadable");
+            assert_ne!(p.accent, p.bg_app, "{theme:?} accent invisible");
+            // Library sidebar reads as its own column: distinct from
+            // both the headerbar and the sheets panel.
+            assert_ne!(
+                p.bg_sidebar, p.bg_panel,
+                "{theme:?} sidebar blends into header"
+            );
+            assert_ne!(
+                p.bg_sidebar, p.bg_sheets,
+                "{theme:?} sidebar blends into sheets"
+            );
+            assert_eq!(
+                theme.is_dark(),
+                !matches!(
+                    theme,
+                    AppTheme::Light
+                        | AppTheme::GruvboxLight
+                        | AppTheme::NordLight
+                        | AppTheme::CatppuccinLatte
+                        | AppTheme::RosePineDawn
+                        | AppTheme::EverforestLight
+                        | AppTheme::Solarized
+                        | AppTheme::TokyoNightDay
+                ),
+                "{theme:?} polarity"
+            );
+        }
+
+        // Clicking a grid entry switches and persists the theme.
+        harness.state_mut().app_theme = AppTheme::Dark;
+        harness.run();
+        harness.get_by_label("Dracula").simulate_click();
+        harness.run();
+        harness.run();
+        assert!(harness.state().app_theme == AppTheme::Dracula);
+        let back = WritingApp::load_library().expect("reloads");
+        assert!(back.app_theme == AppTheme::Dracula);
     }
 
     #[test]
@@ -21086,7 +22240,7 @@ mod tests {
                 &text.to_string(),
                 600.0,
                 17.0,
-                AppTheme::Dark,
+                AppTheme::Dark.resolved(),
                 egui::FontId::proportional(17.0),
                 None,
             );
@@ -21095,7 +22249,7 @@ mod tests {
                 &text.to_string(),
                 600.0,
                 17.0,
-                AppTheme::Dark,
+                AppTheme::Dark.resolved(),
                 egui::FontId::proportional(17.0),
                 Some((0, 12)),
             );
@@ -21172,7 +22326,7 @@ mod tests {
                 &text,
                 600.0,
                 17.0,
-                AppTheme::Light,
+                AppTheme::Light.resolved(),
                 egui::FontId::proportional(17.0),
                 None,
             );
