@@ -1013,6 +1013,8 @@ enum PaletteCommand {
     Export,
     Goals,
     Style,
+    ToggleTypewriter,
+    ToggleFocus,
     Settings,
     SettingsTab(SettingsTab),
     ToggleTheme,
@@ -12150,6 +12152,8 @@ blockquote {
             ("Settings: Checking", None, PaletteCommand::SettingsTab(SettingsTab::Checking)),
             ("Settings: Sync", None, PaletteCommand::SettingsTab(SettingsTab::Sync)),
             ("Toggle theme", None, PaletteCommand::ToggleTheme),
+            ("Toggle typewriter scrolling", Some((M::COMMAND | M::ALT, egui::Key::T)), PaletteCommand::ToggleTypewriter),
+            ("Toggle focus mode", Some((M::COMMAND | M::ALT, egui::Key::F)), PaletteCommand::ToggleFocus),
             ("Share / export", Some((M::COMMAND, egui::Key::E)), PaletteCommand::Export),
             ("Show history", Some((M::COMMAND, egui::Key::Y)), PaletteCommand::History),
             ("Writing goals", Some((M::COMMAND, egui::Key::G)), PaletteCommand::Goals),
@@ -12204,6 +12208,16 @@ blockquote {
                 } else {
                     AppTheme::Dark
                 };
+                self.save_library();
+            }
+            PaletteCommand::ToggleTypewriter => {
+                self.typewriter = !self.typewriter;
+                // Recenter immediately when switched on.
+                self.typewriter_last = None;
+                self.save_library();
+            }
+            PaletteCommand::ToggleFocus => {
+                self.focus_mode = !self.focus_mode;
                 self.save_library();
             }
         }
@@ -12985,12 +12999,30 @@ blockquote {
                 ui.label(RichText::new("Reading").size(16.0).color(self.app_theme.text_dim()));
                 if ui
                     .checkbox(&mut self.typewriter, "Typewriter scrolling (keep the caret line centered)")
+                    .on_hover_text(format!(
+                        "Keep the caret line centered ({})",
+                        Self::shortcut_label(
+                            ui.ctx(),
+                            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                            egui::Key::T,
+                        )
+                    ))
                     .changed()
                 {
+                    // Recenter immediately when switched on.
+                    self.typewriter_last = None;
                     self.save_library();
                 }
                 if ui
                     .checkbox(&mut self.focus_mode, "Focus mode (dim paragraphs outside the caret's)")
+                    .on_hover_text(format!(
+                        "Dim everything outside the caret's paragraph ({})",
+                        Self::shortcut_label(
+                            ui.ctx(),
+                            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                            egui::Key::F,
+                        )
+                    ))
                     .changed()
                 {
                     self.save_library();
@@ -14179,9 +14211,9 @@ impl eframe::App for WritingApp {
         // from double-triggering through focused widgets. While the
         // in-document find bar is open its own keys (Enter/Esc) own the
         // keyboard, so the panel shortcuts stay out of the way.
-        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_settings) =
+        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_settings, key_typewriter, key_focus) =
             if self.find_open {
-                (false, false, false, false, false, false, false, false)
+                (false, false, false, false, false, false, false, false, false, false)
             } else {
                 (
                     ctx.input_mut(|i| {
@@ -14211,8 +14243,30 @@ impl eframe::App for WritingApp {
                     ctx.input_mut(|i| {
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)
                     }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(
+                            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                            egui::Key::T,
+                        )
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(
+                            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                            egui::Key::F,
+                        )
+                    }),
                 )
             };
+        if key_typewriter {
+            self.typewriter = !self.typewriter;
+            // Recenter immediately when switched on.
+            self.typewriter_last = None;
+            self.save_library();
+        }
+        if key_focus {
+            self.focus_mode = !self.focus_mode;
+            self.save_library();
+        }
         let key_find = ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)
         });
@@ -14220,9 +14274,6 @@ impl eframe::App for WritingApp {
             // Repeat presses refocus the field for a new term.
             self.find_open = true;
         }
-        let key_find = ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)
-        });
         // Tooltip hint helper: renders as ⌘P on macOS, Ctrl+P elsewhere.
         let hint = |ctx: &egui::Context,
                     label: &str,
@@ -14232,6 +14283,14 @@ impl eframe::App for WritingApp {
         };
         let hint_cmd = |ctx: &egui::Context, label: &str, key: egui::Key| {
             hint(ctx, label, egui::Modifiers::COMMAND, key)
+        };
+        let hint_cmd_alt = |ctx: &egui::Context, label: &str, key: egui::Key| {
+            hint(
+                ctx,
+                label,
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                key,
+            )
         };
 
         egui::TopBottomPanel::top("top")
