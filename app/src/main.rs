@@ -897,6 +897,8 @@ struct WritingApp {
     /// and highlight ranges for the selected sheet. Session-only.
     find_open: bool,
     find_query: String,
+    /// Replacement text for the find bar's Replace actions. Session-only.
+    find_replace: String,
     find_case: bool,
     find_index: usize,
     find_matches: Vec<(usize, usize)>,
@@ -2228,6 +2230,7 @@ impl WritingApp {
             typewriter_last: None,
             find_open: false,
             find_query: String::new(),
+            find_replace: String::new(),
             find_case: false,
             find_index: 0,
             find_matches: Vec::new(),
@@ -12350,6 +12353,21 @@ blockquote {
         (starts[first], line_end(last))
     }
 
+    /// Replace every non-overlapping `query` hit with `replacement`.
+    /// Returns the merged text plus the number of replacements made.
+    /// Matching follows [`Self::find_matches`] (same case handling).
+    fn replace_all_in(content: &str, query: &str, replacement: &str, case: bool) -> (String, usize) {
+        let matches = Self::find_matches(content, query, case);
+        if matches.is_empty() {
+            return (content.to_string(), 0);
+        }
+        let mut chars: Vec<char> = content.chars().collect();
+        for &(s, e) in matches.iter().rev() {
+            chars.splice(s..e, replacement.chars());
+        }
+        (chars.into_iter().collect(), matches.len())
+    }
+
     /// Select a find hit in the editor; the editor scrolls to it on paint.
     fn select_find_match(&mut self, ctx: &egui::Context, sel: usize) {
         let Some(&(s, e)) = self.find_matches.get(self.find_index) else {
@@ -12365,10 +12383,62 @@ blockquote {
         egui::TextEdit::store_state(ctx, edit_id, state);
     }
 
+    /// Replace the current find hit (`all` = every hit instead) and save.
+    /// Single replace keeps the selection on the match that slides into
+    /// place; replace-all reports its count and selects the first hit.
+    fn do_find_replace(&mut self, ctx: &egui::Context, sel: usize, all: bool) {
+        let query = self.find_query.clone();
+        let replacement = self.find_replace.clone();
+        let case = self.find_case;
+        let count = {
+            let Some(sheet) = self.sheets.get_mut(sel) else {
+                return;
+            };
+            let matches = Self::find_matches(&sheet.content, &query, case);
+            if matches.is_empty() {
+                return;
+            }
+            let count;
+            if all {
+                let (merged, n) =
+                    Self::replace_all_in(&sheet.content, &query, &replacement, case);
+                sheet.content = merged;
+                count = n;
+                self.find_index = 0;
+            } else {
+                let idx = self.find_index.min(matches.len() - 1);
+                let (s, e) = matches[idx];
+                let mut chars: Vec<char> = sheet.content.chars().collect();
+                chars.splice(s..e, replacement.chars());
+                sheet.content = chars.into_iter().collect();
+                count = 1;
+                // The next match slides into this slot.
+                self.find_index = idx;
+            }
+            sheet.modified = SystemTime::now();
+            count
+        };
+        self.save_library();
+        self.find_matches = Self::find_matches(
+            &self.sheets.get(sel).map(|s| s.content.clone()).unwrap_or_default(),
+            &self.find_query,
+            self.find_case,
+        );
+        if all {
+            self.status = format!(
+                "Replaced {count} match{}",
+                if count == 1 { "" } else { "es" }
+            );
+        }
+        self.select_find_match(ctx, sel);
+        self.find_scroll = true;
+    }
+
     /// Close the find bar and hand focus back to the editor.
     fn close_find(&mut self, ctx: &egui::Context, sel: usize) {
         self.find_open = false;
         self.find_query.clear();
+        self.find_replace.clear();
         self.find_matches.clear();
         self.find_index = 0;
         self.find_scroll = false;
@@ -12392,10 +12462,17 @@ blockquote {
             self.find_index = 0;
         }
         let field = egui::Id::new("find_field");
-        // The bar owns the keyboard while open.
-        ui.memory_mut(|m| m.request_focus(field));
+        let replace_field = egui::Id::new("find_replace_field");
+        // The bar owns the keyboard while open, but Tab must still move
+        // between the two fields.
+        let focused = ui.ctx().memory(|m| m.focused());
+        if focused != Some(field) && focused != Some(replace_field) {
+            ui.memory_mut(|m| m.request_focus(field));
+        }
         let mut go_prev = false;
         let mut go_next = false;
+        let mut do_replace = false;
+        let mut do_replace_all = false;
         let mut close = false;
         ui.horizontal(|ui| {
             let resp = ui.add(
@@ -12459,6 +12536,28 @@ blockquote {
                 close = true;
             }
         });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.find_replace)
+                    .id(replace_field)
+                    .hint_text("Replace with")
+                    .desired_width(280.0),
+            );
+            if ui
+                .add_enabled(n > 0, egui::Button::new("Replace"))
+                .on_hover_text("Replace the current match and move to the next")
+                .clicked()
+            {
+                do_replace = true;
+            }
+            if ui
+                .add_enabled(n > 0, egui::Button::new("Replace all"))
+                .on_hover_text("Replace every match in this sheet")
+                .clicked()
+            {
+                do_replace_all = true;
+            }
+        });
         if go_prev && n > 0 {
             self.find_index = self.find_index.checked_sub(1).unwrap_or(n - 1);
             self.select_find_match(ui.ctx(), sel);
@@ -12468,6 +12567,12 @@ blockquote {
             self.find_index = (self.find_index + 1) % n;
             self.select_find_match(ui.ctx(), sel);
             self.find_scroll = true;
+        }
+        if do_replace && n > 0 {
+            self.do_find_replace(ui.ctx(), sel, false);
+        }
+        if do_replace_all && n > 0 {
+            self.do_find_replace(ui.ctx(), sel, true);
         }
         if close {
             self.close_find(ui.ctx(), sel);
@@ -15928,6 +16033,7 @@ mod tests {
             typewriter_last: None,
             find_open: false,
             find_query: String::new(),
+            find_replace: String::new(),
             find_case: false,
             find_index: 0,
             find_matches: Vec::new(),
@@ -16937,6 +17043,7 @@ mod tests {
             typewriter_last: None,
             find_open: false,
             find_query: String::new(),
+            find_replace: String::new(),
             find_case: false,
             find_index: 0,
             find_matches: Vec::new(),
@@ -20665,6 +20772,39 @@ mod tests {
             vec![(0, 2)]
         );
         assert!(WritingApp::find_matches("hi", "hello", false).is_empty());
+    }
+
+    #[test]
+    fn replace_all_in_replaces_every_non_overlapping_hit() {
+        // Basic replacement plus count.
+        assert_eq!(
+            WritingApp::replace_all_in("foo bar foo", "foo", "baz", false),
+            ("baz bar baz".to_string(), 2)
+        );
+        // Case handling follows find_matches.
+        assert_eq!(
+            WritingApp::replace_all_in("Foo foo", "foo", "x", true),
+            ("Foo x".to_string(), 1)
+        );
+        // Non-overlapping left to right.
+        assert_eq!(
+            WritingApp::replace_all_in("aaa", "aa", "b", false),
+            ("ba".to_string(), 1)
+        );
+        // Replacements containing the query must not loop or re-match.
+        assert_eq!(
+            WritingApp::replace_all_in("a", "a", "aa", false),
+            ("aa".to_string(), 1)
+        );
+        // Empty query or no hits: text untouched, count zero.
+        assert_eq!(
+            WritingApp::replace_all_in("abc", "", "x", false),
+            ("abc".to_string(), 0)
+        );
+        assert_eq!(
+            WritingApp::replace_all_in("abc", "z", "x", false),
+            ("abc".to_string(), 0)
+        );
     }
 
     #[test]
