@@ -15722,7 +15722,12 @@ mod tests {
     /// their saves/loads through the shared override path.
     fn isolate_storage() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap();
+        // Recover from poisoning: if a previous test panicked while holding
+        // the guard, `lock()` returns `PoisonError`. Unwrapping here would
+        // cascade one flaky failure into every remaining test that calls
+        // `isolate_storage()` (50+ failures in CI). Recover the guard so
+        // only the originally-failed test reports.
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             let mut p = std::env::temp_dir();
@@ -19997,6 +20002,7 @@ mod tests {
             ((bounds.y0 + bounds.y1) / 2.0) as f32,
         );
         // Drop on the last card.
+        wait_for_label(&mut harness, "Export Style Guide");
         let last = harness.get_by_label("Export Style Guide");
         let lb = last.raw_bounds().expect("last title has bounds");
         let end = egui::pos2(
@@ -20082,6 +20088,7 @@ mod tests {
         );
         let drafts_label =
             format!("{}  {}", egui_phosphor::regular::FOLDER, "Drafts");
+        wait_for_label(&mut harness, &drafts_label);
         let target = harness.get_by_label(&drafts_label);
         let tb = target.raw_bounds().expect("target label has bounds");
         let end = egui::pos2(
@@ -20637,6 +20644,8 @@ mod tests {
         assert!(flagged, "background lint never flagged the typo");
 
         // The fix popup offers the correction; taking it fixes the sheet.
+        // The AccessKit node can lag the lint cache by a frame or two.
+        wait_for_label(&mut harness, "→ The");
         let fix = harness.get_by_label("→ The");
         fix.click();
         harness.run();
@@ -20724,11 +20733,11 @@ mod tests {
         let _storage = isolate_storage();
         let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
         harness.set_size(egui::vec2(1100.0, 720.0));
-        harness.run();
 
         // Group row label carries the folder icon prefix.
         let label =
             format!("{}  {}", egui_phosphor::regular::FOLDER, "Notes");
+        wait_for_label(&mut harness, &label);
         let node = harness.get_by_label(&label);
         let bounds = node.raw_bounds().expect("group row has bounds");
         let at = egui::pos2(
@@ -20748,6 +20757,7 @@ mod tests {
             harness.step();
         }
         harness.run();
+        wait_for_label(&mut harness, "Rename group");
         harness.get_by_label("Rename group").simulate_click();
         harness.run();
         // Sheets header now edits the name; the draft is pre-selected so
