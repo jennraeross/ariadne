@@ -46,12 +46,22 @@ fn main() -> eframe::Result<()> {
         i += 1;
     }
 
+    let initial_window = WritingApp::load_window_state();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1100.0, 720.0])
+        .with_min_inner_size([700.0, 420.0])
+        .with_title("Ariadne")
+        .with_icon(load_app_icon());
+    if let Some(ws) = initial_window {
+        viewport = viewport.with_inner_size([ws.width, ws.height]);
+        if ws.maximized {
+            viewport = viewport.with_maximized(true);
+        } else if let (Some(x), Some(y)) = (ws.x, ws.y) {
+            viewport = viewport.with_position([x, y]);
+        }
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([700.0, 420.0])
-            .with_title("Ariadne")
-            .with_icon(load_app_icon()),
+        viewport,
         ..Default::default()
     };
 
@@ -802,6 +812,45 @@ fn is_reserved_style(name: &str) -> bool {
     name == "Built-in" || virtual_style_css(name).is_some()
 }
 
+/// Persisted main-window geometry: content size plus outer position.
+/// Lives in `window.json` next to `library.json` (never synced), so the
+/// app reopens where the user left it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+struct WindowState {
+    width: f32,
+    height: f32,
+    #[serde(default)]
+    x: Option<f32>,
+    #[serde(default)]
+    y: Option<f32>,
+    #[serde(default)]
+    maximized: bool,
+}
+
+impl WindowState {
+    /// Validate loaded values: sizes must be finite (clamped to sane
+    /// bounds), positions must be finite or dropped. Returns `None` when
+    /// the size itself is unusable.
+    fn sanitized(mut self) -> Option<Self> {
+        if !self.width.is_finite() || !self.height.is_finite() {
+            return None;
+        }
+        self.width = self.width.clamp(400.0, 5000.0);
+        self.height = self.height.clamp(300.0, 5000.0);
+        if let Some(x) = self.x {
+            if !x.is_finite() || x < -10000.0 || x > 10000.0 {
+                self.x = None;
+            }
+        }
+        if let Some(y) = self.y {
+            if !y.is_finite() || y < -10000.0 || y > 10000.0 {
+                self.y = None;
+            }
+        }
+        Some(self)
+    }
+}
+
 struct WritingApp {
     groups: Vec<Group>,
     sheets: Vec<Sheet>,
@@ -956,6 +1005,15 @@ struct WritingApp {
     /// Grammar state: checker, per-sheet lint cache, ignores. The
     /// dictionary words themselves live here too (persisted + synced).
     grammar: GrammarState,
+    /// Last persisted main-window geometry. Session-only: seeded from
+    /// `window.json` at startup, updated as the window moves/resizes.
+    last_window_state: Option<WindowState>,
+    /// `ctx.time()` of the last window-geometry write. Throttles drags.
+    last_window_save: f64,
+    /// `ctx.time()` of the first window-geometry observation. Disk writes
+    /// are skipped for ~1s after startup so transient first frames can
+    /// never clobber a good `window.json`.
+    window_t0: Option<f64>,
 }
 
 /// Google Drive connection state. Session-only.
@@ -2270,6 +2328,9 @@ impl WritingApp {
             gdrive: GdriveSync::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
+            last_window_state: Self::load_window_state(),
+            last_window_save: 0.0,
+            window_t0: None,
         };
         // Checking is on for fresh installs; a saved preference (if any)
         // overrides below.
@@ -4475,6 +4536,158 @@ blockquote {
         }
         directories::ProjectDirs::from("com", "craft-anything", "ariadne")
             .map(|dirs| dirs.data_dir().join("library.json"))
+    }
+
+    /// Path of the persisted main-window geometry (`window.json` next to
+    /// the library). Tests can redirect this with `ARIADNE_WINDOW_PATH`.
+    fn window_state_path() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("ARIADNE_WINDOW_PATH") {
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
+            }
+        }
+        Self::library_dir().map(|d| d.join("window.json"))
+    }
+
+    /// Load the persisted window geometry, if any. Corrupt or unusable
+    /// files are ignored so the app falls back to the default size.
+    fn load_window_state() -> Option<WindowState> {
+        let path = Self::window_state_path()?;
+        let bytes = std::fs::read(&path).ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        let state: WindowState = serde_json::from_slice(&bytes).ok()?;
+        state.sanitized()
+    }
+
+    /// Persist the window geometry (best effort: failures are ignored so
+    /// a move/resize never breaks the editor).
+    fn save_window_state(state: &WindowState) {
+        let Some(path) = Self::window_state_path() else {
+            return;
+        };
+        if let Ok(text) = serde_json::to_string_pretty(state) {
+            Self::atomic_write(&path, text.as_bytes());
+        }
+    }
+
+    /// Observe the main viewport each frame and persist moves, resizes,
+    /// and maximize flips. Drag writes are throttled and first-second
+    /// frames are never written (transient startup sizes must not clobber
+    /// a good `window.json`); the close frame always flushes so a quick
+    /// resize-then-quit is kept. Minimized frames are skipped so
+    /// restoring doesn't reopen minimized.
+    fn track_window_state(&mut self, ctx: &egui::Context) {
+        // Screenshot runs must not clobber the user's geometry.
+        if self.screenshot_path.is_some() {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let t0 = *self.window_t0.get_or_insert(now);
+        let (inner, pos, maximized, minimized, closing) = ctx.input(|i| {
+            let v = i.viewport();
+            // Persist the OUTER position on every platform. (winit sets the
+            // *inner* position at creation on macOS, but eframe immediately
+            // overrides it with `set_outer_position` using this same value
+            // — see `apply_viewport_builder_to_window` — so the outer rect
+            // is what round-trips. Saving inner here drifts +titlebar each
+            // launch.)
+            let pos = v.outer_rect.map(|r| r.min);
+            (
+                v.inner_rect.map(|r| r.size()),
+                pos,
+                v.maximized.unwrap_or(false),
+                v.minimized.unwrap_or(false),
+                v.close_requested(),
+            )
+        });
+        if minimized {
+            return;
+        }
+        let Some(size) = inner else {
+            return;
+        };
+        if !size.x.is_finite() || !size.y.is_finite() {
+            return;
+        }
+        if size.x < 100.0 || size.y < 100.0 {
+            return;
+        }
+        let mut candidate = if maximized {
+            // Keep the last normal geometry so un-maximizing restores it.
+            let mut base = self.last_window_state.unwrap_or(WindowState {
+                width: size.x,
+                height: size.y,
+                x: pos.map(|p| p.x),
+                y: pos.map(|p| p.y),
+                maximized: true,
+            });
+            base.maximized = true;
+            if let Some(last) = self.last_window_state {
+                if !last.maximized {
+                    base.width = last.width;
+                    base.height = last.height;
+                    base.x = last.x;
+                    base.y = last.y;
+                }
+            }
+            base
+        } else {
+            WindowState {
+                width: size.x,
+                height: size.y,
+                x: pos.map(|p| p.x),
+                y: pos.map(|p| p.y),
+                maximized: false,
+            }
+        };
+        if let Some(x) = candidate.x {
+            if !x.is_finite() {
+                candidate.x = None;
+            }
+        }
+        if let Some(y) = candidate.y {
+            if !y.is_finite() {
+                candidate.y = None;
+            }
+        }
+        candidate.width = candidate.width.clamp(400.0, 5000.0);
+        candidate.height = candidate.height.clamp(300.0, 5000.0);
+        if Some(candidate) == self.last_window_state {
+            return;
+        }
+        // Throttle drag writes, but never the close frame: deferring the
+        // write keeps `last_window_state` stale on purpose so the change
+        // is retried next frame instead of being lost.
+        let past_grace = now - t0 >= 1.0;
+        let past_throttle = now - self.last_window_save >= 0.5;
+        if closing || (past_grace && past_throttle) {
+            Self::save_window_state(&candidate);
+            self.last_window_state = Some(candidate);
+            self.last_window_save = now;
+        }
+    }
+
+    /// Last-resort flush of the observed window geometry. The close frame
+    /// already writes through `track_window_state`; this covers shutdown
+    /// paths that never run another frame.
+    fn flush_window_state(&self) {
+        if self.screenshot_path.is_some() {
+            return;
+        }
+        // Still settling (see `window_t0`): don't let a transient first
+        // frame clobber a good file.
+        if self.window_t0.is_none() {
+            return;
+        }
+        let Some(state) = self.last_window_state else {
+            return;
+        };
+        if Self::load_window_state() == Some(state) {
+            return;
+        }
+        Self::save_window_state(&state);
     }
 
     /// First-run move from the legacy `com.craft-anything.ulysses` folder:
@@ -14479,10 +14692,15 @@ impl WritingApp {
 
 impl eframe::App for WritingApp {
 
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.flush_window_state();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.screenshot_path.is_some() {
             ctx.request_repaint();
         }
+        self.track_window_state(ctx);
         self.handle_screenshot(ctx);
         self.handle_dropped_files(ctx);
         self.maybe_background_sync(ctx);
@@ -15998,7 +16216,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -16027,6 +16245,10 @@ mod tests {
             let mut gd = std::env::temp_dir();
             gd.push("ariadne-test-gdrive");
             std::env::set_var("ARIADNE_GDRIVE_DIR", &gd);
+            // Window geometry lives beside the library; keep it hermetic too.
+            let mut w = std::env::temp_dir();
+            w.push("ariadne-test-window.json");
+            std::env::set_var("ARIADNE_WINDOW_PATH", &w);
             // System fonts vary by machine; keep PDF exports hermetic.
             // Tests needing real fonts attach files explicitly instead.
             std::env::set_var("ARIADNE_NO_SYSTEM_FONTS", "1");
@@ -16041,6 +16263,9 @@ mod tests {
         }
         if let Ok(p) = std::env::var("ARIADNE_GDRIVE_DIR") {
             let _ = std::fs::remove_dir_all(std::path::PathBuf::from(&p));
+        }
+        if let Ok(p) = std::env::var("ARIADNE_WINDOW_PATH") {
+            let _ = std::fs::remove_file(&p);
         }
         guard
     }
@@ -16245,6 +16470,9 @@ mod tests {
             gdrive: GdriveSync::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
+            last_window_state: None,
+            last_window_save: 0.0,
+            window_t0: None,
         }
     }
 
@@ -16868,6 +17096,65 @@ mod tests {
         assert!(!back.style_guide_added);
     }
 
+    #[test]
+    fn window_state_roundtrips_through_disk() {
+        let _storage = isolate_storage();
+        assert!(WritingApp::load_window_state().is_none());
+        let state = WindowState {
+            width: 1280.0,
+            height: 800.0,
+            x: Some(100.0),
+            y: Some(50.0),
+            maximized: false,
+        };
+        WritingApp::save_window_state(&state);
+        assert_eq!(WritingApp::load_window_state(), Some(state));
+        // Maximized round-trips too.
+        let maxed = WindowState {
+            maximized: true,
+            ..state
+        };
+        WritingApp::save_window_state(&maxed);
+        assert_eq!(WritingApp::load_window_state(), Some(maxed));
+    }
+
+    #[test]
+    fn window_state_rejects_bad_sizes_and_drops_bad_positions() {
+        let _storage = isolate_storage();
+        // Non-finite sizes are unusable: ignored entirely.
+        let bad = WindowState {
+            width: f32::NAN,
+            height: 800.0,
+            x: Some(10.0),
+            y: Some(10.0),
+            maximized: false,
+        };
+        WritingApp::save_window_state(&bad);
+        assert!(WritingApp::load_window_state().is_none());
+        // Non-finite positions are dropped but the size survives.
+        let odd_pos = WindowState {
+            width: 1100.0,
+            height: 720.0,
+            x: Some(f32::INFINITY),
+            y: Some(20.0),
+            maximized: false,
+        };
+        assert_eq!(
+            odd_pos.sanitized(),
+            Some(WindowState {
+                width: 1100.0,
+                height: 720.0,
+                x: None,
+                y: Some(20.0),
+                maximized: false,
+            })
+        );
+        // Corrupt files fall back to defaults (None).
+        let path = WritingApp::window_state_path().expect("window path");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(WritingApp::load_window_state().is_none());
+    }
+
     /// Test library with fixed UUIDs: Notes (Documents) + Inbox (iCloud),
     /// sheet A in Notes, sheet B in Inbox.
     fn sync_app() -> WritingApp {
@@ -17256,6 +17543,9 @@ mod tests {
             gdrive: GdriveSync::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
+            last_window_state: None,
+            last_window_save: 0.0,
+            window_t0: None,
         };
         app.selection = SidebarSelection::Group(1);
         app
