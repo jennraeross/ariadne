@@ -12239,6 +12239,56 @@ blockquote {
         }
     }
 
+    /// Fuzzy match score for the command palette (higher = better),
+    /// or `None` when `needle` is not a subsequence of `haystack`.
+    /// Case-insensitive, with bonuses for exact-case hits, word starts
+    /// and consecutive runs, and a penalty for late first matches, so
+    /// "st" prefers "Style suggestions" over "Export Style Guide".
+    fn fuzzy_score(haystack: &str, needle: &str) -> Option<i32> {
+        fn fold(c: char) -> char {
+            c.to_lowercase().next().unwrap_or(c)
+        }
+        if needle.is_empty() {
+            return None;
+        }
+        let hay: Vec<char> = haystack.chars().collect();
+        let low: Vec<char> = hay.iter().map(|&c| fold(c)).collect();
+        let mut score = 0i32;
+        let mut hi = 0usize;
+        let mut prev_idx: Option<usize> = None;
+        let mut first_idx: Option<usize> = None;
+        for nc in needle.chars() {
+            let nl = fold(nc);
+            let mut found = None;
+            for (i, hc) in low.iter().enumerate().skip(hi) {
+                if *hc == nl {
+                    found = Some(i);
+                    break;
+                }
+            }
+            let i = found?;
+            if first_idx.is_none() {
+                first_idx = Some(i);
+            }
+            score += 10;
+            if nc == hay[i] {
+                score += 2;
+            }
+            if i == 0
+                || matches!(hay.get(i.wrapping_sub(1)), Some(' ' | '/' | '-' | '_' | '.' | ':'))
+            {
+                score += 15;
+            }
+            if i > 0 && prev_idx == Some(i - 1) {
+                score += 12;
+            }
+            prev_idx = Some(i);
+            hi = i + 1;
+        }
+        // Earlier first matches rank higher.
+        Some(score - first_idx.unwrap_or(0) as i32)
+    }
+
     /// Char-offset ranges of `query` in `content`, non-overlapping.
     /// Case-insensitive unless `case` is set (per-char folding keeps
     /// indices aligned with the source text).
@@ -12732,29 +12782,48 @@ blockquote {
                 let confirm = resp.lost_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let query = self.search_query.trim().to_string();
-                // Sheets matching the query, plus palette commands (all of
-                // them when the query is empty).
+                // Sheets matching the query, ranked best-first, plus
+                // palette commands (all of them, in definition order, when
+                // the query is empty).
                 let sheet_hits: Vec<usize> = if query.is_empty() {
                     Vec::new()
                 } else {
-                    self.sheets
+                    let mut scored: Vec<(usize, i32)> = self
+                        .sheets
                         .iter()
                         .enumerate()
-                        .filter(|(_, s)| !s.trashed && Self::sheet_matches(s, &query))
-                        .map(|(i, _)| i)
-                        .collect()
+                        .filter(|(_, s)| !s.trashed)
+                        .filter_map(|(i, s)| {
+                            let title = Self::inferred_title(&s.content);
+                            match Self::fuzzy_score(&title, &query) {
+                                // Title hits rank above body-only hits.
+                                Some(score) => Some((i, score)),
+                                None if s.content.to_lowercase().contains(&query.to_lowercase()) => {
+                                    Some((i, 5))
+                                }
+                                None => None,
+                            }
+                        })
+                        .collect();
+                    // Stable: ties keep library order.
+                    scored.sort_by(|a, b| b.1.cmp(&a.1));
+                    scored.into_iter().map(|(i, _)| i).collect()
                 };
                 let commands = Self::palette_commands();
-                let needle = query.to_lowercase();
-                let cmd_hits: Vec<usize> = commands
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (title, _, _))| {
-                        needle.is_empty()
-                            || title.to_lowercase().contains(&needle as &str)
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
+                let cmd_hits: Vec<usize> = if query.is_empty() {
+                    (0..commands.len()).collect()
+                } else {
+                    let mut scored: Vec<(usize, i32)> = commands
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, (title, _, _))| {
+                            Self::fuzzy_score(title, &query).map(|s| (i, s))
+                        })
+                        .collect();
+                    // Stable: ties keep definition order.
+                    scored.sort_by(|a, b| b.1.cmp(&a.1));
+                    scored.into_iter().map(|(i, _)| i).collect()
+                };
                 let total = sheet_hits.len() + cmd_hits.len();
                 if total > 0 {
                     self.search_cursor = self.search_cursor.min(total - 1);
@@ -20988,7 +21057,40 @@ mod tests {
         harness.run();
         harness.run();
         let restored = harness.state().sheets[sel].content.clone();
-        assert_eq!(restored, "aa bb aa", "undo did not restore content");
+        assert_eq!(
+            harness.state().sheets[sel].content.clone(),
+            "aa bb aa",
+            "undo did not restore content"
+        );
+    }
+
+    #[test]
+    fn fuzzy_score_ranks_better_matches_first() {
+        // Non-matches and empty queries score nothing.
+        assert_eq!(WritingApp::fuzzy_score("New sheet", ""), None);
+        assert_eq!(WritingApp::fuzzy_score("New sheet", "xyz"), None);
+        assert_eq!(WritingApp::fuzzy_score("", "a"), None);
+        // Exact-case beats case-folded.
+        let exact = WritingApp::fuzzy_score("Ab", "Ab").unwrap();
+        let folded = WritingApp::fuzzy_score("Ab", "ab").unwrap();
+        assert!(exact > folded, "exact {exact} vs folded {folded}");
+        // Word starts beat mid-word matches.
+        let head = WritingApp::fuzzy_score("New sheet", "ns").unwrap();
+        let mid = WritingApp::fuzzy_score("Sync settings", "ns").unwrap();
+        assert!(head > mid, "head {head} vs mid {mid}");
+        // Consecutive runs beat scattered letters.
+        let run = WritingApp::fuzzy_score("abc", "ab").unwrap();
+        let scattered = WritingApp::fuzzy_score("aXb", "ab").unwrap();
+        assert!(run > scattered, "run {run} vs scattered {scattered}");
+        // The motivating case: "st" prefers a style entry over a
+        // mid-word scatter in a longer title.
+        let style = WritingApp::fuzzy_score("Style suggestions", "st").unwrap();
+        let scattered_title =
+            WritingApp::fuzzy_score("Export Style Guide", "st").unwrap();
+        assert!(
+            style > scattered_title,
+            "style {style} vs scattered {scattered_title}"
+        );
     }
 
     #[test]
