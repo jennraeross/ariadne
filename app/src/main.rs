@@ -899,6 +899,10 @@ struct WritingApp {
     find_query: String,
     /// Replacement text for the find bar's Replace actions. Session-only.
     find_replace: String,
+    /// One-step undo for find-bar replaces: the sheet plus its content
+    /// before and after. Applies only if the sheet is otherwise untouched.
+    /// Session-only, cleared on close.
+    find_undo: Option<FindUndo>,
     find_case: bool,
     find_index: usize,
     find_matches: Vec<(usize, usize)>,
@@ -1004,6 +1008,14 @@ impl SettingsTab {
             SettingsTab::Sync => "Sync",
         }
     }
+}
+
+/// One undoable find-bar replacement.
+#[derive(Clone)]
+struct FindUndo {
+    sel: usize,
+    before: String,
+    after: String,
 }
 
 /// One runnable entry in the command palette.
@@ -2231,6 +2243,7 @@ impl WritingApp {
             find_open: false,
             find_query: String::new(),
             find_replace: String::new(),
+            find_undo: None,
             find_case: false,
             find_index: 0,
             find_matches: Vec::new(),
@@ -12368,7 +12381,8 @@ blockquote {
         (chars.into_iter().collect(), matches.len())
     }
 
-    /// Select a find hit in the editor; the editor scrolls to it on paint.
+
+/// Select a find hit in the editor; the editor scrolls to it on paint.
     fn select_find_match(&mut self, ctx: &egui::Context, sel: usize) {
         let Some(&(s, e)) = self.find_matches.get(self.find_index) else {
             return;
@@ -12383,9 +12397,26 @@ blockquote {
         egui::TextEdit::store_state(ctx, edit_id, state);
     }
 
+    /// Replace matches in `content` at char range `(s, e)` with
+    /// `replacement`, returning the merged content and the (clamped)
+    /// index the next match slides into.
+    fn apply_replace_at(
+        content: &str,
+        matches: &[(usize, usize)],
+        idx: usize,
+        replacement: &str,
+    ) -> (String, usize) {
+        let idx = idx.min(matches.len().saturating_sub(1));
+        let (s, e) = matches[idx];
+        let mut chars: Vec<char> = content.chars().collect();
+        chars.splice(s..e, replacement.chars());
+        // The next match slides into this slot (the caller re-matches
+        // and clamps against the new list).
+        (chars.into_iter().collect(), idx)
+    }
+
     /// Replace the current find hit (`all` = every hit instead) and save.
-    /// Single replace keeps the selection on the match that slides into
-    /// place; replace-all reports its count and selects the first hit.
+    /// Records a one-step undo (applied with Cmd+Z while the bar is open).
     fn do_find_replace(&mut self, ctx: &egui::Context, sel: usize, all: bool) {
         let query = self.find_query.clone();
         let replacement = self.find_replace.clone();
@@ -12398,24 +12429,31 @@ blockquote {
             if matches.is_empty() {
                 return;
             }
-            let count;
+            let before = sheet.content.clone();
+            let (count, next);
             if all {
                 let (merged, n) =
                     Self::replace_all_in(&sheet.content, &query, &replacement, case);
                 sheet.content = merged;
                 count = n;
-                self.find_index = 0;
+                next = 0;
             } else {
                 let idx = self.find_index.min(matches.len() - 1);
-                let (s, e) = matches[idx];
-                let mut chars: Vec<char> = sheet.content.chars().collect();
-                chars.splice(s..e, replacement.chars());
-                sheet.content = chars.into_iter().collect();
+                let (merged, at) =
+                    Self::apply_replace_at(&sheet.content, &matches, idx, &replacement);
+                sheet.content = merged;
                 count = 1;
                 // The next match slides into this slot.
-                self.find_index = idx;
+                next = at;
             }
+            let after = sheet.content.clone();
             sheet.modified = SystemTime::now();
+            self.find_undo = Some(FindUndo {
+                sel,
+                before,
+                after,
+            });
+            self.find_index = next;
             count
         };
         self.save_library();
@@ -12434,12 +12472,48 @@ blockquote {
         self.find_scroll = true;
     }
 
+    /// Undo the last find-bar replacement, if the sheet is otherwise
+    /// untouched since. Returns whether anything was restored.
+    fn undo_find_replace(&mut self, ctx: &egui::Context, sel: usize) -> bool {
+        let Some(undo) = self.find_undo.take() else {
+            return false;
+        };
+        if undo.sel != sel {
+            return false;
+        }
+        let current = self
+            .sheets
+            .get(sel)
+            .map(|s| s.content.clone())
+            .unwrap_or_default();
+        if current != undo.after {
+            // Something else changed the sheet since; leave it alone.
+            return false;
+        }
+        if let Some(sheet) = self.sheets.get_mut(sel) {
+            sheet.content = undo.before;
+            sheet.modified = SystemTime::now();
+        }
+        self.save_library();
+        self.find_matches = Self::find_matches(
+            &self.sheets.get(sel).map(|s| s.content.clone()).unwrap_or_default(),
+            &self.find_query,
+            self.find_case,
+        );
+        self.find_index = 0;
+        self.select_find_match(ctx, sel);
+        self.find_scroll = true;
+        self.status = "Undid replacement".to_string();
+        true
+    }
+
     /// Close the find bar and hand focus back to the editor.
     fn close_find(&mut self, ctx: &egui::Context, sel: usize) {
         self.find_open = false;
         self.find_query.clear();
         self.find_replace.clear();
         self.find_matches.clear();
+        self.find_undo = None;
         self.find_index = 0;
         self.find_scroll = false;
         let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
@@ -12468,6 +12542,39 @@ blockquote {
         let focused = ui.ctx().memory(|m| m.focused());
         if focused != Some(field) && focused != Some(replace_field) {
             ui.memory_mut(|m| m.request_focus(field));
+        }
+        // Cmd+Z (no Shift): undo the last replace, but only when one is
+        // pending and the sheet is otherwise untouched — the find and
+        // replace fields keep their native undo the rest of the time.
+        // Matched against the raw key event (global modifiers aren't set
+        // by synthetic input) and consumed here, before the fields below,
+        // so they never see the keypress.
+        // This runs before the fields below so a consumed press never
+        // reaches them.
+        let mut do_undo = false;
+        ui.input(|i| {
+            do_undo = i.raw.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Z,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift
+                )
+            }) && self.find_undo.as_ref().is_some_and(|u| {
+                u.sel == sel
+                    && self
+                        .sheets
+                        .get(sel)
+                        .is_some_and(|s| s.content == u.after)
+            });
+        });
+        if do_undo {
+            ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
+            });
         }
         let mut go_prev = false;
         let mut go_next = false;
@@ -12545,14 +12652,14 @@ blockquote {
             );
             if ui
                 .add_enabled(n > 0, egui::Button::new("Replace"))
-                .on_hover_text("Replace the current match and move to the next")
+                .on_hover_text("Replace the current match and move to the next (⌘Z undoes)")
                 .clicked()
             {
                 do_replace = true;
             }
             if ui
                 .add_enabled(n > 0, egui::Button::new("Replace all"))
-                .on_hover_text("Replace every match in this sheet")
+                .on_hover_text("Replace every match in this sheet (⌘Z undoes)")
                 .clicked()
             {
                 do_replace_all = true;
@@ -12573,6 +12680,9 @@ blockquote {
         }
         if do_replace_all && n > 0 {
             self.do_find_replace(ui.ctx(), sel, true);
+        }
+        if do_undo {
+            self.undo_find_replace(ui.ctx(), sel);
         }
         if close {
             self.close_find(ui.ctx(), sel);
@@ -16034,6 +16144,7 @@ mod tests {
             find_open: false,
             find_query: String::new(),
             find_replace: String::new(),
+            find_undo: None,
             find_case: false,
             find_index: 0,
             find_matches: Vec::new(),
@@ -17044,6 +17155,7 @@ mod tests {
             find_open: false,
             find_query: String::new(),
             find_replace: String::new(),
+            find_undo: None,
             find_case: false,
             find_index: 0,
             find_matches: Vec::new(),
@@ -20805,6 +20917,69 @@ mod tests {
             WritingApp::replace_all_in("abc", "z", "x", false),
             ("abc".to_string(), 0)
         );
+    }
+
+    #[test]
+    fn apply_replace_at_targets_one_match() {
+        let content = "aaa";
+        let matches = WritingApp::find_matches(content, "a", false);
+        assert_eq!(matches, vec![(0, 1), (1, 2), (2, 3)]);
+        // Replacing the middle match leaves the others intact.
+        let (out, next) = WritingApp::apply_replace_at(content, &matches, 1, "b");
+        assert_eq!(out, "aba");
+        assert_eq!(next, 1);
+        // Clamped when the index is stale.
+        let (out, _) = WritingApp::apply_replace_at(content, &matches, 99, "b");
+        assert_eq!(out, "aab");
+    }
+
+    #[test]
+    fn find_replace_then_undo_restores_content() {
+        use egui::Modifiers;
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let _storage = isolate_storage();
+        let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
+        harness.set_size(egui::vec2(1100.0, 720.0));
+        harness.run();
+
+        // Seed known content in the selected sheet.
+        let sel = harness.state().selected_sheet;
+        harness.state_mut().sheets[sel].content = "aa bb aa".to_string();
+        harness.run();
+
+        // Open the bar and set the query + replacement directly, the
+        // way typing them would.
+        harness.state_mut().find_open = true;
+        harness.state_mut().find_query = "aa".to_string();
+        harness.state_mut().find_replace = "cc".to_string();
+        harness.run();
+        harness.run();
+
+        // Replace applies to the first match and moves on.
+        harness.get_by_label("Replace").simulate_click();
+        harness.run();
+        harness.run();
+        let content = harness.state().sheets[sel].content.clone();
+        assert_eq!(content, "cc bb aa", "replace did not apply");
+
+        // Cmd+Z restores the pre-replace content. The bar matches the raw
+        // key event, so no global modifier state is needed.
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        });
+        harness.run();
+        harness.run();
+        let restored = harness.state().sheets[sel].content.clone();
+        assert_eq!(restored, "aa bb aa", "undo did not restore content");
     }
 
     #[test]
