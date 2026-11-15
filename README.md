@@ -81,6 +81,13 @@ cargo test
 Tagged versions build signed-or-notarized-free artifacts for macOS, Windows,
 and Linux via GitHub Actions. See [DISTRIBUTING.md](DISTRIBUTING.md).
 
+The app checks those GitHub Releases for updates: once a day after launch
+(plus a manual "Check for updates" in Settings → Updates and the command
+palette). When a newer version is out, Settings shows an Updates tab with
+release notes and a Download button that opens the right installer for your
+OS — the app never replaces itself. A red dot on the Settings gear marks an
+available update. Checks can be turned off in the same tab.
+
 ## License
 
 MIT — see [LICENSE-MIT](LICENSE-MIT). Third-party dependency licenses are

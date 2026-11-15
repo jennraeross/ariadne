@@ -11,6 +11,8 @@ mod grammar;
 
 mod gdrive;
 
+mod update;
+
 use gdrive::TokenStore as _;
 
 fn load_app_icon() -> Arc<egui::IconData> {
@@ -1002,6 +1004,9 @@ struct WritingApp {
     show_conflicts: bool,
     /// Google Drive sync session. Session-only: tokens stay in the keychain.
     gdrive: GdriveSync,
+    /// In-app update check state. Prefs persist in `update.json`; the
+    /// check result itself is session-only.
+    update_state: UpdateState,
     /// Grammar state: checker, per-sheet lint cache, ignores. The
     /// dictionary words themselves live here too (persisted + synced).
     grammar: GrammarState,
@@ -1055,6 +1060,7 @@ enum SettingsTab {
     Editor,
     Checking,
     Sync,
+    Updates,
 }
 
 impl SettingsTab {
@@ -1064,6 +1070,7 @@ impl SettingsTab {
             SettingsTab::Editor => "Editor",
             SettingsTab::Checking => "Checking",
             SettingsTab::Sync => "Sync",
+            SettingsTab::Updates => "Updates",
         }
     }
 }
@@ -1090,6 +1097,7 @@ enum PaletteCommand {
     Settings,
     SettingsTab(SettingsTab),
     ToggleTheme,
+    CheckUpdates,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -1108,6 +1116,32 @@ struct GdriveWorker {
     rx: std::sync::mpsc::Receiver<gdrive::DriveEvent>,
     #[allow(dead_code)]
     handle: std::thread::JoinHandle<()>,
+}
+
+/// In-app update state: the last check result plus the in-flight check's
+/// result channel. Preferences (auto-check, last check time) live in
+/// `update.json` next to the library and are per-machine, never synced.
+#[derive(Default)]
+enum UpdateStatus {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate {
+        checked_unix: u64,
+    },
+    Available {
+        info: update::ReleaseInfo,
+    },
+    Failed(String),
+}
+
+#[derive(Default)]
+struct UpdateState {
+    prefs: update::UpdatePrefs,
+    status: UpdateStatus,
+    rx: Option<std::sync::mpsc::Receiver<Result<update::ReleaseInfo, String>>>,
+    /// Whether the automatic startup check has run this process.
+    auto_attempted: bool,
 }
 
 /// Grammar checking session: a background Harper worker over the
@@ -2326,6 +2360,10 @@ impl WritingApp {
             last_sync_check: 0.0,
             show_conflicts: false,
             gdrive: GdriveSync::default(),
+            update_state: UpdateState {
+                prefs: update::load_prefs(Self::library_dir()),
+                ..Default::default()
+            },
             grammar: GrammarState::default(),
             icloud_dir: None,
             last_window_state: Self::load_window_state(),
@@ -5776,6 +5814,84 @@ blockquote {
         }
         self.gdrive.pending_push = true;
         self.gdrive.last_edit = Some(SystemTime::now());
+    }
+
+    /// Whether in-app update checks may run. Headless screenshot runs,
+    /// `ARIADNE_NO_UPDATE_CHECK=1` runs, and unit tests never touch the
+    /// network.
+    fn updates_enabled(&self) -> bool {
+        !cfg!(test)
+            && self.screenshot_path.is_none()
+            && std::env::var("ARIADNE_NO_UPDATE_CHECK").is_err()
+    }
+
+    /// Start an update check on a background thread. No-op while a check
+    /// is already in flight.
+    fn update_check_now(&mut self) {
+        if !self.updates_enabled() {
+            return;
+        }
+        if matches!(self.update_state.status, UpdateStatus::Checking) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_state.rx = Some(rx);
+        self.update_state.status = UpdateStatus::Checking;
+        std::thread::spawn(move || {
+            let _ = tx.send(update::fetch_latest());
+        });
+    }
+
+    /// Drain a finished check and fire the automatic startup check once:
+    /// a few seconds after launch, when auto-check is on and the last
+    /// check is over a day old.
+    fn update_tick(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = self.update_state.rx.as_ref() {
+            let mut last = None;
+            for r in rx.try_iter() {
+                last = Some(r);
+            }
+            if let Some(result) = last {
+                self.update_state.rx = None;
+                let checked_unix = update::now_unix();
+                self.update_state.prefs.last_check_unix = checked_unix;
+                update::save_prefs(Self::library_dir(), &self.update_state.prefs);
+                match result {
+                    Ok(info) => {
+                        if update::is_newer(update::current_version(), &info.tag) {
+                            self.update_state.status =
+                                UpdateStatus::Available { info };
+                            self.status = "A new version of Ariadne is available".to_string();
+                        } else {
+                            self.update_state.status =
+                                UpdateStatus::UpToDate { checked_unix };
+                        }
+                    }
+                    Err(msg) => {
+                        self.update_state.status = UpdateStatus::Failed(msg.clone());
+                        self.status = format!("Update check failed: {msg}");
+                    }
+                }
+            } else if matches!(self.update_state.status, UpdateStatus::Checking) {
+                ctx.request_repaint();
+            }
+        }
+        if !self.update_state.auto_attempted {
+            // `ctx.time()` counts from process start; wait a few seconds
+            // so the check never delays first paint. No repaint is
+            // requested here: like the background sync ticks, the check
+            // fires on the next frame after the delay (any interaction
+            // or worker repaint drives frames).
+            if ctx.input(|i| i.time) > 5.0 {
+                self.update_state.auto_attempted = true;
+                let stale = update::now_unix().saturating_sub(
+                    self.update_state.prefs.last_check_unix,
+                ) >= update::AUTO_CHECK_INTERVAL_SECS;
+                if self.update_state.prefs.auto_check && stale {
+                    self.update_check_now();
+                }
+            }
+        }
     }
 
     /// Write groups, sheets and selection to disk. Errors are ignored on
@@ -12380,6 +12496,8 @@ blockquote {
             ("Settings: Editor", None, PaletteCommand::SettingsTab(SettingsTab::Editor)),
             ("Settings: Checking", None, PaletteCommand::SettingsTab(SettingsTab::Checking)),
             ("Settings: Sync", None, PaletteCommand::SettingsTab(SettingsTab::Sync)),
+            ("Settings: Updates", None, PaletteCommand::SettingsTab(SettingsTab::Updates)),
+            ("Check for updates", None, PaletteCommand::CheckUpdates),
             ("Toggle theme", None, PaletteCommand::ToggleTheme),
             ("Toggle typewriter scrolling", Some((M::COMMAND | M::ALT, egui::Key::T)), PaletteCommand::ToggleTypewriter),
             ("Toggle focus mode", Some((M::COMMAND | M::ALT, egui::Key::F)), PaletteCommand::ToggleFocus),
@@ -12430,6 +12548,11 @@ blockquote {
             PaletteCommand::SettingsTab(tab) => {
                 self.settings_tab = tab;
                 self.settings_open = true;
+            }
+            PaletteCommand::CheckUpdates => {
+                self.settings_tab = SettingsTab::Updates;
+                self.settings_open = true;
+                self.update_check_now();
             }
             PaletteCommand::ToggleTheme => {
                 self.app_theme = if self.app_theme == AppTheme::Dark {
@@ -13406,6 +13529,7 @@ blockquote {
                             SettingsTab::Editor,
                             SettingsTab::Checking,
                             SettingsTab::Sync,
+                            SettingsTab::Updates,
                         ] {
                             if ui
                                 .selectable_label(
@@ -13681,6 +13805,85 @@ blockquote {
                     }
                 });
                 });
+            }
+                                SettingsTab::Updates => {
+                // In-app updates: check GitHub Releases, download the
+                // installer for this OS. The app never replaces itself.
+                let mut do_check_updates = false;
+                let mut do_open_download: Option<String> = None;
+                ui.label(RichText::new("Updates").size(16.0).color(self.app_theme.text_dim()));
+                ui.label(format!("Ariadne {}", update::current_version()));
+                match &self.update_state.status {
+                    UpdateStatus::Idle => {
+                        ui.label(
+                            RichText::new("Never checked for updates in this session.")
+                                .small()
+                                .color(self.app_theme.text_dim()),
+                        );
+                    }
+                    UpdateStatus::Checking => {
+                        ui.label(
+                            RichText::new("Checking for updates…")
+                                .small()
+                                .color(self.app_theme.text_dim()),
+                        );
+                        ui.spinner();
+                    }
+                    UpdateStatus::UpToDate { .. } => {
+                        ui.label(
+                            RichText::new("You are on the latest version.")
+                                .small()
+                                .color(self.app_theme.text_dim()),
+                        );
+                    }
+                    UpdateStatus::Available { info } => {
+                        let title = if info.name.is_empty() {
+                            info.tag.clone()
+                        } else {
+                            info.name.clone()
+                        };
+                        ui.label(RichText::new(format!("{title} is available")).strong());
+                        if !info.notes.is_empty() {
+                            let excerpt: String = info.notes.chars().take(500).collect();
+                            let more = if info.notes.chars().count() > 500 { "…" } else { "" };
+                            ui.label(
+                                RichText::new(format!("{excerpt}{more}"))
+                                    .small()
+                                    .color(self.app_theme.text_dim()),
+                            );
+                        }
+                        if ui.button("Download update").clicked() {
+                            do_open_download = Some(info.download_url.clone());
+                        }
+                    }
+                    UpdateStatus::Failed(msg) => {
+                        ui.label(
+                            RichText::new(format!("Last check failed: {msg}"))
+                                .small()
+                                .color(self.app_theme.text_dim()),
+                        );
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Check for updates").clicked() {
+                        do_check_updates = true;
+                    }
+                });
+                let mut auto = self.update_state.prefs.auto_check;
+                if ui.checkbox(&mut auto, "Check for updates automatically").changed() {
+                    self.update_state.prefs.auto_check = auto;
+                    update::save_prefs(Self::library_dir(), &self.update_state.prefs);
+                }
+                if do_check_updates {
+                    // Deferred: the borrow of `self.update_state.status`
+                    // above ends before the check mutates it.
+                    self.update_check_now();
+                    self.status = "Checking for updates…".to_string();
+                }
+                if let Some(url) = do_open_download {
+                    gdrive::open_url(&url);
+                    self.status = "Opening the download in your browser…".to_string();
+                }
             }
             }
             });
@@ -14705,6 +14908,7 @@ impl eframe::App for WritingApp {
         self.handle_dropped_files(ctx);
         self.maybe_background_sync(ctx);
         self.gdrive_tick(ctx);
+        self.update_tick(ctx);
         ctx.set_visuals(self.app_theme.visuals());
         self.ensure_editor_font(ctx);
 
@@ -14875,14 +15079,20 @@ impl eframe::App for WritingApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // First in a right-to-left row renders at the far
                         // right edge: Settings lives there, goals next to it.
-                        if Self::header_button(
+                        // A red dot marks an available app update.
+                        let gear = Self::header_button(
                             ui,
                             RichText::new(icon::GEAR).size(17.0),
                         )
-                        .on_hover_text(hint_cmd(ui.ctx(), "Settings", egui::Key::Comma))
-                        .clicked()
-                            || key_settings
-                        {
+                        .on_hover_text(hint_cmd(ui.ctx(), "Settings", egui::Key::Comma));
+                        if matches!(self.update_state.status, UpdateStatus::Available { .. }) {
+                            ui.painter().circle_filled(
+                                gear.rect.right_top() + egui::vec2(-1.0, 1.0),
+                                4.0,
+                                Color32::from_rgb(220, 60, 60),
+                            );
+                        }
+                        if gear.clicked() || key_settings {
                             self.settings_open = !self.settings_open;
                         }
                         if !self.conflict_pairs().is_empty() {
@@ -16216,7 +16426,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -16468,6 +16678,7 @@ mod tests {
             last_sync_check: 0.0,
             show_conflicts: false,
             gdrive: GdriveSync::default(),
+            update_state: UpdateState::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
             last_window_state: None,
@@ -17541,6 +17752,7 @@ mod tests {
             last_sync_check: 0.0,
             show_conflicts: false,
             gdrive: GdriveSync::default(),
+            update_state: UpdateState::default(),
             grammar: GrammarState::default(),
             icloud_dir: None,
             last_window_state: None,
@@ -20560,6 +20772,21 @@ mod tests {
             }
         }
         panic!("timed out waiting for labeled node: {label}");
+    }
+
+    #[test]
+    fn updates_palette_command_opens_updates_tab() {
+        // The command palette exposes both update flows.
+        let cmds = WritingApp::palette_commands();
+        assert!(cmds.iter().any(|(t, _, _)| *t == "Check for updates"));
+        assert!(cmds.iter().any(|(t, _, _)| *t == "Settings: Updates"));
+        // Running it opens Settings on the Updates tab without touching
+        // the network (update checks are disabled under `cfg(test)`).
+        let mut app = sample_app();
+        app.run_palette_command(PaletteCommand::CheckUpdates);
+        assert!(app.settings_open);
+        assert!(app.settings_tab == SettingsTab::Updates);
+        assert!(matches!(app.update_state.status, UpdateStatus::Idle));
     }
 
     #[test]
