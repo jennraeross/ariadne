@@ -5829,6 +5829,122 @@ blockquote {
             .collect()
     }
 
+    /// Collapse groups that are indistinguishable by value: same section,
+    /// same parent (by UUID), same name. Keeps the group most sheets point
+    /// to (ties: oldest `modified`, then first), remaps sheet and child
+    /// links onto the keeper, and tombstones the losers so sync drops them
+    /// everywhere. Repairs libraries where a legacy import or a corrupt
+    /// fallback minted fresh random UUIDs for the same folder on each side
+    /// (e.g. six empty "Inbox" copies): without this, UUID-only merges keep
+    /// every copy forever.
+    fn dedupe_duplicate_groups(
+        groups: &mut Vec<Group>,
+        sheets: &mut Vec<Sheet>,
+        tombs: &mut Vec<Tombstone>,
+    ) -> bool {
+        let mut changed = false;
+        loop {
+            // Parent UUID per group (indices may be stale; missing => None).
+            let parent_uuid: Vec<Option<String>> = groups
+                .iter()
+                .map(|g| {
+                    g.parent
+                        .and_then(|p| groups.get(p))
+                        .map(|pg| pg.id.clone())
+                })
+                .collect();
+            // Find one key with >1 member.
+            let mut by_key: std::collections::HashMap<(u8, Option<String>, String), Vec<usize>> =
+                std::collections::HashMap::new();
+            for (i, g) in groups.iter().enumerate() {
+                let disc = match g.section {
+                    Section::Documents => 0u8,
+                    Section::ICloud => 1u8,
+                    Section::GoogleDrive => 2u8,
+                };
+                by_key
+                    .entry((disc, parent_uuid[i].clone(), g.name.clone()))
+                    .or_default()
+                    .push(i);
+            }
+            let dup: Option<Vec<usize>> =
+                by_key.into_values().find(|v| v.len() > 1);
+            let Some(members) = dup else {
+                break;
+            };
+            // Keeper: most sheet references, then oldest modified, then first.
+            let mut refs = vec![0usize; groups.len()];
+            for s in sheets.iter() {
+                if let Some(g) = s.group {
+                    if g < refs.len() {
+                        refs[g] += 1;
+                    }
+                }
+            }
+            let mut keeper = members[0];
+            for &m in &members[1..] {
+                let better = refs[m] > refs[keeper]
+                    || (refs[m] == refs[keeper]
+                        && groups[m].modified < groups[keeper].modified);
+                if better {
+                    keeper = m;
+                }
+            }
+            // Remap every loser onto the keeper, one removal at a time
+            // (descending so earlier indices stay valid).
+            let mut losers: Vec<usize> =
+                members.into_iter().filter(|&m| m != keeper).collect();
+            losers.sort_unstable_by(|a, b| b.cmp(a));
+            for loser in losers {
+                // Sheets pointing at the loser move to the keeper. The
+                // keeper index shifts when a higher loser is removed first,
+                // so resolve it by UUID at each step.
+                let keeper_uuid = groups[keeper].id.clone();
+                let keeper_now = groups
+                    .iter()
+                    .position(|g| g.id == keeper_uuid)
+                    .unwrap_or(keeper);
+                for s in sheets.iter_mut() {
+                    if s.group == Some(loser) {
+                        s.group = Some(keeper_now);
+                    } else if let Some(g) = s.group {
+                        if g > loser {
+                            s.group = Some(g - 1);
+                        }
+                    }
+                }
+                for (idx, g) in groups.iter_mut().enumerate() {
+                    if idx == loser {
+                        continue;
+                    }
+                    match g.parent {
+                        Some(p) if p == loser => {
+                            g.parent = Some(keeper_now).filter(|&k| k != idx);
+                        }
+                        Some(p) if p > loser => g.parent = Some(p - 1),
+                        _ => {}
+                    }
+                }
+                let removed = groups.remove(loser);
+                if !tombs
+                    .iter()
+                    .any(|t| t.id == removed.id && t.section == removed.section)
+                {
+                    tombs.push(Tombstone {
+                        id: removed.id,
+                        section: removed.section,
+                    });
+                }
+                // Keeper may have shifted down by the removal.
+                if loser < keeper {
+                    keeper -= 1;
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Whether either side tombstoned this UUID.
     fn is_tombstoned(id: &str, a: &[Tombstone], b: &[Tombstone]) -> bool {
         a.iter().chain(b.iter()).any(|t| t.id == id)
@@ -6104,6 +6220,11 @@ blockquote {
         let before = cur_sheets.len();
         cur_sheets.retain(|s| !tombstoned(&s.id));
         rep.dropped_tombstoned += before - cur_sheets.len();
+        // Collapse value-identical folders (legacy imports minted fresh
+        // UUIDs per store). Tombstones the losers so the fix converges.
+        if Self::dedupe_duplicate_groups(cur_groups, cur_sheets, cur_tombs) {
+            rep.dropped_tombstoned += 1;
+        }
         rep
     }
 
@@ -6886,6 +7007,67 @@ blockquote {
         }
     }
 
+    /// Rebuild from the iCloud store alone when the local file is missing
+    /// or unreadable. Returns `None` (caller falls back to samples) when the
+    /// store holds nothing either. Marked dirty so the next save converges
+    /// both stores without minting sample duplicates.
+    fn load_icloud_fallback() -> Option<SavedLibrary> {
+        let ipath = Self::icloud_library_path(None)?;
+        let ibytes = std::fs::read(&ipath).ok()?;
+        if ibytes.is_empty() {
+            return None;
+        }
+        let istore: SavedLibrary = serde_json::from_slice(&ibytes).ok()?;
+        if istore.version != 1 {
+            return None;
+        }
+        if istore.groups.is_empty() && istore.sheets.is_empty() {
+            return None;
+        }
+        let mut groups = istore.groups.clone();
+        let mut sheets = istore.sheets.clone();
+        let mut tombs = istore.tombstones.clone();
+        if Self::dedupe_duplicate_groups(&mut groups, &mut sheets, &mut tombs) {
+            // repaired; saved below via dirty
+        }
+        let sheet_order: Vec<String> = sheets.iter().map(|s| s.id.clone()).collect();
+        Some(SavedLibrary {
+            version: 1,
+            groups,
+            sheets,
+            selection: SidebarSelection::Filter(SmartFilter::All),
+            selected_sheet: 0,
+            selected_sheets: Vec::new(),
+            export_css: String::new(),
+            export_css_name: "Built-in".to_string(),
+            style_guide_added: true,
+            style_guide_version: Self::STYLE_GUIDE_VERSION,
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
+            export_format: ExportFormat::default(),
+            editor_font_size: default_editor_font_size(),
+            sidebars_visible: true,
+            library_visible: None,
+            sheets_visible: None,
+            word_goal: 0,
+            app_theme: AppTheme::default(),
+            editor_font_family: None,
+            tombstones: tombs,
+            sheet_order,
+            selection_id: None,
+            selected_sheet_id: None,
+            selected_sheets_ids: Vec::new(),
+            icloud_dir: None,
+            grammar_enabled: true,
+            typewriter: false,
+            focus_mode: false,
+            style_visible: false,
+            dictionary_adds: istore.dictionary_adds.clone(),
+            dictionary_removes: istore.dictionary_removes.clone(),
+            dirty: true,
+        })
+    }
+
     /// Load a previously saved library, or `None` to fall back to samples.
     ///
     /// The local file holds the whole library (all sections). The iCloud
@@ -6898,7 +7080,7 @@ blockquote {
         let path = Self::library_path()?;
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
-            Err(_) => return None,
+            Err(_) => return Self::load_icloud_fallback(),
         };
         let mut saved: SavedLibrary = match serde_json::from_str(
             std::str::from_utf8(&bytes).unwrap_or(""),
@@ -6906,8 +7088,11 @@ blockquote {
             Ok(s) => s,
             Err(_) => {
                 // Never strand the user on a corrupt file: quarantine it
-                // for inspection and fall back to samples. The next save
-                // writes a fresh file; the quarantined copy keeps the data.
+                // for inspection, then rebuild from the iCloud store when
+                // it holds data instead of falling back to blank samples.
+                // Samples mint fresh random UUIDs (including a new "Inbox"),
+                // which would union-merge with the surviving store copies
+                // as permanent duplicates.
                 if !bytes.is_empty() {
                     let backup = path.with_extension(format!(
                         "corrupt-{}",
@@ -6918,11 +7103,11 @@ blockquote {
                     ));
                     let _ = std::fs::rename(&path, backup);
                 }
-                return None;
+                return Self::load_icloud_fallback();
             }
         };
         if saved.version != 1 {
-            return None;
+            return Self::load_icloud_fallback().or(None);
         }
 
         // Union the iCloud store file, if any. Files written by older builds
@@ -7027,6 +7212,16 @@ blockquote {
             }
         }
 
+        // Collapse value-identical folders minted with distinct UUIDs by
+        // legacy imports or corrupt fallbacks; tombstones the losers so the
+        // next save converges every store.
+        if Self::dedupe_duplicate_groups(
+            &mut saved.groups,
+            &mut saved.sheets,
+            &mut saved.tombstones,
+        ) {
+            saved.dirty = true;
+        }
         // Repair section drift (old saves predate per-sheet sections), then
         // restore the global order with unknown sheets appended in file order.
         for sheet in saved.sheets.iter_mut() {
@@ -18415,8 +18610,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_split_roundtrip_preserves_everything() {
-        let _storage = isolate_storage();
+    fn sync_split_roundtrip_preserves_everything() {        let _storage = isolate_storage();
         let mut app = sync_app();
         app.selection = SidebarSelection::Sheet(1);
         app.selected_sheet = 1;
@@ -18481,6 +18675,58 @@ mod tests {
         // Adopted C resolves its group by UUID, not file position.
         let c = back.sheets.iter().find(|s| s.id == "s-c").unwrap();
         assert_eq!(c.group.map(|g| back.groups[g].name.as_str()), Some("Inbox"));
+    }
+
+    #[test]
+    fn dedupe_duplicate_inbox_groups_keeps_referenced() {
+        let _storage = isolate_storage();
+        // Six empty "Inbox" copies plus the referenced original, mirroring
+        // the reported iCloud duplication (folders duplicated, no files).
+        let mut app = sync_app();
+        let now = SystemTime::now();
+        for i in 0..6 {
+            app.groups.push(Group {
+                id: format!("g-inbox-dup-{i}"),
+                name: "Inbox".to_string(),
+                section: Section::ICloud,
+                expanded: true,
+                parent: None,
+                modified: now + Duration::from_secs(i + 1),
+            });
+        }
+        // Sheet B points at the original Inbox (index 1).
+        assert_eq!(app.groups[1].id, "g-inbox");
+        let changed = WritingApp::dedupe_duplicate_groups(
+            &mut app.groups,
+            &mut app.sheets,
+            &mut app.tombstones,
+        );
+        assert!(changed);
+        assert_eq!(app.groups.len(), 2, "six empties collapse");
+        assert_eq!(app.groups[1].id, "g-inbox", "referenced keeper survives");
+        assert_eq!(app.sheets[1].group, Some(1));
+        assert_eq!(app.tombstones.len(), 6);
+        // Idempotent: a second pass changes nothing.
+        assert!(!WritingApp::dedupe_duplicate_groups(
+            &mut app.groups,
+            &mut app.sheets,
+            &mut app.tombstones,
+        ));
+    }
+
+    #[test]
+    fn corrupt_local_falls_back_to_icloud_store() {
+        let _storage = isolate_storage();
+        let mut app = sync_app();
+        app.save_library();
+        // Corrupt the local file; the iCloud store still holds Inbox + B.
+        let lpath =
+            std::path::PathBuf::from(std::env::var("ARIADNE_LIBRARY_PATH").unwrap());
+        std::fs::write(&lpath, b"{not json").unwrap();
+        let back = WritingApp::load_library().expect("recovers from icloud");
+        assert!(back.groups.iter().any(|g| g.id == "g-inbox"));
+        assert!(back.sheets.iter().any(|s| s.id == "s-b"));
+        assert!(!back.groups.iter().any(|g| g.name == "Group 3"));
     }
 
     #[test]
