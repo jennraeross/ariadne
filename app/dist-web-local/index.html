@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ariadne — writing workspace</title>
+  <meta name="description" content="Ariadne in your browser: the same pure-Rust writing workspace — library, sheets, Markdown editing, and styled export. Your library stays in this browser; sync needs the desktop app." />
+  <meta name="theme-color" content="#1a1a1a" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  
+<script type="module">
+import init, * as bindings from '/ariadne-1619a29aa3a9ff26.js';
+const wasm = await init({ module_or_path: '/ariadne-4d44554621e52b49_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  
+  
+  
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #1a1a1a;
+      overflow: hidden;
+    }
+    #ariadne_canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      outline: none;
+    }
+    #ariadne_loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #c9c9c9;
+      font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+      pointer-events: none;
+    }
+  </style>
+<link rel="modulepreload" href="/ariadne-1619a29aa3a9ff26.js" crossorigin="anonymous" integrity="sha384-P/lruk4tHtlng2aX0W1A02T5CAYhVsMjvFJqv4BB/145P+Eqq0Wa4pg0SOEgHFfx"><link rel="preload" href="/ariadne-4d44554621e52b49_bg.wasm" crossorigin="anonymous" integrity="sha384-cvywayw0SWYW9/YiDmDVClKQsb8RXLqdmamAeC4aouCBuSgMUTfpMDhQmPaAF936" as="fetch" type="application/wasm"></head>
+<body>
+  <canvas id="ariadne_canvas"></canvas>
+  <div id="ariadne_loading">Loading Ariadne…</div>
+  <noscript>Ariadne's browser build needs JavaScript and WebAssembly.</noscript>
+  <script>
+    (function () {
+      // Hide the loader once the canvas paints its first frame.
+      var canvas = document.getElementById("ariadne_canvas");
+      var loader = document.getElementById("ariadne_loading");
+      if (!canvas || !loader) return;
+      var hidden = false;
+      function hide() {
+        if (!hidden) {
+          hidden = true;
+          loader.remove();
+        }
+      }
+      // Fallback: never trap the user behind the loader.
+      setTimeout(hide, 15000);
+      try {
+        var observer = new MutationObserver(hide);
+        observer.observe(canvas, { attributes: true, attributeFilter: ["width"] });
+      } catch (e) {
+        setTimeout(hide, 3000);
+      }
+      canvas.addEventListener("webglcontextlost", function (e) {
+        e.preventDefault();
+        document.body.innerHTML =
+          "<p style=\"color:#c9c9c9;font-family:system-ui;padding:2em\">Ariadne lost its graphics context. Please reload the page.</p>";
+      });
+    })();
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(function () {});
+      });
+    }
+  </script>
+</body>
+</html>

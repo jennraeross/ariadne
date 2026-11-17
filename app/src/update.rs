@@ -11,7 +11,12 @@
 //! network. Failures are reported as status text, never dialogs.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+// Browser build: std clocks panic on wasm; web_time mirrors the std API.
+#[cfg(target_arch = "wasm32")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Default API endpoint for the latest release. Tests can point elsewhere
 /// with `ARIADNE_UPDATE_URL`.

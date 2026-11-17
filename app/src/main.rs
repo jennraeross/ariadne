@@ -6,7 +6,15 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+// std clocks panic on wasm; web_time mirrors the std API (browser clock)
+// with a matching serde format.
+use std::time::Duration;
+// std clocks panic on wasm; web_time mirrors the std API (browser clock)
+// with a matching serde format. Duration itself is platform-safe.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod grammar;
 
@@ -9416,7 +9424,7 @@ blockquote {
     /// Current Unix time in seconds; 0 when the clock is unavailable.
     fn now_secs() -> u64 {
         SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
@@ -10161,8 +10169,8 @@ blockquote {
             }
             let id = format!(
                 "img-{}-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_millis())
                     .unwrap_or(0),
                 self.attached_images.len()
@@ -10190,8 +10198,8 @@ blockquote {
             std::fs::create_dir_all(&dir).ok()?;
             let id = format!(
                 "img-{}-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_millis())
                     .unwrap_or(0),
                 self.attached_images.len()

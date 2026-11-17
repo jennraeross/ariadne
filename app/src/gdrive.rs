@@ -21,7 +21,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+// Browser build: std clocks panic on wasm; web_time mirrors the std API.
+#[cfg(target_arch = "wasm32")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(not(target_arch = "wasm32"))]
 use oauth2::TokenResponse as _;

@@ -25,6 +25,8 @@ krilla = { version = "=0.8.2", default-features = false, features = ["simple-tex
 fontdb = "=0.24.0"
 harper-core = "3.0.0"
 log = "0.4"
+# Working clocks on wasm (std::time::now panics there); same API as std.
+web-time = { version = "1", features = ["serde"] }
 
 # Native-only: no wasm equivalents (file dialogs, OS clipboard, OS keychain,
 # loopback OAuth server, blocking HTTP). Gated in code with
