@@ -19871,14 +19871,18 @@ impl WritingApp {
         }
         // Browser build: eframe serves a single canvas, so the audience
         // renders as a fullscreen modal over the console instead of a
-        // second OS window. Esc / the close button returns to the console.
+        // second OS window. Esc / Exit returns to the console.
         if cfg!(target_arch = "wasm32") {
             if self.present_started_at.is_none() {
                 self.present_started_at = Some(ctx.input(|i| i.time));
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            // screen_rect is the canvas rect: always available on web,
+            // where viewport inner_rect is empty.
+            let full = ctx.screen_rect().size();
             let bg = self.theme.bg_app();
             let mut open = true;
+            let mut do_close = false;
             egui::Window::new("Present")
                 .open(&mut open)
                 .collapsible(false)
@@ -19890,13 +19894,22 @@ impl WritingApp {
                         .inner_margin(egui::Margin::same(0)),
                 )
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .fixed_size(ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()).unwrap_or(Vec2::new(960.0, 640.0))))
+                .fixed_size(full)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     ui.set_min_size(ui.available_size());
+                    // No title bar on web: an explicit way back that
+                    // doesn't depend on the Esc key reaching the canvas.
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            if ui.small_button("Exit (Esc)").clicked() {
+                                do_close = true;
+                            }
+                        });
+                    });
                     self.render_audience_viewport(ctx, ui);
                 });
-            if !open {
+            if !open || do_close {
                 self.close_present();
             }
             return;
