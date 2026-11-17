@@ -203,6 +203,34 @@ Combine with `ARIADNE_LIBRARY_PATH` / `ARIADNE_WINDOW_PATH` /
 `ARIADNE_ICLOUD_DIR` / `ARIADNE_GDRIVE_DIR` / `ARIADNE_NO_UPDATE_CHECK=1`
 for isolated docs captures.
 
+## Browser build (PWA)
+
+The same app runs in the browser at `/app/` on the GitHub Pages site:
+full editor, library, themes, history, export, and present mode. The
+library persists in the browser's `localStorage` (no account, no server);
+sync (iCloud / Google Drive), update checks, and OS integrations
+(clipboard image paste, file dialogs, "open with") are desktop-only.
+
+```sh
+cd app
+cargo install trunk --locked   # or fetch a prebuilt trunk binary
+trunk serve --no-default-features        # local dev, opens the app
+```
+
+Release bundle (what CI deploys):
+
+```sh
+cd app
+trunk build --release --cargo-profile release-wasm --dist dist-web --public-url /ariadne/app/ --no-default-features
+```
+
+`release-wasm` matches `release` but keeps the `target_features` section
+that `strip` would remove (wasm-opt needs it to validate).
+
+Pushing to `main` builds and deploys the site (marketing pages from
+`docs/` plus the app bundle) via the `Web` workflow. One-time repo setup:
+Settings → Pages → Source → **GitHub Actions**.
+
 ## Tests
 
 ```sh

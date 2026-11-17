@@ -20,8 +20,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_arch = "wasm32"))]
 use oauth2::TokenResponse as _;
 
 /// User-visible folder in My Drive holding the store + mirror.
@@ -80,8 +82,10 @@ pub trait TokenStore: Send + 'static {
 }
 
 /// OS-keychain token store (`Ariadne` / `google-drive`).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct KeyringTokenStore;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TokenStore for KeyringTokenStore {
     fn load(&self) -> Option<GoogleTokens> {
         let entry = keyring::Entry::new("Ariadne", "google-drive").ok()?;
@@ -102,6 +106,22 @@ impl TokenStore for KeyringTokenStore {
             let _ = entry.delete_credential();
         }
     }
+}
+
+/// Browser-build stand-in: the web app never spawns the sync worker
+/// (see `WritingApp::ensure_gdrive_worker`), so this stores nothing.
+#[cfg(target_arch = "wasm32")]
+pub struct KeyringTokenStore;
+
+#[cfg(target_arch = "wasm32")]
+impl TokenStore for KeyringTokenStore {
+    fn load(&self) -> Option<GoogleTokens> {
+        None
+    }
+
+    fn save(&self, _tokens: &GoogleTokens) {}
+
+    fn clear(&self) {}
 }
 
 /// In-memory token store for tests.
@@ -247,7 +267,9 @@ fn content_hash(bytes: &[u8]) -> u64 {
 }
 
 /// Spawn the worker thread. It owns its HTTP client and tokens; everything
-/// it needs arrives in [`DriveJob`]s.
+/// it needs arrives in [`DriveJob`]s. Native only: the browser build never
+/// syncs (see `WritingApp::ensure_gdrive_worker`).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_worker(
     token_store: Box<dyn TokenStore>,
     rx: std::sync::mpsc::Receiver<DriveJob>,
@@ -259,6 +281,7 @@ pub fn spawn_worker(
         .expect("spawn gdrive worker")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Worker {
     client_id: String,
     client_secret: String,
@@ -267,6 +290,7 @@ struct Worker {
     http: reqwest::blocking::Client,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn worker_loop(
     token_store: Box<dyn TokenStore>,
     rx: std::sync::mpsc::Receiver<DriveJob>,
@@ -305,6 +329,7 @@ fn worker_loop(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Worker {
     fn check_auth(&mut self) -> DriveEvent {
         if self.valid_token().is_err() {
@@ -596,6 +621,7 @@ fn stage_remote_files(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn ensure_dirs(
     files: &mut DriveHttp,
     folder: &str,
@@ -663,6 +689,8 @@ pub fn staging_dir() -> Option<std::path::PathBuf> {    if let Ok(p) = std::env:
 }
 
 /// Open a URL in the default browser (used for the OAuth sign-in page).
+/// Native only; the browser build opens links through egui instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
@@ -674,9 +702,15 @@ pub fn open_url(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
+/// Browser-build no-op: nothing opens URLs from the sync layer on web
+/// (the worker never runs there).
+#[cfg(target_arch = "wasm32")]
+pub fn open_url(_url: &str) {}
+
 /// Explain the most common token-endpoint misconfiguration in plain
 /// language, keeping the raw detail so a correct Desktop-app ID that still
 /// fails stays debuggable.
+#[cfg(not(target_arch = "wasm32"))]
 fn friendly_token_error(action: &str, e: &impl std::fmt::Display) -> String {
     let msg = e.to_string();
     if msg.contains("client_secret") {
@@ -690,6 +724,7 @@ fn friendly_token_error(action: &str, e: &impl std::fmt::Display) -> String {
 }
 
 /// Wait for the OAuth redirect (validating `state`), with a 5-minute cap.
+#[cfg(not(target_arch = "wasm32"))]
 fn wait_for_code(
     server: tiny_http::Server,
     expected_state: &str,
@@ -731,6 +766,7 @@ fn wait_for_code(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn refresh_tokens(
     http: &reqwest::blocking::Client,
     client_id: &str,
@@ -791,10 +827,12 @@ fn mime_for_name(name: &str) -> &'static str {
 
 /// Thin HTTP surface over [`Worker`] credentials, implementing
 /// [`DriveFiles`] with one 401-refresh retry.
+#[cfg(not(target_arch = "wasm32"))]
 struct DriveHttp<'a> {
     worker: &'a mut Worker,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> DriveHttp<'a> {
     fn new(worker: &'a mut Worker) -> Self {
         Self { worker }
@@ -858,6 +896,7 @@ impl<'a> DriveHttp<'a> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DriveFiles for DriveHttp<'_> {
     fn ensure_app_folder(&mut self) -> Result<String, String> {
         let q = format!(
@@ -1007,6 +1046,7 @@ impl DriveFiles for DriveHttp<'_> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DriveHttp<'_> {
     fn list_into(
         &mut self,

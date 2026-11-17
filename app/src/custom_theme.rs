@@ -76,6 +76,7 @@ pub fn themes_path(dir: &Path) -> PathBuf {
 
 /// Load `(themes, active_id)`. Missing or corrupt files yield empty
 /// defaults rather than failing.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_all(dir: Option<PathBuf>) -> (Vec<CustomTheme>, Option<String>) {
     let Some(dir) = dir else {
         return (Vec::new(), None);
@@ -91,6 +92,7 @@ pub fn load_all(dir: Option<PathBuf>) -> (Vec<CustomTheme>, Option<String>) {
     (file.themes, active)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_all(dir: Option<PathBuf>, themes: &[CustomTheme], active: Option<&str>) {
     let Some(dir) = dir else {
         return;
@@ -104,6 +106,32 @@ pub fn save_all(dir: Option<PathBuf>, themes: &[CustomTheme], active: Option<&st
     };
     if let Ok(text) = serde_json::to_string_pretty(&file) {
         let _ = std::fs::write(themes_path(&dir), text);
+    }
+}
+
+/// Browser build: themes persist in `localStorage` under [`THEMES_KEY`]
+/// instead of the per-machine `themes.json` file.
+#[cfg(target_arch = "wasm32")]
+pub fn load_all(_dir: Option<PathBuf>) -> (Vec<CustomTheme>, Option<String>) {
+    let Some(text) = crate::web::load_text(crate::web::THEMES_KEY) else {
+        return (Vec::new(), None);
+    };
+    let file: ThemesFile = serde_json::from_str(&text).unwrap_or_default();
+    let active = file
+        .active
+        .filter(|id| file.themes.iter().any(|t| &t.id == id));
+    (file.themes, active)
+}
+
+/// Browser build: see [`load_all`].
+#[cfg(target_arch = "wasm32")]
+pub fn save_all(_dir: Option<PathBuf>, themes: &[CustomTheme], active: Option<&str>) {
+    let file = ThemesFile {
+        themes: themes.to_vec(),
+        active: active.map(|s| s.to_string()),
+    };
+    if let Ok(text) = serde_json::to_string(&file) {
+        crate::web::store_text(crate::web::THEMES_KEY, &text);
     }
 }
 

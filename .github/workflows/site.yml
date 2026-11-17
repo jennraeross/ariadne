@@ -27,7 +27,12 @@ jobs:
               html = pathlib.Path(page).read_text()
               assert "style.css" in html, page
               for m in re.findall(r'(?:src|href)="(?!https?://|mailto:|#)([^"]+)"', html):
+                  # app/ is built by the Web workflow (Trunk), not committed.
+                  if m == "app/" or m.startswith("app/"):
+                      continue
                   target = pathlib.Path("docs") / m
                   assert target.exists(), f"{page}: missing {m}"
+          # The marketing site must keep pointing at the PWA.
+          assert 'href="app/"' in pathlib.Path("docs/index.html").read_text()
           print("site links OK")
           EOF

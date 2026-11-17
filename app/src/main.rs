@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{Color32, FontId, RichText, ScrollArea, Vec2};
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +15,9 @@ mod gdrive;
 mod update;
 
 mod custom_theme;
+
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use gdrive::TokenStore as _;
 
@@ -37,6 +41,47 @@ fn load_app_icon() -> Arc<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        main_native()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        main_web();
+        Ok(())
+    }
+}
+
+/// Browser entry point: the canvas in `index.html` hosts the app, and
+/// persistence comes from `localStorage` instead of the OS app-data folder.
+#[cfg(target_arch = "wasm32")]
+fn main_web() {
+    use wasm_bindgen::JsCast as _;
+    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+    let web_options = eframe::WebOptions::default();
+    wasm_bindgen_futures::spawn_local(async move {
+        let document = web_sys::window()
+            .and_then(|w| w.document())
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("ariadne_canvas")
+            .expect("missing <canvas id=\"ariadne_canvas\">")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("ariadne_canvas is not a canvas");
+        let runner = eframe::WebRunner::new();
+        runner
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| Ok(Box::new(WritingApp::new(cc, None)))),
+            )
+            .await
+            .expect("failed to start Ariadne");
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main_native() -> eframe::Result<()> {
     let args: Vec<String> = env::args().collect();
     let mut screenshot_path: Option<PathBuf> = None;
     let mut i = 1;
@@ -3269,6 +3314,13 @@ impl WritingApp {
             theme_editor: None,
             theme: ResolvedTheme::default(),
         };
+        // Browser build: hydrate the in-memory image and style stores from
+        // localStorage before anything resolves them.
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web::images_hydrate();
+            crate::web::styles_hydrate();
+        }
         // Custom themes live in a per-machine sidecar file.
         {
             let (themes, active) = custom_theme::load_all(Self::library_dir());
@@ -4762,7 +4814,12 @@ blockquote {
         self.save_library();
         true
     }
+    /// Browser build: sync sections don't exist on web (the library is
+    /// local to the browser), so only Documents is ever shown.
     fn visible_sections() -> Vec<Section> {
+        if cfg!(target_arch = "wasm32") {
+            return vec![Section::Documents];
+        }
         let mut sections = vec![Section::Documents];
         if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
             sections.push(Section::ICloud);
@@ -5001,6 +5058,14 @@ blockquote {
         grammar: &mut GrammarState,
         sel: usize,
     ) {
+        // Browser build: threads don't exist on wasm, so lint synchronously
+        // in the frame instead of queueing to the background worker. The
+        // debounce below still applies; Harper itself is fast enough that
+        // one sheet per idle frame stays smooth.
+        if cfg!(target_arch = "wasm32") {
+            Self::lint_grammar_sync(sheets, grammar, sel);
+            return;
+        }
         let Some(sheet) = sheets.get(sel) else {
             return;
         };
@@ -5153,6 +5218,60 @@ blockquote {
         let mut checker = grammar::Checker::new(&words);
         let issues = checker.lint(&sheet.content, &grammar.ignored);
         grammar.cache.insert(sel, CachedLint { hash, issues });
+    }
+
+    /// Synchronous lint for the browser build: same result as the worker
+    /// path, but immediate (no threads on wasm). Debounced by the caller:
+    /// sheets with a fresh cache hit return at once, and edited sheets wait
+    /// one idle second like native.
+    fn lint_grammar_sync(sheets: &[Sheet], grammar: &mut GrammarState, sel: usize) {
+        let Some(sheet) = sheets.get(sel) else {
+            return;
+        };
+        if !grammar.enabled || sheet.content.chars().count() > grammar::MAX_LINT_CHARS {
+            grammar.cache.remove(&sel);
+            grammar.pending.remove(&sel);
+            grammar.inflight.remove(&sel);
+            return;
+        }
+        let hash = Self::hash_bytes(sheet.content.as_bytes());
+        if grammar.cache.get(&sel).map(|c| c.hash) == Some(hash) {
+            grammar.pending.remove(&sel);
+            return;
+        }
+        // Debounce: the pending clock resets on every change, so it
+        // measures one full idle second since typing stopped.
+        let now = Instant::now();
+        let last_change = match grammar.pending.entry(sel) {
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if o.get().hash != hash {
+                    o.insert(PendingLint {
+                        hash,
+                        last_change: now,
+                    });
+                    now
+                } else {
+                    o.get().last_change
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(PendingLint {
+                    hash,
+                    last_change: now,
+                });
+                now
+            }
+        };
+        if grammar.cache.contains_key(&sel) && now.duration_since(last_change) < GRAMMAR_IDLE {
+            return;
+        }
+        let adds: Vec<String> = grammar.dict_adds.iter().cloned().collect();
+        let removes: Vec<String> = grammar.dict_removes.iter().cloned().collect();
+        let words = grammar::effective_words(&adds, &removes);
+        let mut checker = grammar::Checker::new(&words);
+        let issues = checker.lint(&sheet.content, &grammar.ignored);
+        grammar.cache.insert(sel, CachedLint { hash, issues });
+        grammar.pending.remove(&sel);
     }
 
     /// Cached lint issues for one sheet, split by surface.
@@ -5588,7 +5707,11 @@ blockquote {
 
     /// Load the persisted window geometry, if any. Corrupt or unusable
     /// files are ignored so the app falls back to the default size.
+    /// Browser build: the canvas fills its page element; no geometry persists.
     fn load_window_state() -> Option<WindowState> {
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
         let path = Self::window_state_path()?;
         let bytes = std::fs::read(&path).ok()?;
         if bytes.is_empty() {
@@ -5599,8 +5722,11 @@ blockquote {
     }
 
     /// Persist the window geometry (best effort: failures are ignored so
-    /// a move/resize never breaks the editor).
+    /// a move/resize never breaks the editor). Browser build: no-op.
     fn save_window_state(state: &WindowState) {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
         let Some(path) = Self::window_state_path() else {
             return;
         };
@@ -5616,6 +5742,10 @@ blockquote {
     /// resize-then-quit is kept. Minimized frames are skipped so
     /// restoring doesn't reopen minimized.
     fn track_window_state(&mut self, ctx: &egui::Context) {
+        // Browser build: no window geometry persists.
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
         // Screenshot runs must not clobber the user's geometry.
         if self.screenshot_path.is_some() {
             return;
@@ -6634,6 +6764,10 @@ blockquote {
     /// are union-based and never delete, so this is safe to run unattended;
     /// real conflicts surface as reviewable copies plus a status note.
     fn maybe_background_sync(&mut self, ctx: &egui::Context) {
+        // Browser build: no iCloud store exists on web; sync never runs.
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
         let now = ctx.input(|i| i.time);
         if now - self.last_sync_check < 30.0 {
             return;
@@ -6673,25 +6807,34 @@ blockquote {
 
     /// Spawn the sync worker on first use and learn the auth state.
     /// Silent until the user connects: no tokens means SignedOut, and the
-    /// UI offers Connect.
+    /// UI offers Connect. Browser build: never runs (see the early return).
     fn ensure_gdrive_worker(&mut self) {
-        if self.gdrive.worker.is_some() {
-            return;
-        }
-        if !Self::gdrive_configured() {
+        // Browser build: Drive sync is a native-only feature; the section
+        // stays hidden via `visible_sections` and the worker never starts.
+        if cfg!(target_arch = "wasm32") {
             self.gdrive.mode = GdriveMode::Disabled;
             return;
         }
-        let (job_tx, job_rx) = std::sync::mpsc::channel();
-        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
-        let handle =
-            gdrive::spawn_worker(Box::new(gdrive::KeyringTokenStore), job_rx, ev_tx);
-        self.gdrive.worker = Some(GdriveWorker {
-            tx: job_tx,
-            rx: ev_rx,
-            handle,
-        });
-        self.gdrive_send(gdrive::DriveJob::CheckAuth);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.gdrive.worker.is_some() {
+                return;
+            }
+            if !Self::gdrive_configured() {
+                self.gdrive.mode = GdriveMode::Disabled;
+                return;
+            }
+            let (job_tx, job_rx) = std::sync::mpsc::channel();
+            let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+            let handle =
+                gdrive::spawn_worker(Box::new(gdrive::KeyringTokenStore), job_rx, ev_tx);
+            self.gdrive.worker = Some(GdriveWorker {
+                tx: job_tx,
+                rx: ev_rx,
+                handle,
+            });
+            self.gdrive_send(gdrive::DriveJob::CheckAuth);
+        }
     }
 
     /// Send a job when a worker exists and none is in flight.
@@ -6975,8 +7118,11 @@ blockquote {
 
     /// Whether in-app update checks may run. Headless screenshot runs,
     /// `ARIADNE_NO_UPDATE_CHECK=1` runs, and unit tests never touch the
-    /// network.
+    /// network. The browser build never checks: it is served, not installed.
     fn updates_enabled(&self) -> bool {
+        if cfg!(target_arch = "wasm32") {
+            return false;
+        }
         !cfg!(test)
             && self.screenshot_path.is_none()
             && std::env::var("ARIADNE_NO_UPDATE_CHECK").is_err()
@@ -7051,6 +7197,74 @@ blockquote {
         }
     }
 
+    /// Browser build: persist the whole library to its `localStorage` slot.
+    /// Sync splits, mirrors, and hashes don't exist on web; a full quota
+    /// surfaces once in the status bar instead of losing data silently.
+    #[cfg(target_arch = "wasm32")]
+    fn save_library_web(&mut self) {
+        let sheet_order: Vec<String> = self.sheets.iter().map(|s| s.id.clone()).collect();
+        let selection_id = match self.selection {
+            SidebarSelection::Group(g) => self.groups.get(g).map(|gr| gr.id.clone()),
+            SidebarSelection::Sheet(s) => self.sheets.get(s).map(|sh| sh.id.clone()),
+            SidebarSelection::Filter(_) => None,
+        };
+        let selected_sheet_id = self.sheets.get(self.selected_sheet).map(|s| s.id.clone());
+        let selected_sheets_ids: Vec<String> = self
+            .selected_sheets
+            .iter()
+            .filter_map(|i| self.sheets.get(*i).map(|s| s.id.clone()))
+            .collect();
+        let local_saved = SavedLibrary {
+            version: 1,
+            groups: self.groups.clone(),
+            sheets: self.sheets.clone(),
+            selection: self.selection,
+            selected_sheet: self.selected_sheet,
+            selected_sheets: self.selected_sheets.clone(),
+            export_css: self.export_css.clone(),
+            export_css_name: self.export_css_name.clone(),
+            style_guide_added: self.style_guide_added,
+            style_guide_version: self.style_guide_version,
+            present_demo_added: self.present_demo_added,
+            attached_fonts: self.attached_fonts.clone(),
+            attached_images: self.attached_images.clone(),
+            export_format: self.export_format,
+            editor_font_size: self.editor_font_size,
+            sidebars_visible: self.library_visible && self.sheets_visible,
+            library_visible: Some(self.library_visible),
+            sheets_visible: Some(self.sheets_visible),
+            word_goal: self.word_goal,
+            app_theme: self.app_theme,
+            editor_font_family: self.editor_font_family.clone(),
+            present_colors: self.present_colors.clone(),
+            present_font_family: None,
+            present_header_font: self.present_header_font.clone(),
+            present_body_font: self.present_body_font.clone(),
+            present_aspect: self.present_aspect,
+            tombstones: self.tombstones.clone(),
+            sheet_order,
+            selection_id,
+            selected_sheet_id,
+            selected_sheets_ids,
+            icloud_dir: None,
+            grammar_enabled: self.grammar.enabled,
+            typewriter: self.typewriter,
+            focus_mode: self.focus_mode,
+            style_visible: self.grammar.style_visible,
+            dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
+            dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
+            dirty: false,
+        };
+        if let Ok(text) = serde_json::to_string(&local_saved) {
+            if !crate::web::store_text(crate::web::LIBRARY_KEY, &text)
+                && crate::web::note_quota_once()
+            {
+                self.status =
+                    "Browser storage is full: changes are kept for this session only".to_string();
+            }
+        }
+    }
+
     /// Write groups, sheets and selection to disk. Errors are ignored on
     /// purpose: the app must keep working even without a writable folder.
     ///
@@ -7061,7 +7275,14 @@ blockquote {
     /// Before writing, each local store file is re-read: if it changed since
     /// we last saw it (another device), it is merged in first so saves never
     /// clobber remote edits.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn save_library(&mut self) {
+        // Browser build: single localStorage slot, no store split or merge.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.save_library_web();
+            return;
+        }
         let Some(local_path) = Self::library_path() else {
             return;
         };
@@ -7436,7 +7657,30 @@ blockquote {
     /// or unreadable. Returns `None` (caller falls back to samples) when the
     /// store holds nothing either. Marked dirty so the next save converges
     /// both stores without minting sample duplicates.
+    /// Browser build: load the library from its `localStorage` slot.
+    /// Missing, corrupt, or version-skewed saves fall back to samples,
+    /// exactly like a missing or corrupt native file.
+    #[cfg(target_arch = "wasm32")]
+    fn load_library_web() -> Option<SavedLibrary> {
+        let text = crate::web::load_text(crate::web::LIBRARY_KEY)?;
+        if text.is_empty() {
+            return None;
+        }
+        let saved: SavedLibrary = serde_json::from_str(&text).ok()?;
+        if saved.version != 1 {
+            return None;
+        }
+        if saved.groups.is_empty() && saved.sheets.is_empty() {
+            return None;
+        }
+        Some(saved)
+    }
+
     fn load_icloud_fallback() -> Option<SavedLibrary> {
+        // Browser build: no synced stores exist on web.
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
         let ipath = Self::icloud_library_path(None)?;
         let ibytes = std::fs::read(&ipath).ok()?;
         if ibytes.is_empty() {
@@ -7506,7 +7750,13 @@ blockquote {
     /// iCloud conflict siblings are union-merged here (with per-sheet
     /// conflict copies on real divergence). Selection is remapped by stable
     /// UUID and the global sheet order restored.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn load_library() -> Option<SavedLibrary> {
+        // Browser build: single localStorage slot, no store split or merge.
+        #[cfg(target_arch = "wasm32")]
+        {
+            return Self::load_library_web();
+        }
         Self::migrate_legacy_library();
         let path = Self::library_path()?;
         let bytes = match std::fs::read(&path) {
@@ -9178,7 +9428,32 @@ blockquote {
     }
 
     /// Load previously saved snapshots, silently ignoring anything unreadable.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn load_history(&mut self) {
+        // Browser build: snapshots persist in their own localStorage slot.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let Some(text) = crate::web::load_text(crate::web::HISTORY_KEY) else {
+                return;
+            };
+            let Ok(raw): Result<std::collections::HashMap<String, Vec<Snapshot>>, _> =
+                serde_json::from_str(&text)
+            else {
+                return;
+            };
+            let mut history = std::collections::HashMap::new();
+            for (k, mut snaps) in raw {
+                let Ok(idx) = k.parse::<usize>() else {
+                    continue;
+                };
+                snaps.truncate(Self::MAX_SNAPSHOTS);
+                if !snaps.is_empty() {
+                    history.insert(idx, snaps);
+                }
+            }
+            self.history = history;
+            return;
+        }
         let Some(path) = Self::history_path() else {
             return;
         };
@@ -9204,7 +9479,22 @@ blockquote {
     }
 
     /// Persist snapshots; failures are swallowed like the library save.
+    /// Browser build: a localStorage slot instead of the sidecar file.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn save_history(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let raw: std::collections::HashMap<String, &Vec<Snapshot>> = self
+                .history
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+            if let Ok(text) = serde_json::to_string(&raw) {
+                crate::web::store_text(crate::web::HISTORY_KEY, &text);
+            }
+            return;
+        }
         let Some(path) = Self::history_path() else {
             return;
         };
@@ -9760,6 +10050,7 @@ blockquote {
     }
 
     /// Uncached image resolution, shared by the UI and the export worker.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn resolve_image_bytes_uncached(
         attached_images: &[AttachedImage],
         icloud_dir: Option<&str>,
@@ -9767,6 +10058,18 @@ blockquote {
     ) -> Option<(Vec<u8>, String)> {
         let src = src.trim();
         if let Some(id) = src.strip_prefix("attachment:") {
+            // Browser build: the in-memory image store replaces the assets
+            // folder (and the sync mirrors, which don't exist on web).
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some((bytes, ext)) = crate::web::images_get(id) {
+                    if Self::sniff_image_kind(&bytes).is_some() {
+                        let kind = if ext == "jpg" { "jpg".to_string() } else { ext };
+                        return Some((bytes, kind));
+                    }
+                }
+                return None;
+            }
             let meta = attached_images.iter().find(|a| a.id == id)?;
             // Local assets first, then the synced mirrors (covers images
             // attached on another device via iCloud or Google Drive).
@@ -9847,7 +10150,33 @@ blockquote {
 
     /// Attach an image file to the library: copy it into the assets folder
     /// (deduped by content) and return the new attachment id.
+    /// Browser build: bytes live in the in-memory image store (persisted to
+    /// `localStorage`) instead of the assets folder.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn attach_image_bytes(&mut self, bytes: &[u8], name: &str, ext: &str) -> Option<String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(id) = crate::web::images_find_by_bytes(bytes) {
+                return Some(id);
+            }
+            let id = format!(
+                "img-{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+                self.attached_images.len()
+            );
+            crate::web::images_insert(id.clone(), name.to_string(), ext.to_string(), bytes.to_vec());
+            self.attached_images.push(AttachedImage {
+                id: id.clone(),
+                name: name.to_string(),
+                ext: ext.to_string(),
+            });
+            self.clear_image_caches();
+            self.save_library();
+            return Some(id);
+        }
         // Reuse an existing attachment with identical content.
         if let Some(dir) = Self::assets_dir() {
             for att in &self.attached_images {
@@ -10006,10 +10335,19 @@ blockquote {
     /// Read an RGBA image off the system clipboard and PNG-encode it for
     /// `attach_one_image`. None when the clipboard holds no image (or its
     /// pixels cannot be encoded), so text paste proceeds untouched.
+    /// Browser build: no OS clipboard image API is wired up yet, so image
+    /// paste reads nothing (drag-and-drop still works) and text is untouched.
     fn clipboard_image_png() -> Option<Vec<u8>> {
-        let mut clipboard = arboard::Clipboard::new().ok()?;
-        let img = clipboard.get_image().ok()?;
-        Self::encode_png_rgba(img.width, img.height, img.bytes.into_owned())
+        #[cfg(target_arch = "wasm32")]
+        {
+            return None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut clipboard = arboard::Clipboard::new().ok()?;
+            let img = clipboard.get_image().ok()?;
+            Self::encode_png_rgba(img.width, img.height, img.bytes.into_owned())
+        }
     }
 
     /// Paste a clipboard image into the focused sheet when one is there.
@@ -10703,7 +11041,12 @@ blockquote {
 
     /// Start a background system-font scan (once per run). The UI thread
     /// never blocks on `load_system_fonts`; the picker fills in when ready.
+    /// Browser build: web pages cannot enumerate system fonts, so the scan
+    /// never starts and the editor stays on its built-in families.
     fn kick_font_db_load(&mut self) {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
         if self.font_db.is_some() || self.font_db_rx.is_some() {
             return;
         }
@@ -12847,6 +13190,24 @@ blockquote {
             label: label.clone(),
         });
         self.status = format!("Rendering presentation ({label})…");
+        // Browser build: threads don't exist on wasm, so render inline and
+        // deliver through the same result channel the poller drains.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut worker = Self::present_export_worker_app(&snap);
+            let (bytes, warnings) = if pptx {
+                (worker.export_present_pptx_bytes(aspect), Vec::new())
+            } else {
+                worker.export_present_pdf_bytes(aspect)
+            };
+            let _ = tx.send(PresentExportResult {
+                pptx,
+                bytes,
+                warnings,
+                filename,
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let mut worker = Self::present_export_worker_app(&snap);
             let (bytes, warnings) = if pptx {
@@ -12889,17 +13250,32 @@ blockquote {
         }
         #[cfg(not(feature = "dialogs"))]
         {
-            let _ = label;
-            let dir = directories::UserDirs::new()
-                .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
-                .unwrap_or_else(std::env::temp_dir);
-            let path = dir.join(filename);
-            match std::fs::write(&path, bytes) {
-                Ok(()) => {
-                    self.status = format!("Exported presentation to {}", path.display());
+            // Browser build: no save dialog exists, so hand the bytes to
+            // the browser as a download.
+            #[cfg(target_arch = "wasm32")]
+            {
+                let ext = filename.rsplit('.').next().unwrap_or("pdf");
+                if crate::web::download(filename, bytes, crate::web::mime_for_ext(ext)) {
+                    self.status = format!("Downloaded presentation ({label})");
                     Self::append_warnings(&mut self.status, warnings);
+                } else {
+                    self.status = "Export failed: the browser blocked the download".to_string();
                 }
-                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = label;
+                let dir = directories::UserDirs::new()
+                    .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(std::env::temp_dir);
+                let path = dir.join(filename);
+                match std::fs::write(&path, bytes) {
+                    Ok(()) => {
+                        self.status = format!("Exported presentation to {}", path.display());
+                        Self::append_warnings(&mut self.status, warnings);
+                    }
+                    Err(e) => self.status = format!("Export failed: {e}"),
+                }
             }
         }
     }
@@ -13698,7 +14074,13 @@ blockquote {
 
     /// Saved style names (file stems), sorted, for the export popover.
     /// Reserved names (the default look and the virtuals) are never files.
+    /// Browser build: names come from the localStorage style map.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn list_styles() -> Vec<String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return crate::web::styles_list();
+        }
         let mut names = Vec::new();
         if let Some(dir) = Self::styles_dir() {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -13768,7 +14150,27 @@ blockquote {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn apply_style_file(&mut self, name: &str) {
+        // Browser build: styles live in the localStorage map.
+        #[cfg(target_arch = "wasm32")]
+        {
+            match crate::web::styles_get(name) {
+                Some(css) => {
+                    self.export_css = css;
+                    self.export_css_name = name.to_string();
+                    self.status = format!("Using export style {name}");
+                    self.save_library();
+                }
+                None => {
+                    self.export_css.clear();
+                    self.export_css_name = "Built-in".to_string();
+                    self.status = format!("Style {name} is gone; using the built-in style");
+                    self.save_library();
+                }
+            }
+            return;
+        }
         let Some(dir) = Self::styles_dir() else {
             return;
         };
@@ -13832,7 +14234,27 @@ blockquote {
 
     /// Save style text under a name from the in-app editor. Returns false
     /// (leaving the editor open) when the name is unusable.
+    /// Browser build: styles live in the localStorage map.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn save_style_from_editor(&mut self, name: &str, content: &str, is_new: bool) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = Self::sanitize_style_name(name);
+            if name.is_empty() {
+                self.status = "Give the style a name first".to_string();
+                return false;
+            }
+            if is_reserved_style(&name) {
+                self.status = "That name is reserved for the built-in styles".to_string();
+                return false;
+            }
+            let final_name = crate::web::styles_set_named(&name, content.to_string(), is_new);
+            self.export_css = content.to_string();
+            self.export_css_name = final_name.clone();
+            self.status = format!("Saved export style {final_name}");
+            self.save_library();
+            return true;
+        }
         let name = Self::sanitize_style_name(name);
         if name.is_empty() {
             self.status = "Give the style a name first".to_string();
@@ -13870,8 +14292,24 @@ blockquote {
     }
 
     /// Delete a saved style file. Removing the active style falls back to
-    /// the built-in style.
+    /// the built-in style. Browser build: removes from the localStorage map.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn remove_style(&mut self, name: &str) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let removed = crate::web::styles_remove(name);
+            if removed && self.export_css_name == name {
+                self.export_css.clear();
+                self.export_css_name = "Built-in".to_string();
+            }
+            self.status = if removed {
+                format!("Removed style {name}")
+            } else {
+                format!("Could not remove style {name}")
+            };
+            self.save_library();
+            return;
+        }
         let removed = Self::styles_dir()
             .map(|dir| std::fs::remove_file(dir.join(format!("{name}.css"))).is_ok())
             .unwrap_or(false);
@@ -13889,20 +14327,40 @@ blockquote {
 
     /// Re-read the active style from its file so outside edits apply on the
     /// next export. Falls back to the cached text when the file is gone.
+    /// Browser build: the map is the source of truth, so just re-read it.
     fn refresh_active_style(&mut self) -> Option<String> {
-        if is_reserved_style(&self.export_css_name) {
-            return None;
-        }
-        let path = Self::styles_dir()?.join(format!("{}.css", self.export_css_name));
-        match std::fs::read_to_string(&path) {
-            Ok(css) => {
-                self.export_css = css;
-                None
+        #[cfg(target_arch = "wasm32")]
+        {
+            if is_reserved_style(&self.export_css_name) {
+                return None;
             }
-            Err(_) => Some(format!(
-                "Style {} is missing; using its last saved text",
-                self.export_css_name
-            )),
+            match crate::web::styles_get(&self.export_css_name) {
+                Some(css) => {
+                    self.export_css = css;
+                    None
+                }
+                None => Some(format!(
+                    "Style {} is missing; using its last saved text",
+                    self.export_css_name
+                )),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if is_reserved_style(&self.export_css_name) {
+                return None;
+            }
+            let path = Self::styles_dir()?.join(format!("{}.css", self.export_css_name));
+            match std::fs::read_to_string(&path) {
+                Ok(css) => {
+                    self.export_css = css;
+                    None
+                }
+                Err(_) => Some(format!(
+                    "Style {} is missing; using its last saved text",
+                    self.export_css_name
+                )),
+            }
         }
     }
 
@@ -14044,17 +14502,32 @@ blockquote {
         }
         #[cfg(not(feature = "dialogs"))]
         {
-            let dir = directories::UserDirs::new()
-                .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
-                .unwrap_or_else(std::env::temp_dir);
-            let path = dir.join(&filename);
-            match std::fs::write(&path, &bytes) {
-                Ok(()) => {
+            // Browser build: no save dialog exists, so hand the bytes to
+            // the browser as a download.
+            #[cfg(target_arch = "wasm32")]
+            {
+                if crate::web::download(filename, bytes, crate::web::mime_for_ext(&fmt.extension())) {
                     self.status =
-                        format!("Exported {count} {noun} to {}", path.display());
-                    Self::append_warnings(&mut self.status, &warnings);
+                        format!("Downloaded {count} {noun}");
+                    Self::append_warnings(&mut self.status, warnings);
+                } else {
+                    self.status = "Export failed: the browser blocked the download".to_string();
                 }
-                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let dir = directories::UserDirs::new()
+                    .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(std::env::temp_dir);
+                let path = dir.join(&filename);
+                match std::fs::write(&path, &bytes) {
+                    Ok(()) => {
+                        self.status =
+                            format!("Exported {count} {noun} to {}", path.display());
+                        Self::append_warnings(&mut self.status, &warnings);
+                    }
+                    Err(e) => self.status = format!("Export failed: {e}"),
+                }
             }
         }
     }
@@ -14233,8 +14706,15 @@ blockquote {
     }
 
     /// Write finished export bytes to a temp file (kept for the preview and
-    /// share flows), returning its path.
+    /// share flows on native), returning its path. Browser build: no temp
+    /// files exist, so sharing goes straight to a download (see below).
     fn write_temp_export(&self, bytes: &[u8], filename: &str) -> Option<PathBuf> {
+        // Browser build: no temp files exist, so sharing goes straight to a
+        // download (see below).
+        if cfg!(target_arch = "wasm32") {
+            let _ = (bytes, filename);
+            return None;
+        }
         let path = std::env::temp_dir().join(filename);
         std::fs::write(&path, bytes).ok()?;
         Some(path)
@@ -14268,7 +14748,9 @@ blockquote {
     }
 
     /// Share the current export: build it, write it to a temp file, and hand
-    /// it to the operating system to open with the default app.
+    /// it to the operating system to open with the default app. Browser
+    /// build: no OS handoff exists, so the export downloads instead.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn share_export(&mut self, fmt: ExportFormat) {
         let targets = self.export_targets();
         if targets.is_empty() {
@@ -14278,6 +14760,17 @@ blockquote {
         let stem = Self::export_stem(&self.sheets, &targets);
         let filename = format!("{stem}.{}", fmt.extension());
         let (bytes, warnings) = self.export_bytes_for(fmt, &targets);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if crate::web::download(&filename, &bytes, crate::web::mime_for_ext(&fmt.extension())) {
+                self.status = format!("Downloaded {filename}");
+                Self::append_warnings(&mut self.status, &warnings);
+            } else {
+                self.status = "Could not share: the browser blocked the download".to_string();
+            }
+            self.show_export_popover = false;
+            return;
+        }
         match self.write_temp_export(&bytes, &filename) {
             Some(path) => match Self::open_with_default_app(&path) {
                 Ok(()) => {
@@ -14503,7 +14996,7 @@ blockquote {
             ctx.request_repaint();
             return None;
         }
-        self.queue_present_image(src);
+        self.queue_present_image(ctx, src);
         ctx.request_repaint();
         None
     }
@@ -14519,6 +15012,8 @@ blockquote {
     }
 
     /// Start the background presenter-image worker once per run.
+    /// Browser build: never started (decodes run inline in `queue_present_image`).
+    #[cfg(not(target_arch = "wasm32"))]
     fn kick_present_image_worker(&mut self) {
         if self.present_image_tx.is_some() {
             return;
@@ -14562,24 +15057,69 @@ blockquote {
 
     /// Queue one `src` for background decode (deduplicated). No-ops when
     /// already cached, pending, or failed.
-    fn queue_present_image(&mut self, src: &str) {
-        if self.image_textures.contains_key(&format!("ariadne-export-src:{src}"))
-            || self.present_image_pending.contains(src)
-            || self.present_image_failed.contains(src)
+    /// Browser build: threads don't exist on wasm, so decode inline and
+    /// upload the texture immediately (each `src` still decodes only once).
+    fn queue_present_image(&mut self, _ctx: &egui::Context, src: &str) {
+        #[cfg(target_arch = "wasm32")]
         {
+            let key = format!("ariadne-export-src:{src}");
+            if self.image_textures.contains_key(&key) || self.present_image_failed.contains(src) {
+                return;
+            }
+            let bytes = Self::resolve_image_bytes_uncached(
+                &self.attached_images,
+                self.icloud_dir.as_deref(),
+                src,
+            )
+            .map(|(b, _)| b);
+            let image = bytes.and_then(|b| image::load_from_memory(&b).ok()).map(|img| {
+                let img = if img.width().max(img.height()) > 1600 {
+                    img.thumbnail(1600, 1600)
+                } else {
+                    img
+                };
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width(), rgba.height());
+                (w, h, rgba.into_raw())
+            });
+            match image {
+                Some((w, h, pixels)) if w > 0 && h > 0 => {
+                    let handle = _ctx.load_texture(
+                        key.clone(),
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            &pixels,
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.image_textures.insert(key, handle);
+                }
+                _ => {
+                    self.present_image_failed.insert(src.to_string());
+                }
+            }
             return;
         }
-        self.kick_present_image_worker();
-        let Some(tx) = &self.present_image_tx else {
-            return;
-        };
-        let job = PresentImageJob {
-            src: src.to_string(),
-            attached: self.attached_images.clone(),
-            icloud_dir: self.icloud_dir.clone(),
-        };
-        if tx.send(job).is_ok() {
-            self.present_image_pending.insert(src.to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.image_textures.contains_key(&format!("ariadne-export-src:{src}"))
+                || self.present_image_pending.contains(src)
+                || self.present_image_failed.contains(src)
+            {
+                return;
+            }
+            self.kick_present_image_worker();
+            let Some(tx) = &self.present_image_tx else {
+                return;
+            };
+            let job = PresentImageJob {
+                src: src.to_string(),
+                attached: self.attached_images.clone(),
+                icloud_dir: self.icloud_dir.clone(),
+            };
+            if tx.send(job).is_ok() {
+                self.present_image_pending.insert(src.to_string());
+            }
         }
     }
 
@@ -14673,7 +15213,7 @@ blockquote {
         }
         let idx = self.present_index.min(slides.len() - 1);
         for src in Self::present_slide_image_srcs(&slides[idx]) {
-            self.queue_present_image(&src);
+            self.queue_present_image(ctx, &src);
         }
         if !self.present_image_pending.is_empty() {
             ctx.request_repaint();
@@ -16736,8 +17276,22 @@ blockquote {
         }
         #[cfg(not(feature = "dialogs"))]
         {
-            let _ = id;
-            self.status = "Exporting a theme needs the dialogs feature".to_string();
+            // Browser build: no save dialog exists, so hand the theme to
+            // the browser as a download.
+            #[cfg(target_arch = "wasm32")]
+            {
+                let filename = format!("{}.json", Self::sanitize_style_name(&t.name));
+                if crate::web::download(&filename, custom_theme::export_json(t).as_bytes(), "application/json") {
+                    self.status = format!("Downloaded {}", t.name);
+                } else {
+                    self.status = "Export failed: the browser blocked the download".to_string();
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = id;
+                self.status = "Exporting a theme needs the dialogs feature".to_string();
+            }
         }
     }
 
@@ -17146,6 +17700,16 @@ blockquote {
                                 SettingsTab::Sync => {
                 // Each sync backend gets its own card so the two
                 // sections and their actions stay visually distinct.
+                #[cfg(target_arch = "wasm32")]
+                ui.label(
+                    RichText::new(
+                        "Sync isn't available in the browser build: your library stays in this browser. Use the desktop app for iCloud and Google Drive sync.",
+                    )
+                    .small()
+                    .color(self.theme.text_dim()),
+                );
+                #[cfg(target_arch = "wasm32")]
+                ui.add_space(4.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(420.0);
                 // iCloud sync for the iCloud section (Documents stays local).
@@ -17258,6 +17822,15 @@ blockquote {
                                 SettingsTab::Updates => {
                 // In-app updates: check GitHub Releases, download the
                 // installer for this OS. The app never replaces itself.
+                // Browser build: the site serves the latest build; nothing to check.
+                #[cfg(target_arch = "wasm32")]
+                ui.label(
+                    RichText::new(
+                        "The browser build updates itself: reloading the page loads the latest version.",
+                    )
+                    .small()
+                    .color(self.theme.text_dim()),
+                );
                 let mut do_check_updates = false;
                 let mut do_open_download: Option<String> = None;
                 ui.label(RichText::new("Updates").size(16.0).color(self.theme.text_dim()));
@@ -17330,7 +17903,15 @@ blockquote {
                     self.status = "Checking for updates…".to_string();
                 }
                 if let Some(url) = do_open_download {
-                    gdrive::open_url(&url);
+                    // Browser build: open the release page in a new tab.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        crate::web::open_new_tab(&url);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        gdrive::open_url(&url);
+                    }
                     self.status = "Opening the download in your browser…".to_string();
                 }
             }
@@ -17864,6 +18445,31 @@ blockquote {
     /// from the current sheets and stylesheet. Save / Open / Copy act on
     /// the live content; closing happens via the window chrome or Close.
     fn show_preview_window(&mut self, ctx: &egui::Context) {
+        // Browser build: eframe serves a single canvas, so second OS windows
+        // don't exist. Host the same preview contents in a modal main-window
+        // panel instead.
+        if cfg!(target_arch = "wasm32") {
+            if !self.preview_window_open {
+                return;
+            }
+            let mut open = true;
+            egui::Window::new("Export preview")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .default_size(Vec2::new(640.0, 560.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.set_min_width(560.0);
+                    self.render_preview_viewport(ctx, ui);
+                });
+            if !open {
+                self.preview_window_open = false;
+                self.preview_window_placed = false;
+            }
+            return;
+        }
         if !self.preview_window_open {
             return;
         }
@@ -18022,7 +18628,9 @@ blockquote {
     }
 
     /// Write the current export to a temp file and open it with the
-    /// operating system's default application.
+    /// operating system's default application. Browser build: no OS handoff
+    /// exists, so the export opens in a new browser tab instead.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn open_export_with_default_app(&mut self, fmt: ExportFormat) {
         let targets = self.export_targets();
         if targets.is_empty() {
@@ -18032,6 +18640,16 @@ blockquote {
         let stem = Self::export_stem(&self.sheets, &targets);
         let filename = format!("{stem}.{}", fmt.extension());
         let (bytes, warnings) = self.export_bytes_for(fmt, &targets);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if crate::web::open_blob_new_tab(&filename, &bytes, crate::web::mime_for_ext(&fmt.extension())) {
+                self.status = format!("Opened {filename}");
+                Self::append_warnings(&mut self.status, &warnings);
+            } else {
+                self.status = "Could not open: the browser blocked the new tab".to_string();
+            }
+            return;
+        }
         match self.write_temp_export(&bytes, &filename) {
             Some(path) => match Self::open_with_default_app(&path) {
                 Ok(()) => {
@@ -19241,6 +19859,38 @@ impl WritingApp {
         // window). Skipping the viewport here closes it when leaving
         // Slides, and reopens it when returning.
         if self.present_tab != PresentTab::Slides {
+            return;
+        }
+        // Browser build: eframe serves a single canvas, so the audience
+        // renders as a fullscreen modal over the console instead of a
+        // second OS window. Esc / the close button returns to the console.
+        if cfg!(target_arch = "wasm32") {
+            if self.present_started_at.is_none() {
+                self.present_started_at = Some(ctx.input(|i| i.time));
+            }
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            let bg = self.theme.bg_app();
+            let mut open = true;
+            egui::Window::new("Present")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .title_bar(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(bg)
+                        .inner_margin(egui::Margin::same(0)),
+                )
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .fixed_size(ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()).unwrap_or(Vec2::new(960.0, 640.0))))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    self.render_audience_viewport(ctx, ui);
+                });
+            if !open {
+                self.close_present();
+            }
             return;
         }
         if self.present_started_at.is_none() {

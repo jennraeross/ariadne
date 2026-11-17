@@ -1,0 +1,105 @@
+name: Web
+# Browser PWA at https://jennraeross.github.io/ariadne/app/ alongside the
+# marketing site (same Pages deployment). The marketing pages come from
+# docs/; the app bundle is built here by Trunk and merged under app/.
+#
+# One-time repo setup: Settings -> Pages -> Build and deployment -> Source:
+# GitHub Actions. (Branch-based Pages cannot merge a built artifact.)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "docs/index.html"
+      - ".github/workflows/web.yml"
+      - "!app/shots/**"
+      - "!app/target/**"
+  pull_request:
+    paths:
+      - "app/**"
+      - "docs/index.html"
+      - ".github/workflows/web.yml"
+      - "!app/shots/**"
+      - "!app/target/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app -> target
+      - name: Install Trunk
+        run: |
+          set -euo pipefail
+          TRUNK_VER="v0.22.1"
+          curl -sL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VER}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/trunk.tar.gz
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/trunk.tar.gz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build the browser app
+        run: |
+          trunk build --release \
+            --cargo-profile release-wasm \
+            --dist dist-web \
+            --public-url /ariadne/app/ \
+            --no-default-features
+        working-directory: app
+      - name: Verify the PWA shell
+        run: |
+          set -euo pipefail
+          test -f dist-web/index.html
+          test -f dist-web/manifest.webmanifest
+          test -f dist-web/sw.js
+          test -f dist-web/icons/icon-192.png
+          test -f dist-web/icons/icon-512.png
+          ls dist-web/*.wasm
+          grep -q 'id="ariadne_canvas"' dist-web/index.html
+          grep -q '/ariadne/app/' dist-web/index.html
+          python3 - <<'EOF'
+          import json
+          m = json.load(open("dist-web/manifest.webmanifest"))
+          assert m["scope"] == "/ariadne/app/", m
+          assert m["start_url"] == "/ariadne/app/", m
+          print("pwa shell OK")
+          EOF
+      - name: Assemble the Pages site
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site/app
+          cp docs/index.html docs/privacy.html docs/terms.html docs/style.css docs/.nojekyll _site/
+          cp -r docs/assets _site/assets
+          cp -r app/dist-web/. _site/app/
+          echo "--- _site ---"
+          find _site -maxdepth 2 | sort
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

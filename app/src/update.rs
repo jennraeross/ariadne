@@ -144,6 +144,7 @@ fn api_url() -> String {
 
 /// Query the Releases API on the calling thread. Times out after
 /// [`CHECK_TIMEOUT`]; errors are plain-language strings for the status line.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_latest() -> Result<ReleaseInfo, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(CHECK_TIMEOUT)
@@ -168,6 +169,13 @@ pub fn fetch_latest() -> Result<ReleaseInfo, String> {
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("Could not read the update reply ({e})"))?;
     parse_release(&v)
+}
+
+/// Browser build: the web app is served, not installed, so there is
+/// nothing to check — the Updates tab explains where new versions come from.
+#[cfg(target_arch = "wasm32")]
+pub fn fetch_latest() -> Result<ReleaseInfo, String> {
+    Err("Update checks are not available in the browser build".to_string())
 }
 
 /// Per-machine update preferences. Lives in `update.json` next to the

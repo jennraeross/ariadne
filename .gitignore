@@ -2,6 +2,10 @@
 /app/target/
 **/*.rs.bk
 
+# Trunk web build output (rebuilt by CI on every deploy)
+/app/dist-web/
+/app/dist-web-release/
+
 # Screenshots and local check artifacts
 /app/shots/
 checks/

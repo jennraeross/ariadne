@@ -1,0 +1,8 @@
+# Local defaults for the browser build. CI overrides dist/public-url/release
+# on the command line; no_default_features is required because the native
+# crates (rfd, arboard, keyring, reqwest-blocking, oauth2, tiny_http) have
+# no wasm equivalents (see app/Cargo.toml).
+[build]
+target = "index.html"
+dist = "dist-web"
+no_default_features = true
