@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — Ariadne</title>
+  <meta name="description" content="Ariadne privacy policy: offline-first writing app. No accounts, no telemetry. Your text stays on your device.">
+  <link rel="canonical" href="https://jennraeross.github.io/ariadne/privacy.html">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site">
+  <div class="wrap nav">
+    <a class="brand" href="./"><img src="assets/favicon.png" alt="Ariadne icon">Ariadne</a>
+    <span class="spacer"></span>
+    <a class="link" href="./">Home</a>
+    <a class="link" href="privacy.html" aria-current="page">Privacy</a>
+    <a class="link" href="terms.html">Terms</a>
+    <a class="link" href="https://github.com/jennraeross/ariadne">GitHub</a>
+  </div>
+</header>
+<main class="wrap prose">
+  <h1>Privacy Policy</h1>
+  <p class="fine">Effective: November 17, 2026 &middot; Controller: Jenn Royleance &middot; Contact: <a href="mailto:jenn.rae.ross@gmail.com">jenn.rae.ross@gmail.com</a></p>
+
+  <h2>Short version</h2>
+  <p>Ariadne is an offline-first desktop writing app. There are no accounts, no ads, no analytics, and no tracking on this website or in the app. Your writing stays on your device unless <em>you</em> turn on sync to <em>your own</em> cloud storage.</p>
+
+  <h2>What the app stores locally</h2>
+  <ul>
+    <li>Your library (<code>library.json</code>), window geometry, custom themes, and export styles in the OS app-data folder (<code>com.craft-anything.ariadne</code>).</li>
+    <li>Spelling/grammar checking runs fully on-device. Text is never sent to a server for checking.</li>
+    <li>Environment-variable overrides (<code>ARIADNE_LIBRARY_PATH</code>, etc.) only change where files live; they never transmit data.</li>
+  </ul>
+
+  <h2>Optional sync (off by default)</h2>
+  <ul>
+    <li><strong>iCloud Drive (Mac):</strong> if you move the iCloud section to iCloud Drive under Settings &rarr; Sync, the app mirrors those groups as folders and <code>.md</code> files in your own iCloud Drive. Apple handles that storage under Apple's terms.</li>
+    <li><strong>Google Drive (all platforms):</strong> if you connect Google Drive, the app syncs those groups to an <code>Ariadne</code> folder in your own My Drive. Sign-in uses a standard OAuth flow in your browser; tokens are kept in your OS keychain. The app only accesses the files it creates for sync.</li>
+    <li>Sync mirrors are human-readable folders plus <code>.md</code> files; the local JSON store remains the source of truth. Conflict copies are kept for your review and never uploaded anywhere else.</li>
+  </ul>
+
+  <h2>Update checks</h2>
+  <p>The app checks the public GitHub Releases feed for this repository about once a day (plus a manual &ldquo;Check for updates&rdquo;), to show release notes and a download link. You can turn checks off in Settings &rarr; Updates. Like any web request, this exposes standard network metadata (e.g. IP address) to GitHub.</p>
+
+  <h2>This website</h2>
+  <p>This site is static HTML and CSS hosted on GitHub Pages. It sets no cookies, runs no analytics, and loads no third-party scripts or fonts. The download buttons query the public GitHub Releases API (<code>api.github.com</code>) to resolve direct asset links; that request goes to GitHub, not to us. Downloads themselves are served by GitHub.</p>
+
+  <h2>What we never do</h2>
+  <ul>
+    <li>No accounts, no telemetry, no crash-report uploads, no advertising identifiers.</li>
+    <li>We do not sell personal information and we do not share your writing with anyone — we never receive it.</li>
+  </ul>
+
+  <h2>Your choices</h2>
+  <ul>
+    <li>Use the app fully offline; skip sync entirely.</li>
+    <li>Disconnect Google Drive or move the iCloud section back to local storage at any time under Settings &rarr; Sync.</li>
+    <li>Disable update checks in Settings &rarr; Updates.</li>
+    <li>Delete local data by removing the app-data folder (back up any <code>.md</code> export or sync mirror first).</li>
+  </ul>
+
+  <h2>Children</h2>
+  <p>Ariadne has no age gate because it collects nothing, but it is general-purpose software not directed at children.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the updated date above will change and the new version will be posted at this URL. Material changes will also be noted in the release notes.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about privacy: <a href="mailto:jenn.rae.ross@gmail.com">jenn.rae.ross@gmail.com</a>.</p>
+</main>
+<footer class="site">
+  <div class="wrap">
+    <nav><a href="./">Home</a><a href="privacy.html">Privacy Policy</a><a href="terms.html">Terms of Service</a><a href="https://github.com/jennraeross/ariadne">GitHub</a></nav>
+    <div>&copy; 2026 Jenn Royleance &middot; Contact: <a href="mailto:jenn.rae.ross@gmail.com">jenn.rae.ross@gmail.com</a></div>
+  </div>
+</footer>
+</body>
+</html>

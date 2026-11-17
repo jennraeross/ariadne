@@ -1,0 +1,33 @@
+name: Site
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["docs/**", ".github/workflows/site.yml"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Pages site files and links
+        run: |
+          set -euo pipefail
+          test -f docs/index.html
+          test -f docs/privacy.html
+          test -f docs/terms.html
+          test -f docs/style.css
+          test -f docs/.nojekyll
+          test -f docs/assets/hero.png
+          test -f docs/assets/favicon.png
+          python3 - <<'EOF'
+          import re, pathlib
+          for page in ["docs/index.html", "docs/privacy.html", "docs/terms.html"]:
+              html = pathlib.Path(page).read_text()
+              assert "style.css" in html, page
+              for m in re.findall(r'(?:src|href)="(?!https?://|mailto:|#)([^"]+)"', html):
+                  target = pathlib.Path("docs") / m
+                  assert target.exists(), f"{page}: missing {m}"
+          print("site links OK")
+          EOF
