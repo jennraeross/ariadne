@@ -3409,6 +3409,38 @@ impl WritingApp {
             app.save_library();
         }
         app.load_history();
+        // Screenshot docs hooks (all session-only, never persisted).
+        // Each is independent so one `--screenshot` run captures one view.
+        if let Ok(tab) = std::env::var("ARIADNE_SCREENSHOT_SETTINGS") {
+            app.settings_open = true;
+            let t = tab.to_lowercase();
+            app.settings_tab = if t.contains("editor") {
+                SettingsTab::Editor
+            } else if t.contains("check") {
+                SettingsTab::Checking
+            } else if t.contains("sync") {
+                SettingsTab::Sync
+            } else if t.contains("update") {
+                SettingsTab::Updates
+            } else {
+                SettingsTab::Appearance
+            };
+        }
+        if std::env::var("ARIADNE_SCREENSHOT_SEARCH").is_ok() {
+            app.search_open = true;
+            app.search_focus = true;
+        }
+        if std::env::var("ARIADNE_SCREENSHOT_STYLE").is_ok() {
+            app.grammar.style_visible = true;
+            app.goals_visible = false;
+        }
+        if std::env::var("ARIADNE_SCREENSHOT_GOALS").is_ok() {
+            app.goals_visible = true;
+            app.grammar.style_visible = false;
+        }
+        if std::env::var("ARIADNE_SCREENSHOT_HISTORY").is_ok() {
+            app.history_open = true;
+        }
         app
     }
 
