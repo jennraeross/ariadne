@@ -59,6 +59,7 @@ jobs:
             --no-default-features
         working-directory: app
       - name: Verify the PWA shell
+        working-directory: app
         run: |
           set -euo pipefail
           test -f dist-web/index.html
