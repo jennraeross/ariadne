@@ -1194,6 +1194,10 @@ struct SavedLibrary {
     /// get it exactly once and deleting it is respected.
     #[serde(default)]
     style_guide_added: bool,
+    /// Whether the presentation demo sheet has been added, so existing
+    /// libraries get it exactly once and deleting it is respected.
+    #[serde(default)]
+    present_demo_added: bool,
     /// Guide content revision (2 documents `font-family`). Bumped on load so
     /// the surgical refresh below runs once per library.
     #[serde(default)]
@@ -1267,6 +1271,24 @@ struct SavedLibrary {
     /// Check spelling and grammar as you type. Absent in older saves: on.
     #[serde(default = "default_true")]
     grammar_enabled: bool,
+    /// Custom slide background colors as `#rrggbb`. Slides rotate through
+    /// them (`slide i` uses `colors[i % len]`); empty means the app theme.
+    #[serde(default)]
+    present_colors: Vec<String>,
+    /// Legacy single slide font (replaced by header/body below). Kept so
+    /// older saves still load; migrated to both fonts when they are unset.
+    #[serde(default)]
+    present_font_family: Option<String>,
+    /// Custom slide header font family (a system font name). `None` = built-in.
+    #[serde(default)]
+    present_header_font: Option<String>,
+    /// Custom slide body font family (a system font name). `None` = built-in.
+    #[serde(default)]
+    present_body_font: Option<String>,
+    /// Slide aspect ratio for presenter exports. Absent in older saves:
+    /// widescreen 16:9.
+    #[serde(default)]
+    present_aspect: PresentAspect,
     /// Typewriter scrolling: keep the caret line centered. Absent in
     /// older saves: off.
     #[serde(default)]
@@ -1443,6 +1465,9 @@ struct WritingApp {
     /// Whether the style guide sheet has been added, so existing libraries
     /// get it exactly once and deleting it is respected.
     style_guide_added: bool,
+    /// Whether the presentation demo sheet has been added, so existing
+    /// libraries get it exactly once and deleting it is respected.
+    present_demo_added: bool,
     /// Guide content revision (2 documents `font-family`).
     style_guide_version: u32,
     /// User-attached font files (absolute paths), matched by family name
@@ -1569,8 +1594,78 @@ struct WritingApp {
     /// Set once per opening so the window is placed beside the main one
     /// without being repositioned every frame.
     preview_window_placed: bool,
+    /// Whether the presentation audience window (separate OS window) is
+    /// open. Session-only: the main window becomes the presenter console
+    /// while this is open.
+    present_window_open: bool,
+    /// Set once per opening so the audience window is placed beside the
+    /// main one without being repositioned every frame.
+    present_window_placed: bool,
+    /// Sheet under presentation (`sheets` index at open time). `None` when
+    /// the sheet list is empty.
+    present_sheet: Option<usize>,
+    /// Current slide index within the live slide list.
+    present_index: usize,
+    /// Whether speaker notes show in the presenter console. Session-only.
+    present_notes_visible: bool,
+    /// `ctx.input(|i| i.time)` snapshot when the current presentation
+    /// started, for the elapsed timer. Session-only.
+    present_started_at: Option<f64>,
+    /// Export toggle: emit the handout article (one section per slide with
+    /// speaker notes as body text) instead of the plain export.
+    /// Session-only.
+    handout_notes: bool,
+    /// Custom slide background colors as `#rrggbb`. Slides rotate through
+    /// them; empty means the app theme. Remembered across runs.
+    present_colors: Vec<String>,
+    /// Legacy single slide font (replaced by header/body). Kept for
+    /// migration; new saves leave it as `None`.
+    present_font_family: Option<String>,
+    /// Custom slide header font family (a system font name). `None` = built-in.
+    /// Remembered across runs.
+    present_header_font: Option<String>,
+    /// Custom slide body font family (a system font name). `None` = built-in.
+    /// Remembered across runs.
+    present_body_font: Option<String>,
+    /// Slide aspect ratio for presenter exports. Remembered across runs.
+    present_aspect: PresentAspect,
+    /// Selected tab in the presenter console. Session-only.
+    present_tab: PresentTab,
+    /// Draft Coolors palette link typed in the Style tab. Session-only:
+    /// never persisted; cleared after a successful import.
+    coolors_draft: String,
     /// Laid-out live preview, rebuilt when the inputs change.
     preview_cache: PreviewCache,
+    /// Cached presenter deck (parsed slides + layouts). Session-only.
+    present_slides_cache: Option<PresentSlidesCache>,
+    /// Sorted system font families, cached after first load. Session-only.
+    cached_font_families: Option<Vec<String>>,
+    /// Background system-font scan receiver. Session-only.
+    font_db_rx: Option<std::sync::mpsc::Receiver<fontdb::Database>>,
+    /// Finished presenter export bytes from the worker thread. Session-only.
+    present_export_rx: Option<std::sync::mpsc::Receiver<PresentExportResult>>,
+    /// Save metadata while the worker thread renders. Session-only.
+    present_export_pending: Option<PresentExportPending>,
+    /// Image decodes allowed this frame (budget spreads work). Session-only.
+    image_decodes_this_frame: usize,
+    /// Background presenter-image decode worker. Session-only.
+    present_image_tx: Option<std::sync::mpsc::Sender<PresentImageJob>>,
+    /// Finished background decodes, uploaded on the UI thread. Session-only.
+    present_image_rx: Option<std::sync::mpsc::Receiver<PresentDecodedImage>>,
+    /// Image `src`s with a decode in flight (never double-queue). Session-only.
+    present_image_pending: std::collections::HashSet<String>,
+    /// Image `src`s proven missing/undecodable (permanent placeholder,
+    /// never requeued). Session-only.
+    present_image_failed: std::collections::HashSet<String>,
+    /// Frames since presenter mode opened. Images are not even queued until
+    /// the shell has painted (~2 frames), so the console + audience window
+    /// appear instantly with placeholders and images pop in after.
+    /// Session-only.
+    present_open_ticks: usize,
+    /// Resolved image bytes cache (`src` -> bytes + kind). Session-only.
+    image_bytes_cache: std::cell::RefCell<std::collections::HashMap<String, Option<(Vec<u8>, String)>>>,
+    /// Decoded image dimensions cache (`src` -> w/h). Session-only.
+    image_dims_cache: std::cell::RefCell<std::collections::HashMap<String, Option<(u32, u32)>>>,
     status: String,
     screenshot_path: Option<PathBuf>,
     frame_count: u32,
@@ -1676,6 +1771,7 @@ enum PaletteCommand {
     ToggleSidebars,
     History,
     Export,
+    Present,
     Goals,
     Style,
     ToggleTypewriter,
@@ -1829,6 +1925,183 @@ enum Block {
     Para(String),
     /// A standalone `![alt](src)` image line.
     Image { alt: String, src: String },
+}
+
+/// One presentation slide (iA Presenter model): the heading becomes the
+/// slide title, visual blocks (bullets, quotes, code, images) render on
+/// the slide, and plain paragraphs are speaker notes shown only to the
+/// presenter. `title` is empty for untitled (`---`-split) slides.
+#[derive(Clone, Default)]
+struct Slide {
+    title: String,
+    visual: Vec<Block>,
+    notes: Vec<Block>,
+}
+
+impl Slide {
+    fn is_empty(&self) -> bool {
+        self.title.is_empty() && self.visual.is_empty() && self.notes.is_empty()
+    }
+
+    /// Plain-text speaker notes, one paragraph per line.
+    fn notes_text(&self) -> String {
+        self.notes
+            .iter()
+            .map(|b| match b {
+                Block::Para(t) => WritingApp::heading_plain_text(t),
+                _ => String::new(),
+            })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// How one slide uses its rectangle on screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SlideLayout {
+    /// Title plus visuals stacked in document order.
+    Stacked,
+    /// A lone image covers the whole slide.
+    FullBleed,
+    /// Text on one side, the slide's images covering the other half as a
+    /// grid (one image fills the half, two stack, three-four form a 2x2
+    /// with the third spanning the bottom row when alone). Only the first
+    /// four images render. `true` puts the images on the left.
+    Split { image_left: bool },
+    /// Two to four images with no text: a full-slide 2x2 cover grid.
+    /// Only the first four images render.
+    Grid,
+}
+
+/// Presenter console tab: the slide deck or the theme styler.
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum PresentTab {
+    #[default]
+    Style,
+    Slides,
+}
+
+impl PresentTab {
+    fn title(self) -> &'static str {
+        match self {
+            PresentTab::Slides => "Slides",
+            PresentTab::Style => "Style",
+        }
+    }
+}
+
+/// Slide aspect ratio for presenter exports. 16:9 is the default
+/// widescreen size; 4:3 is the classic projector size. Both use the same
+/// 7.5in height so text sizes transfer directly.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+enum PresentAspect {
+    #[default]
+    SixteenNine,
+    FourThree,
+}
+
+impl PresentAspect {
+    fn title(self) -> &'static str {
+        match self {
+            PresentAspect::SixteenNine => "16:9",
+            PresentAspect::FourThree => "4:3",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            PresentAspect::SixteenNine => "16:9 Widescreen",
+            PresentAspect::FourThree => "4:3 Classic",
+        }
+    }
+
+    /// PDF page size in points (same 7.5in height either way).
+    fn pdf_dims(self) -> (f32, f32) {
+        match self {
+            PresentAspect::SixteenNine => (960.0, 540.0),
+            PresentAspect::FourThree => (720.0, 540.0),
+        }
+    }
+
+    /// OOXML slide size in EMU.
+    fn pptx_size(self) -> (i64, i64) {
+        match self {
+            PresentAspect::SixteenNine => (12_192_000, 6_858_000),
+            PresentAspect::FourThree => (9_144_000, 6_858_000),
+        }
+    }
+}
+
+/// Resolved slide paint: an optional custom background plus the text
+/// colors to use on it. `bg` is `None` when the app theme applies.
+#[derive(Clone, Copy)]
+struct SlideScheme {
+    bg: Option<Color32>,
+    bright: Color32,
+    main: Color32,
+    dim: Color32,
+}
+
+/// Cached presenter deck: parsed slides plus layouts for one sheet +
+/// content hash. Rebuilt only when the sheet or its content changes, so
+/// per-frame UI work clones instead of re-parsing markdown.
+#[derive(Clone, Default)]
+struct PresentSlidesCache {
+    sheet: Option<usize>,
+    content_hash: u64,
+    slides: std::sync::Arc<Vec<Slide>>,
+    layouts: std::sync::Arc<Vec<SlideLayout>>,
+}
+
+/// One background presenter-image decode job. Carries its own attachment
+/// snapshot so the worker never touches the UI thread: it resolves,
+/// decodes, and downscales off-thread, and the UI only uploads.
+#[derive(Clone)]
+struct PresentImageJob {
+    src: String,
+    attached: Vec<AttachedImage>,
+    icloud_dir: Option<String>,
+}
+
+/// Finished background decode: `pixels` is `None` for missing/undecodable
+/// images (permanent placeholder, never requeued).
+struct PresentDecodedImage {
+    src: String,
+    image: Option<(u32, u32, Vec<u8>)>,
+}
+
+/// Owned inputs for a presenter PDF/PPTX render. Everything the worker
+/// thread needs; all `Send`, no egui handles.
+#[derive(Clone)]
+struct PresentExportSnapshot {
+    content: String,
+    aspect: PresentAspect,
+    header_family: Option<String>,
+    body_family: Option<String>,
+    present_colors: Vec<String>,
+    theme_bg: Color32,
+    theme_bright: Color32,
+    theme_main: Color32,
+    theme_dim: Color32,
+    attached_images: Vec<AttachedImage>,
+    attached_fonts: Vec<String>,
+    icloud_dir: Option<String>,
+}
+
+/// Finished presenter bytes from the worker thread.
+struct PresentExportResult {
+    pptx: bool,
+    bytes: Vec<u8>,
+    warnings: Vec<String>,
+    filename: String,
+}
+
+/// Pending save metadata while the worker thread renders.
+struct PresentExportPending {
+    pptx: bool,
+    filename: String,
+    label: String,
 }
 
 /// One resolved export image.
@@ -2744,7 +3017,7 @@ fn full_width_row(
     height: f32,
     selected: bool,
     add_contents: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
+    ) -> egui::Response {
     let full_w = ui.available_width();
     let cursor = ui.available_rect_before_wrap();
     let row_rect =
@@ -2878,6 +3151,7 @@ impl WritingApp {
                     modified: now.checked_sub(day * 10).unwrap_or(now),
                 },
                 Self::export_style_guide_sheet(Some(0)),
+                Self::present_demo_sheet(Some(0)),
             ],
             selection: SidebarSelection::Group(0),
             selected_sheet: 0,
@@ -2886,6 +3160,7 @@ impl WritingApp {
             export_css_name: "Built-in".to_string(),
             style_guide_added: true,
             style_guide_version: 15,
+            present_demo_added: true,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
             font_db: None,
@@ -2934,7 +3209,34 @@ impl WritingApp {
             history: std::collections::HashMap::new(),
             preview_window_open: false,
             preview_window_placed: false,
+            present_window_open: false,
+            present_window_placed: false,
+            present_sheet: None,
+            present_index: 0,
+            present_notes_visible: true,
+            present_started_at: None,
+            handout_notes: false,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
+            present_tab: PresentTab::default(),
+            coolors_draft: String::new(),
             preview_cache: PreviewCache::default(),
+            present_slides_cache: None,
+            cached_font_families: None,
+            font_db_rx: None,
+            present_export_rx: None,
+            present_export_pending: None,
+            image_decodes_this_frame: 0,
+            present_image_tx: None,
+            present_image_rx: None,
+            present_image_pending: std::collections::HashSet::new(),
+            present_image_failed: std::collections::HashSet::new(),
+            present_open_ticks: 0,
+            image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             status: "Ready".to_string(),
             screenshot_path,
             frame_count: 0,
@@ -2982,6 +3284,7 @@ impl WritingApp {
             app.export_css_name = saved.export_css_name;
             app.style_guide_added = saved.style_guide_added;
             app.style_guide_version = saved.style_guide_version;
+            app.present_demo_added = saved.present_demo_added;
             app.attached_fonts = saved.attached_fonts;
             app.attached_images = saved.attached_images;
             app.export_format = saved.export_format;
@@ -2993,6 +3296,19 @@ impl WritingApp {
             app.word_goal = saved.word_goal;
             app.app_theme = saved.app_theme;
             app.editor_font_family = saved.editor_font_family;
+            app.present_colors = saved.present_colors;
+            app.present_font_family = saved.present_font_family.clone();
+            app.present_header_font = saved.present_header_font;
+            app.present_body_font = saved.present_body_font;
+            app.present_aspect = saved.present_aspect;
+            // Migrate the legacy single slide font: older saves set it for
+            // both header and body when the split fields are still empty.
+            if app.present_header_font.is_none() && app.present_body_font.is_none() {
+                if let Some(legacy) = saved.present_font_family {
+                    app.present_header_font = Some(legacy.clone());
+                    app.present_body_font = Some(legacy);
+                }
+            }
             app.tombstones = saved.tombstones;
             app.icloud_dir = saved.icloud_dir;
             app.grammar.enabled = saved.grammar_enabled;
@@ -3040,6 +3356,9 @@ impl WritingApp {
             }
             // Libraries saved before the style guide get it appended once.
             let guide_added = app.ensure_style_guide();
+            // Libraries saved before the presentation demo get it appended
+            // once; deleting it afterwards is respected.
+            let demo_added = app.ensure_present_demo();
             // Older guides get their known lines refreshed in place.
             let guide_refreshed = app.ensure_style_guide_v2()
                 | app.ensure_style_guide_v3()
@@ -3059,7 +3378,7 @@ impl WritingApp {
             if app.sheets.is_empty() {
                 app.selected_sheet = 0;
             }
-            if guide_added || guide_refreshed {
+            if guide_added || demo_added || guide_refreshed {
                 app.save_library();
             }
             app.status = "Library restored".to_string();
@@ -3248,6 +3567,50 @@ blockquote {
 
     /// Current revision of the built-in guide text.
     const STYLE_GUIDE_VERSION: u32 = 15;
+
+    /// The presentation demo talk. The Markdown file at the repository root
+    /// is the single source of truth; it is baked in at compile time.
+    const PRESENT_DEMO: &str = include_str!("../../example-slideshow.md");
+
+    /// A fresh presentation demo sheet for the first Documents group.
+    fn present_demo_sheet(group: Option<usize>) -> Sheet {
+        Sheet {
+            section: Section::Documents,
+            id: new_sheet_id(),
+            conflict_of: None,
+            content: Self::PRESENT_DEMO.to_string(),
+            group,
+            trashed: false,
+            modified: SystemTime::now(),
+        }
+    }
+
+    /// Add the presentation demo to libraries that predate it. Deleting the
+    /// demo is respected: the flag stays set, so this only ever adds it
+    /// once. Matches by title so a user-renamed copy is never duplicated.
+    fn ensure_present_demo(&mut self) -> bool {
+        if self.present_demo_added {
+            return false;
+        }
+        self.present_demo_added = true;
+        if self
+            .sheets
+            .iter()
+            .any(|s| Self::inferred_title(&s.content) == "Write First, Present Later")
+        {
+            // Already present under its own title (e.g. pasted by hand):
+            // claim it without duplicating. The flag flip is a change, so
+            // the caller persists it.
+            return true;
+        }
+        let group = if self.groups.is_empty() {
+            None
+        } else {
+            Some(self.first_documents_group().min(self.groups.len() - 1))
+        };
+        self.sheets.push(Self::present_demo_sheet(group));
+        true
+    }
 
     /// Bring a revision-0/1 guide up to date. Only the known v1 lines are
     /// touched, so anything the person added or reworded is preserved. Any
@@ -6464,6 +6827,7 @@ blockquote {
             export_css_name: String::new(),
             style_guide_added: true,
             style_guide_version: Self::STYLE_GUIDE_VERSION,
+            present_demo_added: true,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
             export_format: ExportFormat::default(),
@@ -6474,6 +6838,11 @@ blockquote {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             selection_id: None,
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
@@ -6716,6 +7085,7 @@ blockquote {
             export_css_name: self.export_css_name.clone(),
             style_guide_added: self.style_guide_added,
             style_guide_version: self.style_guide_version,
+            present_demo_added: self.present_demo_added,
             attached_fonts: self.attached_fonts.clone(),
             attached_images: self.attached_images.clone(),
             export_format: self.export_format,
@@ -6726,6 +7096,11 @@ blockquote {
             word_goal: self.word_goal,
             app_theme: self.app_theme,
             editor_font_family: self.editor_font_family.clone(),
+            present_colors: self.present_colors.clone(),
+            present_font_family: None,
+            present_header_font: self.present_header_font.clone(),
+            present_body_font: self.present_body_font.clone(),
+            present_aspect: self.present_aspect,
             tombstones: self.tombstones.clone(),
             sheet_order,
             selection_id,
@@ -6764,6 +7139,7 @@ blockquote {
                     export_css_name: "Built-in".to_string(),
                     style_guide_added: true,
                     style_guide_version: Self::STYLE_GUIDE_VERSION,
+                    present_demo_added: true,
                     attached_fonts: Vec::new(),
                     attached_images: Vec::new(),
                     export_format: ExportFormat::default(),
@@ -6774,6 +7150,11 @@ blockquote {
                     word_goal: 0,
                     app_theme: AppTheme::default(),
                     editor_font_family: None,
+                    present_colors: Vec::new(),
+                    present_font_family: None,
+                    present_header_font: None,
+                    present_body_font: None,
+                    present_aspect: PresentAspect::default(),
                     selection_id: None,
                     selected_sheet_id: None,
                     selected_sheets_ids: Vec::new(),
@@ -6880,6 +7261,7 @@ blockquote {
             export_css_name: String::new(),
             style_guide_added: true,
             style_guide_version: Self::STYLE_GUIDE_VERSION,
+            present_demo_added: true,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
             export_format: ExportFormat::default(),
@@ -6890,6 +7272,11 @@ blockquote {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             tombstones: store.tombstones,
             sheet_order: Vec::new(),
             selection_id: None,
@@ -7042,6 +7429,7 @@ blockquote {
             export_css_name: "Built-in".to_string(),
             style_guide_added: true,
             style_guide_version: Self::STYLE_GUIDE_VERSION,
+            present_demo_added: true,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
             export_format: ExportFormat::default(),
@@ -7052,6 +7440,11 @@ blockquote {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             tombstones: tombs,
             sheet_order,
             selection_id: None,
@@ -9046,6 +9439,112 @@ blockquote {
             .to_string()
     }
 
+    /// Split sheet content into slides (iA Presenter model): `#`/`##`
+    /// headings start a new slide and become the slide title, `---` forces
+    /// a split (untitled slide), images and list-like blocks are slide
+    /// visuals, plain paragraphs are speaker notes shown only to the
+    /// presenter. `###` and deeper headings stay inside the current slide
+    /// as subheadings. Blocks before the first heading belong to an opening
+    /// slide titled with the inferred sheet title.
+    fn slides_from_content(content: &str) -> Vec<Slide> {
+        let inferred = Self::inferred_title(content);
+        let mut slides: Vec<Slide> = Vec::new();
+        let mut current = Slide::default();
+        // True until the first slide is flushed or titled: only the opening
+        // slide may inherit the inferred sheet title.
+        let mut first = true;
+        let mut flush = |current: &mut Slide,
+                         slides: &mut Vec<Slide>,
+                         first: &mut bool| {
+            let has_content =
+                !current.visual.is_empty() || !current.notes.is_empty();
+            if *first {
+                if current.title.is_empty() && has_content {
+                    current.title = inferred.clone();
+                }
+                *first = false;
+            }
+            if !current.is_empty() {
+                slides.push(std::mem::take(current));
+            }
+        };
+        for block in Self::parse_blocks(content) {
+            match block {
+                Block::Heading(level, text) if level <= 2 => {
+                    let title = Self::heading_plain_text(&text);
+                    if first
+                        && current.title.is_empty()
+                        && current.visual.is_empty()
+                        && current.notes.is_empty()
+                    {
+                        // First heading: it IS the opening slide's title.
+                        current.title = title;
+                        first = false;
+                    } else {
+                        flush(&mut current, &mut slides, &mut first);
+                        current.title = title;
+                    }
+                }
+                Block::Hr => {
+                    // Manual split, unless we're already on a fresh slide.
+                    flush(&mut current, &mut slides, &mut first);
+                }
+                Block::Para(text) => current.notes.push(Block::Para(text)),
+                Block::Heading(_, _) => current.visual.push(block),
+                Block::Image { .. }
+                | Block::Bullet(_)
+                | Block::Numbered(_, _)
+                | Block::Task(_, _)
+                | Block::Quote(_)
+                | Block::Code(_) => current.visual.push(block),
+            }
+        }
+        flush(&mut current, &mut slides, &mut first);
+        if slides.is_empty() {
+            // Whitespace-only sheet: one blank slide so present mode still
+            // opens instead of erroring.
+            slides.push(Slide {
+                title: inferred,
+                ..Slide::default()
+            });
+        }
+        slides
+    }
+
+    /// Handout article for the current export: every slide becomes an `h2`
+    /// section (title plus slide number) with its visuals, followed by the
+    /// speaker-note paragraphs as body text. `Hr` separators render as
+    /// `---` rules in print formats, giving one slide per page region.
+    fn handout_blocks(content: &str) -> Vec<Block> {
+        let slides = Self::slides_from_content(content);
+        let total = slides.len();
+        let mut out = Vec::new();
+        for (i, slide) in slides.iter().enumerate() {
+            if i > 0 {
+                out.push(Block::Hr);
+            }
+            let title = if slide.title.is_empty() {
+                format!("Untitled (slide {} of {total})", i + 1)
+            } else {
+                format!("{} (slide {} of {total})", slide.title, i + 1)
+            };
+            out.push(Block::Heading(2, title));
+            out.extend(slide.visual.iter().cloned());
+            out.extend(slide.notes.iter().cloned());
+        }
+        out
+    }
+
+    /// Export blocks for one sheet's content: the handout article when the
+    /// handout toggle is on, otherwise the plain export blocks.
+    fn content_blocks(&self, content: &str) -> Vec<Block> {
+        if self.handout_notes {
+            Self::handout_blocks(content)
+        } else {
+            Self::export_blocks(content)
+        }
+    }
+
     /// Headings of a sheet in document order, skipping fenced code blocks
     /// exactly like the block parser does.
     fn outline_entries(content: &str) -> Vec<OutlineEntry> {
@@ -9208,17 +9707,36 @@ blockquote {
     /// Supports `attachment:<id>`, `data:` URIs, and file paths (absolute,
     /// `file://`, or relative to the assets folder). Remote URLs are never
     /// fetched, so exports stay deterministic and offline-safe.
+    /// Results are cached per `src` so presenter open/export don't re-read
+    /// files for every slide.
     fn resolve_image_bytes(&self, src: &str) -> Option<(Vec<u8>, String)> {
+        let key = src.trim().to_string();
+        if let Some(cached) = self.image_bytes_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let out = Self::resolve_image_bytes_uncached(&self.attached_images, self.icloud_dir.as_deref(), &key);
+        self.image_bytes_cache.borrow_mut().insert(key, out.clone());
+        // Attachment registry changes invalidate the cache lazily: callers
+        // that mutate `attached_images` should clear it (see below).
+        out
+    }
+
+    /// Uncached image resolution, shared by the UI and the export worker.
+    fn resolve_image_bytes_uncached(
+        attached_images: &[AttachedImage],
+        icloud_dir: Option<&str>,
+        src: &str,
+    ) -> Option<(Vec<u8>, String)> {
         let src = src.trim();
         if let Some(id) = src.strip_prefix("attachment:") {
-            let meta = self.attached_images.iter().find(|a| a.id == id)?;
+            let meta = attached_images.iter().find(|a| a.id == id)?;
             // Local assets first, then the synced mirrors (covers images
             // attached on another device via iCloud or Google Drive).
             let mut candidates = Vec::new();
             if let Some(dir) = Self::assets_dir() {
                 candidates.push(dir.join(format!("{}.{}", meta.id, meta.ext)));
             }
-            if let Some(store) = Self::icloud_store_dir(self.icloud_dir.as_deref()) {
+            if let Some(store) = Self::icloud_store_dir(icloud_dir) {
                 candidates.push(store.join("attachments").join(format!("{}.{}", meta.id, meta.ext)));
             }
             if let Some(stage) = gdrive::staging_dir() {
@@ -9272,6 +9790,23 @@ blockquote {
         image::load_from_memory(bytes).ok().map(|img| (img.width(), img.height()))
     }
 
+    /// Cached dimensions keyed by `src` so exports don't decode the same
+    /// file twice (once for layout, once for embedding).
+    fn image_dimensions_cached(&self, src: &str, bytes: &[u8]) -> Option<(u32, u32)> {
+        if let Some(cached) = self.image_dims_cache.borrow().get(src) {
+            return *cached;
+        }
+        let out = Self::image_dimensions(bytes);
+        self.image_dims_cache.borrow_mut().insert(src.to_string(), out);
+        out
+    }
+
+    /// Clear image caches when the attachment registry changes.
+    fn clear_image_caches(&self) {
+        self.image_bytes_cache.borrow_mut().clear();
+        self.image_dims_cache.borrow_mut().clear();
+    }
+
     /// Attach an image file to the library: copy it into the assets folder
     /// (deduped by content) and return the new attachment id.
     fn attach_image_bytes(&mut self, bytes: &[u8], name: &str, ext: &str) -> Option<String> {
@@ -9300,6 +9835,7 @@ blockquote {
                 name: name.to_string(),
                 ext: ext.to_string(),
             });
+            self.clear_image_caches();
             self.save_library();
             return Some(id);
         }
@@ -9677,7 +10213,7 @@ blockquote {
                 }
                 let title = Self::inferred_title(&sheet.content);
                 body.push_str(&format!("<h1 class=\"sheet-title\">{}</h1>\n", Self::escape_html(&title)));
-                body.push_str(&self.blocks_html_fragment(&Self::export_blocks(
+                body.push_str(&self.blocks_html_fragment(&self.content_blocks(
                     &sheet.content,
                 ), &mut images, false));
             }
@@ -9890,7 +10426,7 @@ blockquote {
                 bb,
                 "\\par\\par\n",
             ));
-            for b in Self::export_blocks(&sheet.content) {
+            for b in self.content_blocks(&sheet.content) {
                 match b {
                     Block::Heading(n, t) => {
                         let style = if n <= 1 {
@@ -10109,7 +10645,11 @@ blockquote {
 
     /// Sorted display names of installed system font families, for the
     /// Settings picker. Empty when system fonts are disabled (tests).
+    /// Cached after first load so the Style tab doesn't re-sort every frame.
     fn system_font_families(&mut self) -> Vec<String> {
+        if let Some(cached) = &self.cached_font_families {
+            return cached.clone();
+        }
         let Some(db) = self.system_font_db() else {
             return Vec::new();
         };
@@ -10119,7 +10659,54 @@ blockquote {
             .collect();
         names.sort();
         names.dedup();
+        self.cached_font_families = Some(names.clone());
         names
+    }
+
+    /// Start a background system-font scan (once per run). The UI thread
+    /// never blocks on `load_system_fonts`; the picker fills in when ready.
+    fn kick_font_db_load(&mut self) {
+        if self.font_db.is_some() || self.font_db_rx.is_some() {
+            return;
+        }
+        if std::env::var("ARIADNE_NO_SYSTEM_FONTS").is_ok() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.font_db_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            let _ = tx.send(db);
+        });
+    }
+
+    /// Pick up a finished background font scan without blocking.
+    fn poll_font_db(&mut self) -> bool {
+        let mut done = false;
+        if self.font_db.is_none() {
+            if let Some(rx) = &self.font_db_rx {
+                if let Ok(db) = rx.try_recv() {
+                    self.font_db = Some(db);
+                    done = true;
+                }
+            }
+        } else {
+            done = false;
+        }
+        if done {
+            self.cached_font_families = None;
+            return true;
+        }
+        // Drop a dead receiver so we can retry synchronously later.
+        if self.font_db.is_none() {
+            if let Some(rx) = &self.font_db_rx {
+                // `try_recv` on a disconnected channel errors; fall through
+                // and let the sync path handle it below.
+                let _ = rx;
+            }
+        }
+        false
     }
 
     /// Merge one font into egui under the editor family. Binding applies
@@ -10239,7 +10826,21 @@ blockquote {
         if std::env::var("ARIADNE_NO_SYSTEM_FONTS").is_ok() {
             return None;
         }
+        // Pick up a finished background scan first (non-blocking).
         if self.font_db.is_none() {
+            if let Some(rx) = &self.font_db_rx {
+                if let Ok(db) = rx.try_recv() {
+                    self.font_db = Some(db);
+                    self.cached_font_families = None;
+                } else {
+                    // Scan still running: don't block the UI thread.
+                    // Fall back to a sync load only when no background
+                    // scan was ever started (e.g. tests).
+                    return self.font_db.as_ref();
+                }
+            }
+        }
+        if self.font_db.is_none() && self.font_db_rx.is_none() {
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
             self.font_db = Some(db);
@@ -10636,8 +11237,22 @@ blockquote {
         dims: (f32, f32),
         margins: [f32; 4],
     ) -> Option<Vec<u8>> {
+        Self::render_pdf_krilla_with_bg(pages, plan, dims, &[margins], None)
+    }
+
+    /// Krilla writer with optional per-page solid backgrounds (presenter
+    /// export). `None` keeps the document look byte-identical. Text x
+    /// positions use per-page margins so split slides (narrow text column
+    /// beside images) render where they were laid out.
+    fn render_pdf_krilla_with_bg(
+        pages: &[Vec<PdfPlaced>],
+        plan: &PdfFontPlan,
+        dims: (f32, f32),
+        page_margins: &[[f32; 4]],
+        bgs: Option<&[(u8, u8, u8)]>,
+    ) -> Option<Vec<u8>> {
         let (page_w, page_h) = dims;
-        let [_, mr, _, ml] = margins;
+        let fallback = page_margins.first().copied().unwrap_or([48.0; 4]);
         let mut kfonts: Vec<krilla::text::Font> = Vec::new();
         for font in &plan.fonts {
             kfonts.push(krilla::text::Font::new(font.bytes.clone().into(), font.index)?);
@@ -10658,10 +11273,29 @@ blockquote {
         for (pi, page) in pages.iter().enumerate() {
             let slots = &plan.slots[pi];
             let img_slots = &plan.img_slots[pi];
+            let [_, mr, _, ml] = page_margins.get(pi).copied().unwrap_or(fallback);
             let mut pg = doc.start_page_with(krilla::page::PageSettings::new(
                 krilla::geom::Size::from_wh(page_w, page_h)?,
             ));
             let mut surface = pg.surface();
+            if let Some(bgs) = bgs {
+                if let Some(&(r, g, b)) = bgs.get(pi) {
+                    surface.set_fill(Some(krilla::paint::Fill {
+                        paint: krilla::color::rgb::Color::new(r, g, b).into(),
+                        opacity: krilla::num::NormalizedF32::ONE,
+                        rule: Default::default(),
+                    }));
+                    if let Some(rect) =
+                        krilla::geom::Rect::from_xywh(0.0, 0.0, page_w, page_h)
+                    {
+                        let mut pb = krilla::geom::PathBuilder::new();
+                        pb.push_rect(rect);
+                        if let Some(path) = pb.finish() {
+                            surface.draw_path(&path);
+                        }
+                    }
+                }
+            }
             for ((line, slot), islot) in page.iter().zip(slots.iter()).zip(img_slots.iter()) {
                 match line {
                     PdfPlaced::Text(t) => {
@@ -10758,7 +11392,7 @@ blockquote {
                 &theme.title,
                 true,
             );
-            for b in Self::export_blocks(&sheet.content) {
+            for b in self.content_blocks(&sheet.content) {
                 match b {
                     Block::Heading(n, t) => {
                         let style = if n <= 1 {
@@ -10875,6 +11509,1362 @@ blockquote {
         (bytes, warnings)
     }
 
+    /// Place a presenter image filling a slide box exactly (like the PPTX
+    /// cover images and the audience window): center-crop the pixels to the
+    /// box aspect and re-encode as PNG, so images run all the way to the
+    /// slide edges with no bars. Falls back to contain-fit of the original
+    /// bytes when decoding fails.
+    fn present_pdf_cover_placed(
+        img: &PdfImage, bx: f32, btop: f32, bw: f32, bh: f32,
+    ) -> PdfPlacedImage {
+        let bw = bw.max(1.0);
+        let bh = bh.max(1.0);
+        let mut bytes = img.bytes.clone();
+        let mut kind = img.kind;
+        let target = bw / bh;
+        if target.is_finite() && target > 0.0 {
+            if let Ok(decoded) = image::load_from_memory(&img.bytes) {
+                let (iw, ih) = (decoded.width(), decoded.height());
+                if iw > 0 && ih > 0 {
+                    let current = iw as f32 / ih as f32;
+                    if (current - target).abs() / target.max(0.01) > 0.005 {
+                        let (cw, ch) = if current > target {
+                            (((ih as f32 * target).round() as u32).max(1), ih)
+                        } else {
+                            (iw, (((iw as f32 / target).round()) as u32).max(1))
+                        };
+                        let (cw, ch) = (cw.min(iw), ch.min(ih));
+                        if cw > 0 && ch > 0 {
+                            let cropped =
+                                decoded.crop_imm((iw - cw) / 2, (ih - ch) / 2, cw, ch);
+                            let mut buf = std::io::Cursor::new(Vec::new());
+                            if cropped.write_to(&mut buf, image::ImageFormat::Png).is_ok() {
+                                bytes = buf.into_inner();
+                                kind = "png";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        PdfPlacedImage {
+            alt: img.alt.clone(),
+            bytes,
+            kind,
+            x: bx,
+            top: btop,
+            w: bw,
+            h: bh,
+        }
+    }
+
+    /// 16:9 slide PDF for the presenter Style tab: one page per slide with
+    /// the rotating background, header/body fonts, and contrast text.
+    /// Speaker notes are never rendered here (they live in the PPTX notes
+    /// slides instead).
+    fn export_present_pdf_bytes(&mut self, aspect: PresentAspect) -> (Vec<u8>, Vec<String>) {
+        let slides = self.present_slides_cached();
+        if slides.is_empty() {
+            return (Vec::new(), vec!["Nothing to present".to_string()]);
+        }
+        let dims = aspect.pdf_dims();
+        const MARGINS: [f32; 4] = [48.0, 48.0, 48.0, 48.0];
+        let header_family = self.present_header_family();
+        let body_family = self.present_body_family();
+        let header_pdf = header_family.as_deref().map(pdf_family_for).unwrap_or(PdfFamily::Sans);
+        let body_pdf = body_family.as_deref().map(pdf_family_for).unwrap_or(PdfFamily::Sans);
+        let mut warnings: Vec<String> = Vec::new();
+        let mut all_pages: Vec<Vec<PdfPlaced>> = Vec::new();
+        let mut all_bgs: Vec<(u8, u8, u8)> = Vec::new();
+        // Text margins per page, parallel to `all_pages`: split slides lay
+        // text out in a narrowed half-column, and the renderers position
+        // text with these so titles can't drift under the images.
+        let mut all_margins: Vec<[f32; 4]> = Vec::new();
+        let layouts = self.present_layouts_cached();
+        for (i, slide) in slides.iter().enumerate() {
+            let layout = layouts.get(i).copied().unwrap_or(SlideLayout::Stacked);
+            let scheme = self.slide_scheme(i);
+            let bg = scheme.bg.unwrap_or(self.theme.bg_app());
+            let bg_rgb = (bg.r(), bg.g(), bg.b());
+            let bright = (scheme.bright.r(), scheme.bright.g(), scheme.bright.b());
+            let main = (scheme.main.r(), scheme.main.g(), scheme.main.b());
+            let dim = (scheme.dim.r(), scheme.dim.g(), scheme.dim.b());
+            let mut items: Vec<PdfBlock> = Vec::new();
+            // Resolved slide images (silent first-4 in present exports).
+            let mut slide_imgs: Vec<PdfImage> = Vec::new();
+            let mut img_count = 0usize;
+            // Untitled slides render no title block: the on-screen
+            // "(untitled)" marker is a console placeholder, not slide
+            // content, so the PDF leaves it out entirely.
+            if !slide.title.is_empty() {
+                items.push(PdfBlock::Text((
+                    slide.title.clone(), 30.0, true, Some(bright), ExportAlign::Center, 1.25, 12.0,
+                    header_family.clone(), header_pdf, 0.0, 0.0, 0.0, false, false,
+                )));
+            }
+            for block in &slide.visual {
+                match block {
+                    Block::Heading(level, text) => {
+                        let size = match level {
+                            3 => 20.0,
+                            4 => 18.0,
+                            _ => 22.0,
+                        };
+                        items.push(PdfBlock::Text((
+                            Self::heading_plain_text(text), size, true, Some(bright),
+                            ExportAlign::Left, 1.25, 6.0,
+                            header_family.clone(), header_pdf, 0.0, 0.0, 0.0, false, false,
+                        )));
+                    }
+                    Block::Bullet(text) => items.push(PdfBlock::Text((
+                        format!("\u{2022}  {}", Self::heading_plain_text(text)),
+                        17.0, false, Some(main), ExportAlign::Left, 1.3, 6.0,
+                        body_family.clone(), body_pdf, 0.0, 0.0, 0.0, false, false,
+                    ))),
+                    Block::Numbered(n, text) => items.push(PdfBlock::Text((
+                        format!("{n}.  {}", Self::heading_plain_text(text)),
+                        17.0, false, Some(main), ExportAlign::Left, 1.3, 6.0,
+                        body_family.clone(), body_pdf, 0.0, 0.0, 0.0, false, false,
+                    ))),
+                    Block::Task(done, text) => items.push(PdfBlock::Text((
+                        format!(
+                            "{}  {}",
+                            if *done { "[x]" } else { "[ ]" },
+                            Self::heading_plain_text(text)
+                        ),
+                        17.0, false, Some(main), ExportAlign::Left, 1.3, 6.0,
+                        body_family.clone(), body_pdf, 0.0, 0.0, 0.0, false, false,
+                    ))),
+                    Block::Quote(text) => items.push(PdfBlock::Text((
+                        Self::heading_plain_text(text), 16.0, false, Some(dim),
+                        ExportAlign::Left, 1.3, 6.0,
+                        body_family.clone(), body_pdf, 0.0, 0.0, 0.0, false, false,
+                    ))),
+                    Block::Code(code) => {
+                        for line in code.lines() {
+                            items.push(PdfBlock::Text((
+                                line.to_string(), 11.5, false, Some(main),
+                                ExportAlign::Left, 1.2, 2.0,
+                                None, PdfFamily::Mono, 0.0, 0.0, 0.0, false, false,
+                            )));
+                        }
+                    }
+                    Block::Hr => items.push(PdfBlock::Text((
+                        "---".to_string(), 17.0, false, Some(dim),
+                        ExportAlign::Center, 1.3, 6.0,
+                        body_family.clone(), body_pdf, 0.0, 0.0, 0.0, false, false,
+                    ))),
+                    Block::Image { alt, src } => {
+                        match self.resolve_image_bytes(src) {
+                            Some((bytes, kind)) => {
+                                let kind: &'static str = match kind.as_str() {
+                                    "png" => "png",
+                                    "jpg" => "jpg",
+                                    _ => "gif",
+                                };
+                                match self.image_dimensions_cached(src, &bytes) {
+                                    Some((w, h)) if w > 0 && h > 0 => {
+                                        if img_count < 4 {
+                                            slide_imgs.push(PdfImage {
+                                                alt: alt.clone(),
+                                                bytes, kind, w_px: w, h_px: h,
+                                            });
+                                        }
+                                        img_count += 1;
+                                    }
+                                    _ => items.push(PdfBlock::Text((
+                                        format!("[image: {}]", Self::image_label(alt)),
+                                        12.0, false, Some(dim), ExportAlign::Left,
+                                        1.3, 6.0, body_family.clone(), body_pdf,
+                                        0.0, 0.0, 0.0, false, false,
+                                    ))),
+                                }
+                            }
+                            None => {
+                                if Self::image_needs_warning(src) {
+                                    warnings.push(format!("Image not found: {src}"));
+                                }
+                                items.push(PdfBlock::Text((
+                                    format!("[image: {}]", Self::image_label(alt)),
+                                    12.0, false, Some(dim), ExportAlign::Left,
+                                    1.3, 6.0, body_family.clone(), body_pdf,
+                                    0.0, 0.0, 0.0, false, false,
+                                )));
+                            }
+                        }
+                    }
+                    Block::Para(_) => {}
+                }
+            }
+            // One slide per page, mirroring the audience window layouts:
+            // a lone image covers the slide, text-free multi-image slides
+            // grid the whole slide, text+images split side-by-side, and
+            // text-only slides stack. Speaker notes never render here.
+            let (page_w, page_h) = dims;
+            let [mt, mr, mb, ml] = MARGINS;
+            let gap = 12.0;
+            // Grid cells within a box, mirroring `render_image_grid`: 1
+            // fills, 2 split along the shorter side, 3 use two on top plus
+            // one full-width below, 4+ form a 2x2. Each cell is (x, top, w, h).
+            let grid_cells = |bx: f32, btop: f32, bw: f32, bh: f32, n: usize| {
+                let mut cells = Vec::new();
+                match n.min(4) {
+                    0 => {}
+                    1 => cells.push((bx, btop, bw, bh)),
+                    2 => {
+                        // Two images share one edge-to-edge butt joint (no
+                        // gutter): a background strip down the middle reads
+                        // as a mistake rather than a grid.
+                        if bw >= bh {
+                            let cw = bw / 2.0;
+                            cells.push((bx, btop, cw, bh));
+                            cells.push((bx + cw, btop, cw, bh));
+                        } else {
+                            let ch = bh / 2.0;
+                            cells.push((bx, btop, bw, ch));
+                            cells.push((bx, btop - ch, bw, ch));
+                        }
+                    }
+                    3 => {
+                        let cw = ((bw - gap) / 2.0).max(10.0);
+                        let ch = ((bh - gap) / 2.0).max(20.0);
+                        cells.push((bx, btop, cw, ch));
+                        cells.push((bx + cw + gap, btop, cw, ch));
+                        cells.push((bx, btop - ch - gap, bw, ch));
+                    }
+                    _ => {
+                        let cw = ((bw - gap) / 2.0).max(10.0);
+                        let ch = ((bh - gap) / 2.0).max(20.0);
+                        cells.push((bx, btop, cw, ch));
+                        cells.push((bx + cw + gap, btop, cw, ch));
+                        cells.push((bx, btop - ch - gap, cw, ch));
+                        cells.push((bx + cw + gap, btop - ch - gap, cw, ch));
+                    }
+                }
+                cells
+            };
+            match layout {
+                SlideLayout::FullBleed if !slide_imgs.is_empty() => {
+                    // Lone image: cover the whole slide edge-to-edge like
+                    // the PPTX export and the audience window.
+                    let img = &slide_imgs[0];
+                    all_bgs.push(bg_rgb);
+                    all_margins.push(MARGINS);
+                    all_pages.push(vec![PdfPlaced::Image(Self::present_pdf_cover_placed(
+                        img, 0.0, page_h, page_w, page_h,
+                    ))]);
+                }
+                SlideLayout::Grid if !slide_imgs.is_empty() => {
+                    // Text-free multi-image: grid the whole slide
+                    // edge-to-edge, matching the PPTX export.
+                    let k = slide_imgs.len().min(4);
+                    let cells = grid_cells(0.0, page_h, page_w, page_h, k);
+                    let mut page = Vec::new();
+                    for (img, (bx, btop, bw, bh)) in
+                        slide_imgs.into_iter().take(k).zip(cells.iter())
+                    {
+                        page.push(PdfPlaced::Image(Self::present_pdf_cover_placed(
+                            &img, *bx, *btop, *bw, *bh,
+                        )));
+                    }
+                    all_bgs.push(bg_rgb);
+                    all_margins.push(MARGINS);
+                    all_pages.push(page);
+                }
+                SlideLayout::Split { image_left } if !slide_imgs.is_empty() => {
+                    // Text in one half, images covering the other half
+                    // edge-to-edge like the PPTX export: laying text out
+                    // full-width and stacking the image below overflows the
+                    // short slide and paginates into a second slide.
+                    let half = page_w / 2.0;
+                    // Text keeps the outer page margin plus a pad against
+                    // the image half.
+                    let pad = 32.0;
+                    let img_x = if image_left { 0.0 } else { half };
+                    let text_margins = if image_left {
+                        [mt, mr, mb, half + pad]
+                    } else {
+                        [mt, half + pad, mb, ml]
+                    };
+                    let text_pages = Self::layout_pdf_pages(items, dims, text_margins);
+                    if text_pages.len() != 1 {
+                        // Text alone overflows the column: fall back to
+                        // sequential pages rather than hiding content.
+                        for _ in &text_pages {
+                            all_bgs.push(bg_rgb);
+                            all_margins.push(text_margins);
+                        }
+                        all_pages.extend(text_pages);
+                        let img_blocks: Vec<PdfBlock> =
+                            slide_imgs.into_iter().map(PdfBlock::Image).collect();
+                        let img_pages = Self::layout_pdf_pages(img_blocks, dims, MARGINS);
+                        for _ in &img_pages {
+                            all_bgs.push(bg_rgb);
+                            all_margins.push(MARGINS);
+                        }
+                        all_pages.extend(img_pages);
+                    } else {
+                        let mut page = text_pages.into_iter().next().unwrap();
+                        // Vertically center short text like the audience
+                        // window does; top-aligned text hugged the top.
+                        let min_y = page
+                            .iter()
+                            .filter_map(|p| match p {
+                                PdfPlaced::Text((_, _, _, _, _, _, y, _, _, _, _, _)) => Some(*y),
+                                PdfPlaced::Image(_) => None,
+                            })
+                            .fold(f32::INFINITY, f32::min);
+                        if min_y.is_finite() {
+                            let shift = ((min_y - mb) / 2.0).max(0.0);
+                            if shift > 0.0 {
+                                for p in page.iter_mut() {
+                                    if let PdfPlaced::Text((_, _, _, _, _, _, y, _, _, _, _, _)) =
+                                        p
+                                    {
+                                        *y -= shift;
+                                    }
+                                }
+                            }
+                        }
+                        let k = slide_imgs.len().min(4);
+                        let cells = grid_cells(img_x, page_h, half, page_h, k);
+                        for (img, (bx, btop, bw, bh)) in
+                            slide_imgs.into_iter().take(k).zip(cells.iter())
+                        {
+                            page.push(PdfPlaced::Image(Self::present_pdf_cover_placed(
+                                &img, *bx, *btop, *bw, *bh,
+                            )));
+                        }
+                        all_bgs.push(bg_rgb);
+                        all_margins.push(text_margins);
+                        all_pages.push(page);
+                    }
+                }
+                _ => {
+                    for img in slide_imgs {
+                        items.push(PdfBlock::Image(img));
+                    }
+                    let pages = Self::layout_pdf_pages(items, dims, MARGINS);
+                    for _ in &pages {
+                        all_bgs.push(bg_rgb);
+                        all_margins.push(MARGINS);
+                    }
+                    all_pages.extend(pages);
+                }
+            }
+        }
+        let (plan, mut plan_warnings) = self.plan_pdf_fonts(&all_pages);
+        warnings.append(&mut plan_warnings);
+        let bytes = match plan {
+            Some(plan) => Self::render_pdf_krilla_with_bg(
+                &all_pages, &plan, dims, &all_margins, Some(&all_bgs),
+            )
+            .unwrap_or_else(|| {
+                Self::render_pdf_legacy_with_bg(&all_pages, dims, &all_margins, Some(&all_bgs))
+            }),
+            None => {
+                Self::render_pdf_legacy_with_bg(&all_pages, dims, &all_margins, Some(&all_bgs))
+            }
+        };
+        (bytes, warnings)
+    }
+
+    /// Grid cells within `(ox, oy, ow, oh)` mirroring `render_image_grid`
+    /// (silent first-4): 1 fills, 2 split along the shorter side (columns
+    /// when wide, rows when tall), 3 use two on top plus one full-width
+    /// below, 4+ form a 2x2. All in EMU.
+    fn pptx_grid_cells(ox: i64, oy: i64, ow: i64, oh: i64, n: usize) -> Vec<(i64, i64, i64, i64)> {
+        const GAP: i64 = 114_300;
+        match n.min(4) {
+            0 => Vec::new(),
+            1 => vec![(ox, oy, ow, oh)],
+            2 => {
+                // Single divider parallel to the shorter side: wide areas
+                // split into columns, tall areas into rows. Ties go columns.
+                if ow >= oh {
+                    let cw = ((ow - GAP) / 2).max(1);
+                    vec![(ox, oy, cw, oh), (ox + cw + GAP, oy, cw, oh)]
+                } else {
+                    let ch = ((oh - GAP) / 2).max(1);
+                    vec![(ox, oy, ow, ch), (ox, oy + ch + GAP, ow, ch)]
+                }
+            }
+            3 => {
+                let cw = ((ow - GAP) / 2).max(1);
+                let ch = ((oh - GAP) / 2).max(1);
+                vec![
+                    (ox, oy, cw, ch),
+                    (ox + cw + GAP, oy, cw, ch),
+                    (ox, oy + ch + GAP, ow, ch),
+                ]
+            }
+            _ => {
+                let cw = ((ow - GAP) / 2).max(1);
+                let ch = ((oh - GAP) / 2).max(1);
+                vec![
+                    (ox, oy, cw, ch),
+                    (ox + cw + GAP, oy, cw, ch),
+                    (ox, oy + ch + GAP, cw, ch),
+                    (ox + cw + GAP, oy + ch + GAP, cw, ch),
+                ]
+            }
+        }
+    }
+
+    /// Editable `.pptx` for the presenter Style tab: title/body shapes with
+    /// the rotating background, header/body fonts, and contrast text, plus
+    /// real notes slides from the speaker-note paragraphs.
+    fn export_present_pptx_bytes(&self, aspect: PresentAspect) -> Vec<u8> {
+        const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const NS_P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        let (SLD_W, SLD_H) = aspect.pptx_size();
+        fn hex(c: Color32) -> String {
+            format!("{:02X}{:02X}{:02X}", c.r(), c.g(), c.b())
+        }
+        let slides = self.present_slides();
+        let slides: Vec<Slide> = if slides.is_empty() {
+            vec![Slide {
+                title: "(untitled)".to_string(),
+                ..Slide::default()
+            }]
+        } else {
+            slides
+        };
+        let layouts = Self::slide_layouts(&slides);
+        let header_face = Self::escape_xml(
+            &self.present_header_family().unwrap_or_else(|| "Calibri".to_string()),
+        );
+        let body_face = Self::escape_xml(
+            &self.present_body_family().unwrap_or_else(|| "Calibri".to_string()),
+        );
+        // One run of editable text.
+        fn run(
+            text: &str, bold: bool, italic: bool, size_hpt: u32, color: &str,
+            face: &str, _ns_a: &str,
+        ) -> String {
+            let mut pr = format!("<a:rPr sz=\"{size_hpt}\"");
+            if bold {
+                pr.push_str(" b=\"1\"");
+            }
+            if italic {
+                pr.push_str(" i=\"1\"");
+            }
+            pr.push_str(&format!(
+                "><a:solidFill><a:srgbClr val=\"{color}\"/></a:solidFill>\
+                 <a:latin typeface=\"{face}\"/><a:ea typeface=\"{face}\"/>\
+                 <a:cs typeface=\"{face}\"/></a:rPr>"
+            ));
+            let t = WritingApp::escape_xml(text);
+            let space = if text.starts_with(' ') || text.ends_with(' ') {
+                " xml:space=\"preserve\""
+            } else {
+                ""
+            };
+            format!("<a:r>{pr}<a:t{space}>{t}</a:t></a:r>", pr = pr, space = space, t = t)
+        }
+        // One paragraph from inline spans.
+        fn para(
+            spans: &[Span], bold: bool, italic: bool, size_hpt: u32, color: &str,
+            face: &str, _ns_a: &str, bullet: bool, center: bool, level: u8,
+        ) -> String {
+            let mut ppr = format!("<a:pPr lvl=\"{level}\"");
+            if center {
+                ppr.push_str(" algn=\"ctr\"");
+            }
+            ppr.push('>');
+            if bullet {
+                ppr.push_str("<a:buChar char=\"\u{2022}\"/><a:buSzPct val=\"100000\"/>");
+            } else {
+                ppr.push_str("<a:buNone/>");
+            }
+            ppr.push_str("</a:pPr>");
+            let mut runs = String::new();
+            for s in spans {
+                if s.text.is_empty() {
+                    continue;
+                }
+                runs.push_str(&run(
+                    &s.text, bold || s.bold, italic || s.italic, size_hpt, color, face, NS_A,
+                ));
+            }
+            if runs.is_empty() {
+                runs.push_str(&run("", bold, italic, size_hpt, color, face, NS_A));
+            }
+            format!("<a:p>{ppr}{runs}</a:p>", ppr = ppr, runs = runs)
+        }
+        let mut images = ImageStore::default();
+        // Per slide: (slide xml, notes text, image placements).
+        struct PlacedImg {
+            idx: usize,
+            alt: String,
+            x: i64,
+            y: i64,
+            cx: i64,
+            cy: i64,
+            /// Center-crop amounts (1000ths of a percent) for the cover
+            /// behavior the audience window uses: (left, top, right, bottom).
+            crop: (u32, u32, u32, u32),
+        }
+        let mut slide_xmls: Vec<String> = Vec::new();
+        let mut notes_texts: Vec<String> = Vec::new();
+        let mut slide_imgs: Vec<Vec<PlacedImg>> = Vec::new();
+        for (i, slide) in slides.iter().enumerate() {
+            let layout = layouts.get(i).copied().unwrap_or(SlideLayout::Stacked);
+            let scheme = self.slide_scheme(i);
+            let bg_hex = hex(scheme.bg.unwrap_or(self.theme.bg_app()));
+            let bright_hex = hex(scheme.bright);
+            let main_hex = hex(scheme.main);
+            let dim_hex = hex(scheme.dim);
+            let title = if slide.title.is_empty() {
+                "(untitled)".to_string()
+            } else {
+                slide.title.clone()
+            };
+            let title_para = format!(
+                "<a:p><a:pPr algn=\"ctr\"><a:buNone/></a:pPr>{}</a:p>",
+                run(&title, true, false, 3200, &bright_hex, &header_face, NS_A)
+            );
+            let mut body_paras: Vec<String> = Vec::new();
+            let mut img_srcs: Vec<(String, String)> = Vec::new();
+            // True once any real (non-image) visual lands in the body, so
+            // text-free slides skip the body box instead of showing an
+            // empty "Click to add text" placeholder.
+            let mut has_body = false;
+            for block in &slide.visual {
+                match block {
+                    Block::Heading(level, text) => {
+                        let size = match level {
+                            3 => 2400,
+                            4 => 2000,
+                            _ => 2200,
+                        };
+                        body_paras.push(para(
+                            &Self::parse_spans(text), true, false, size,
+                            &bright_hex, &header_face, NS_A, false, false, 0,
+                        ));
+                        has_body = true;
+                    }
+                    Block::Bullet(text) => {
+                        body_paras.push(para(
+                            &Self::parse_spans(text), false, false, 1800,
+                            &main_hex, &body_face, NS_A, true, false, 0,
+                        ));
+                        has_body = true;
+                    }
+                    Block::Numbered(n, text) => {
+                        let mut spans = vec![Span {
+                            text: format!("{n}.  "),
+                            bold: false, italic: false, code: false, href: None,
+                        }];
+                        spans.extend(Self::parse_spans(text));
+                        body_paras.push(para(
+                            &spans, false, false, 1800,
+                            &main_hex, &body_face, NS_A, false, false, 0,
+                        ));
+                        has_body = true;
+                    }
+                    Block::Task(done, text) => {
+                        let mut spans = vec![Span {
+                            text: if *done { "[x]  ".to_string() } else { "[ ]  ".to_string() },
+                            bold: false, italic: false, code: false, href: None,
+                        }];
+                        spans.extend(Self::parse_spans(text));
+                        body_paras.push(para(
+                            &spans, false, false, 1800,
+                            &main_hex, &body_face, NS_A, false, false, 0,
+                        ));
+                        has_body = true;
+                    }
+                    Block::Quote(text) => {
+                        body_paras.push(para(
+                            &Self::parse_spans(text), false, true, 1600,
+                            &dim_hex, &body_face, NS_A, false, false, 0,
+                        ));
+                        has_body = true;
+                    }
+                    Block::Code(code) => {
+                        let mut lines = 0;
+                        for line in code.lines() {
+                            body_paras.push(para(
+                                &Self::parse_spans(line), false, false, 1100,
+                                &main_hex, "Courier New", NS_A, false, false, 0,
+                            ));
+                            lines += 1;
+                        }
+                        if lines > 0 {
+                            has_body = true;
+                        }
+                    }
+                    Block::Hr => {
+                        body_paras.push(format!(
+                            "<a:p><a:pPr algn=\"ctr\"><a:buNone/></a:pPr>{}</a:p>",
+                            run("---", false, false, 1800, &dim_hex, &body_face, NS_A)
+                        ));
+                        has_body = true;
+                    }
+                    Block::Image { alt, src } => img_srcs.push((alt.clone(), src.clone())),
+                    Block::Para(_) => {}
+                }
+            }
+            // Image placement per layout (EMU). `cover` matches the
+            // audience window's center-crop; `fit` matches its contain
+            // behavior for stacked images.
+            let mut placed: Vec<PlacedImg> = Vec::new();
+            let mut place_image = |alt: &str, src: &str, x: i64, y: i64, bw: i64, bh: i64,
+                                   out: &mut Vec<PlacedImg>,
+                                   images: &mut ImageStore,
+                                   cover: bool| {
+                let Some((bytes, kind)) = self.resolve_image_bytes(src) else {
+                    return false;
+                };
+                let (w_px, h_px) = self.image_dimensions_cached(src, &bytes).unwrap_or((800, 600));
+                if w_px == 0 || h_px == 0 {
+                    return false;
+                }
+                let w_emu = w_px as f64 * 9525.0;
+                let h_emu = h_px as f64 * 9525.0;
+                let (ox, oy, cx, cy, crop) = if cover {
+                    // Fill the box, then center-crop the overflow (in
+                    // 1000ths of a percent per side, like the app's
+                    // center-cropped cover images).
+                    let scale = (bw as f64 / w_emu).max(bh as f64 / h_emu).max(0.01);
+                    let sw = w_emu * scale;
+                    let sh = h_emu * scale;
+                    let crop_x = (((sw - bw as f64).max(0.0) / 2.0) / sw * 100_000.0) as u32;
+                    let crop_y = (((sh - bh as f64).max(0.0) / 2.0) / sh * 100_000.0) as u32;
+                    (x.max(0), y.max(0), bw.max(1), bh.max(1), (crop_x, crop_y, crop_x, crop_y))
+                } else {
+                    let mut scale = (bw as f64 / w_emu).min(bh as f64 / h_emu);
+                    scale = scale.min(1.0).max(0.01);
+                    let cx = (w_emu * scale) as i64;
+                    let cy = (h_emu * scale) as i64;
+                    // Center within the box.
+                    let ox = x + (bw - cx) / 2;
+                    let oy = y + (bh - cy) / 2;
+                    (ox.max(0), oy.max(0), cx.max(1), cy.max(1), (0, 0, 0, 0))
+                };
+                let idx = images.add(src, bytes, &kind);
+                out.push(PlacedImg {
+                    idx,
+                    alt: alt.to_string(),
+                    x: ox,
+                    y: oy,
+                    cx,
+                    cy,
+                    crop,
+                });
+                true
+            };
+            match layout {
+                SlideLayout::FullBleed => {
+                    if let Some((alt, src)) = img_srcs.first() {
+                        place_image(
+                            alt, src, 0, 0, SLD_W, SLD_H,
+                            &mut placed, &mut images, true,
+                        );
+                    }
+                }
+                SlideLayout::Split { image_left } => {
+                    let half = SLD_W / 2;
+                    let ix = if image_left { 0i64 } else { half };
+                    let cells = Self::pptx_grid_cells(ix, 0, half, SLD_H, img_srcs.len());
+                    for ((alt, src), (x, y, bw, bh)) in
+                        img_srcs.iter().take(4).zip(cells.iter())
+                    {
+                        place_image(
+                            alt, src, *x, *y, *bw, *bh,
+                            &mut placed, &mut images, true,
+                        );
+                    }
+                }
+                SlideLayout::Grid => {
+                    let cells = Self::pptx_grid_cells(0, 0, SLD_W, SLD_H, img_srcs.len());
+                    for ((alt, src), (x, y, bw, bh)) in
+                        img_srcs.iter().take(4).zip(cells.iter())
+                    {
+                        place_image(
+                            alt, src, *x, *y, *bw, *bh,
+                            &mut placed, &mut images, true,
+                        );
+                    }
+                }
+                SlideLayout::Stacked => {
+                    if !img_srcs.is_empty() {
+                        // Text keeps the top; images share a bottom strip.
+                        let n = img_srcs.len() as i64;
+                        let strip_y = 4_400_000i64;
+                        let strip_h = 2_100_000i64;
+                        let gap = 228_600i64;
+                        let avail_w = SLD_W - 914_400 - gap * (n - 1).max(0);
+                        let cell_w = (avail_w / n.max(1)).max(500_000);
+                        for (k, (alt, src)) in img_srcs.iter().enumerate() {
+                            let x = 457_200 + k as i64 * (cell_w + gap);
+                            place_image(
+                                alt, src, x, strip_y, cell_w, strip_h,
+                                &mut placed, &mut images, false,
+                            );
+                        }
+                    }
+                }
+            }
+            // Shape geometry per layout (derived from the slide size so
+            // both 16:9 and 4:3 keep the same margins and text sizes).
+            let half = SLD_W / 2;
+            let title_w = SLD_W - 914_400;
+            let body_wide = SLD_W - 1_279_200;
+            let split_text_w = (half - 996_000).max(2_000_000);
+            // The title box stays inside the text column on split slides:
+            // a full-width box would run underneath the image and PowerPoint
+            // would clip the title where the picture covers it.
+            let (title_off, title_w, body_off, body_ext) = match layout {
+                SlideLayout::FullBleed => (
+                    (457_200i64, 274_320i64),
+                    body_wide,
+                    (639_600i64, 5_200_000i64),
+                    (body_wide, 1_200_000i64),
+                ),
+                SlideLayout::Split { image_left } => {
+                    let tx = if image_left { half + 304_000i64 } else { 457_200i64 };
+                    let tw = split_text_w + 182_400;
+                    ((tx, 274_320i64), tw, (tx + 182_400, 1_645_920i64), (split_text_w, 4_663_440i64))
+                }
+                SlideLayout::Grid => (
+                    (457_200i64, 274_320i64),
+                    body_wide,
+                    (639_600i64, 5_200_000i64),
+                    (body_wide, 1_200_000i64),
+                ),
+                SlideLayout::Stacked => (
+                    (457_200i64, 274_320i64),
+                    title_w,
+                    (639_600i64, 1_645_920i64),
+                    (body_wide, 2_600_000i64),
+                ),
+            };
+            let mut tree = String::new();
+            tree.push_str(&format!("<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
+                <p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{w}\" cy=\"{h}\"/>\
+                <a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"{w}\" cy=\"{h}\"/></a:xfrm></p:grpSpPr>", w = SLD_W, h = SLD_H));
+            let mut next_id = 2u32;
+            if layout != SlideLayout::FullBleed
+                && layout != SlideLayout::Grid
+                || title != "(untitled)"
+            {
+                if !((layout == SlideLayout::FullBleed || layout == SlideLayout::Grid)
+                    && slide.title.is_empty())
+                {
+                    tree.push_str(&format!(
+                        "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Title\"/>\
+                         <p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr>\
+                         <p:nvPr><p:ph type=\"title\"/></p:nvPr></p:nvSpPr>\
+                         <p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/>\
+                         <a:ext cx=\"{tw}\" cy=\"1097280\"/></a:xfrm>\
+                         <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>\
+                         <p:txBody><a:bodyPr wrap=\"square\" anchor=\"ctr\">\
+                         <a:normAutofit/></a:bodyPr><a:lstStyle/>{title_para}</p:txBody></p:sp>",
+                        id = next_id, x = title_off.0, y = title_off.1, tw = title_w, title_para = title_para,
+                    ));
+                    next_id += 1;
+                }
+            }
+            if has_body {
+                // Split slides vertically center their text on screen, so
+                // center the body within its box too; stacked slides stay
+                // top-anchored like the audience window.
+                let body_anchor = if matches!(layout, SlideLayout::Split { .. }) {
+                    " anchor=\"ctr\""
+                } else {
+                    ""
+                };
+                tree.push_str(&format!(
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Content\"/>\
+                     <p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr>\
+                     <p:nvPr><p:ph type=\"body\"/></p:nvPr></p:nvSpPr>\
+                     <p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/>\
+                     <a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>\
+                     <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>\
+                     <p:txBody><a:bodyPr wrap=\"square\"{body_anchor}><a:normAutofit/></a:bodyPr>\
+                     <a:lstStyle/>{body}</p:txBody></p:sp>",
+                    id = next_id, x = body_off.0, y = body_off.1,
+                    cx = body_ext.0, cy = body_ext.1, body = body_paras.join(""),
+                ));
+                next_id += 1;
+            }
+            for p in &placed {
+                let alt_esc = Self::escape_xml(if p.alt.is_empty() { "image" } else { &p.alt });
+                let src_rect = if p.crop != (0, 0, 0, 0) {
+                    format!(
+                        "<a:srcRect l=\"{}\" t=\"{}\" r=\"{}\" b=\"{}\"/>",
+                        p.crop.0, p.crop.1, p.crop.2, p.crop.3
+                    )
+                } else {
+                    String::new()
+                };
+                tree.push_str(&format!(
+                    "<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"{alt}\"/>\
+                     <p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr>\
+                     <p:nvPr/></p:nvPicPr>\
+                     <p:blipFill><a:blip r:embed=\"rIdImg{img}\">{src_rect}</a:blip>\
+                     <a:stretch><a:fillRect/></a:stretch></p:blipFill>\
+                     <p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/>\
+                     <a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>\
+                     <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>",
+                    id = next_id, alt = alt_esc, img = p.idx, src_rect = src_rect,
+                    x = p.x, y = p.y, cx = p.cx, cy = p.cy,
+                ));
+                next_id += 1;
+            }
+            let slide_xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+                 <p:sld xmlns:a=\"{ns_a}\" xmlns:r=\"{ns_r}\" xmlns:p=\"{ns_p}\">\
+                 <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"{bg}\"/>\
+                 </a:solidFill><a:effectLst/></p:bgPr></p:bg>\
+                 <p:spTree>{tree}</p:spTree></p:cSld>\
+                 <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>",
+                ns_a = NS_A, ns_r = NS_R, ns_p = NS_P, bg = bg_hex, tree = tree,
+            );
+            slide_xmls.push(slide_xml);
+            slide_imgs.push(placed);
+            notes_texts.push(slide.notes_text());
+        }
+        // File assembly.
+        let n = slide_xmls.len();
+        let mut content_types = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+             <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+             <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+             <Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/>\
+             <Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/>\
+             <Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/>\
+             <Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>\
+             <Override PartName=\"/ppt/notesMasters/notesMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml\"/>",
+        );
+        for i in 1..=n {
+            content_types.push_str(&format!(
+                "<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>\
+                 <Override PartName=\"/ppt/notesSlides/notesSlide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml\"/>"
+            ));
+        }
+        let mut seen_ext: Vec<&str> = Vec::new();
+        for img in &images.items {
+            let ext = img.name.rsplit('.').next().unwrap_or("");
+            if !seen_ext.contains(&ext) {
+                seen_ext.push(ext);
+                let mime = match ext {
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    _ => "application/octet-stream",
+                };
+                content_types.push_str(&format!(
+                    "<Default Extension=\"{ext}\" ContentType=\"{mime}\"/>"
+                ));
+            }
+        }
+        content_types.push_str(
+            "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\
+             <Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>\
+             </Types>",
+        );
+        const PKG_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+            <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+            <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/>\
+            <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\
+            <Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" Target=\"docProps/app.xml\"/>\
+            </Relationships>";
+        let mut sld_ids = String::new();
+        for i in 1..=n {
+            sld_ids.push_str(&format!("<p:sldId id=\"{}\" r:id=\"rId{}\"/>", 255 + i, 1 + i));
+        }
+        let notes_master_rid = 2 + n;
+        // Notes slides are discovered through their own rels (each one
+        // points at the notes master and its slide), so the presentation
+        // lists only the single notes master here — never the notes slides.
+        let notes_slide_ids = format!(
+            "<p:notesMasterId r:id=\"rId{notes}\"/>",
+            notes = notes_master_rid
+        );
+        let presentation = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+             <p:presentation xmlns:a=\"{ns_a}\" xmlns:r=\"{ns_r}\" xmlns:p=\"{ns_p}\">\
+             <p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>\
+             <p:notesMasterIdLst>{notes_ids}</p:notesMasterIdLst>\
+             <p:sldIdLst>{sld_ids}</p:sldIdLst>\
+             <p:sldSz cx=\"{w}\" cy=\"{h}\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>",
+            ns_a = NS_A, ns_r = NS_R, ns_p = NS_P,
+            notes_ids = notes_slide_ids, sld_ids = sld_ids, w = SLD_W, h = SLD_H,
+        );
+        let mut pres_rels = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+             <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>",
+        );
+        for i in 1..=n {
+            pres_rels.push_str(&format!(
+                "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{i}.xml\"/>",
+                1 + i
+            ));
+        }
+        pres_rels.push_str(&format!(
+            "<Relationship Id=\"rId{notes}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster\" Target=\"notesMasters/notesMaster1.xml\"/>",
+            notes = notes_master_rid
+        ));
+        pres_rels.push_str("</Relationships>");
+        let slide_master = format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+            <p:sldMaster xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+            <p:cSld><p:bg><p:bgPr/></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{w}\" cy=\"{h}\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"{w}\" cy=\"{h}\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld>\
+            <p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>\
+            <p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz=\"4400\"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr><a:defRPr sz=\"1800\"/></a:lvl1pPr></p:bodyStyle></p:txStyles></p:sldMaster>", w = SLD_W, h = SLD_H);
+        const SLIDE_MASTER_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+            <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+            <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>\
+            <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme\" Target=\"../theme/theme1.xml\"/>\
+            </Relationships>";
+        const SLIDE_LAYOUT: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+            <p:sldLayout xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" type=\"blank\" preserve=\"1\">\
+            <p:cSld name=\"Blank\"><p:bg><p:bgPr/></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld>\
+            <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr><p:timing><p:tnLst/></p:timing></p:sldLayout>";
+        const SLIDE_LAYOUT_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+            <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+            <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"../slideMasters/slideMaster1.xml\"/>\
+            </Relationships>";
+        const THEME: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+            <a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"Ariadne\">\
+            <a:themeElements><a:clrScheme name=\"Office\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"1F2933\"/></a:dk2><a:lt2><a:srgbClr val=\"EEECE1\"/></a:lt2><a:accent1><a:srgbClr val=\"0F2A44\"/></a:accent1><a:accent2><a:srgbClr val=\"84A98C\"/></a:accent2><a:accent3><a:srgbClr val=\"E5989B\"/></a:accent3><a:accent4><a:srgbClr val=\"F2DB6B\"/></a:accent4><a:accent5><a:srgbClr val=\"546A8F\"/></a:accent5><a:accent6><a:srgbClr val=\"D4A373\"/></a:accent6><a:hlink><a:srgbClr val=\"0066CC\"/></a:hlink><a:folHlink><a:srgbClr val=\"800080\"/></a:folHlink></a:clrScheme>\
+            <a:fmtScheme name=\"Office\"><a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>";
+        const NOTES_MASTER: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+            <p:notesMaster xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+            <p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld>\
+            <p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:notesMaster>";
+        const NOTES_MASTER_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+            <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+            <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme\" Target=\"../theme/theme1.xml\"/>\
+            </Relationships>";
+        let title_esc = slides
+            .first()
+            .map(|s| Self::escape_xml(&Self::inferred_title_from_slide(s)))
+            .unwrap_or_else(|| "Ariadne presentation".to_string());
+        let core = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+             <cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>{t}</dc:title><dc:creator>Ariadne</dc:creator></cp:coreProperties>",
+            t = title_esc
+        );
+        let app_xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+             <Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>Ariadne</Application><PresentationFormat>{fmt}</PresentationFormat><Slides>{n}</Slides><Notes>{n}</Notes></Properties>",
+            fmt = match aspect {
+                PresentAspect::SixteenNine => "Widescreen",
+                PresentAspect::FourThree => "On-screen Show (4:3)",
+            },
+            n = n
+        );
+        let mut owned: Vec<(String, Vec<u8>)> = vec![
+            ("[Content_Types].xml".to_string(), content_types.into_bytes()),
+            ("_rels/.rels".to_string(), PKG_RELS.as_bytes().to_vec()),
+            ("ppt/presentation.xml".to_string(), presentation.into_bytes()),
+            ("ppt/_rels/presentation.xml.rels".to_string(), pres_rels.into_bytes()),
+            ("ppt/slideMasters/slideMaster1.xml".to_string(), slide_master.into_bytes()),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels".to_string(), SLIDE_MASTER_RELS.as_bytes().to_vec()),
+            ("ppt/slideLayouts/slideLayout1.xml".to_string(), SLIDE_LAYOUT.as_bytes().to_vec()),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels".to_string(), SLIDE_LAYOUT_RELS.as_bytes().to_vec()),
+            ("ppt/theme/theme1.xml".to_string(), THEME.as_bytes().to_vec()),
+            ("ppt/notesMasters/notesMaster1.xml".to_string(), NOTES_MASTER.as_bytes().to_vec()),
+            ("ppt/notesMasters/_rels/notesMaster1.xml.rels".to_string(), NOTES_MASTER_RELS.as_bytes().to_vec()),
+            ("docProps/core.xml".to_string(), core.into_bytes()),
+            ("docProps/app.xml".to_string(), app_xml.into_bytes()),
+        ];
+        for (k, slide_xml) in slide_xmls.iter().enumerate() {
+            let i = k + 1;
+            owned.push((format!("ppt/slides/slide{i}.xml"), slide_xml.clone().into_bytes()));
+            let mut rels = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>"
+            );
+            for p in &slide_imgs[k] {
+                let ext = images.items[p.idx]
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("png");
+                let mime = match ext {
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    _ => "application/octet-stream",
+                };
+                let _ = mime;
+                rels.push_str(&format!(
+                    "<Relationship Id=\"rIdImg{idx}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/{name}\"/>",
+                    idx = p.idx,
+                    name = images.items[p.idx].name,
+                ));
+            }
+            // The slide points at its notes slide (rId2 is free here:
+            // image rels use the rIdImg prefix), mirroring what
+            // PowerPoint itself writes.
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"../notesSlides/notesSlide{i}.xml\"/>"
+            ));
+            rels.push_str("</Relationships>");
+            owned.push((format!("ppt/slides/_rels/slide{i}.xml.rels"), rels.into_bytes()));
+            // Real notes slide for the speaker notes.
+            let notes = &notes_texts[k];
+            let notes_body = if notes.trim().is_empty() {
+                format!(
+                    "<a:p><a:pPr><a:buNone/></a:pPr>{}</a:p>",
+                    run("", false, false, 1200, "808080", &body_face, NS_A)
+                )
+            } else {
+                notes
+                    .lines()
+                    .map(|line| {
+                        format!(
+                            "<a:p><a:pPr><a:buNone/></a:pPr>{}</a:p>",
+                            run(line, false, false, 1200, "404040", &body_face, NS_A)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            };
+            let notes_slide = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+                 <p:notes xmlns:a=\"{ns_a}\" xmlns:r=\"{ns_r}\" xmlns:p=\"{ns_p}\">\
+                 <p:cSld><p:spTree>\
+                 <p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
+                 <p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/>\
+                 <a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>\
+                 <p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Notes\"/>\
+                 <p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr>\
+                 <p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr>\
+                 <p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/>\
+                 <a:ext cx=\"5943600\" cy=\"7683500\"/></a:xfrm>\
+                 <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>\
+                 <p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>{body}</p:txBody></p:sp>\
+                 </p:spTree></p:cSld>\
+                 <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>",
+                ns_a = NS_A, ns_r = NS_R, ns_p = NS_P, body = notes_body,
+            );
+            owned.push((
+                format!("ppt/notesSlides/notesSlide{i}.xml"),
+                notes_slide.into_bytes(),
+            ));
+            let notes_rels = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster\" Target=\"../notesMasters/notesMaster1.xml\"/>\
+                 <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"../slides/slide{i}.xml\"/>\
+                 </Relationships>"
+            );
+            owned.push((
+                format!("ppt/notesSlides/_rels/notesSlide{i}.xml.rels"),
+                notes_rels.into_bytes(),
+            ));
+        }
+        for img in &images.items {
+            owned.push((format!("ppt/media/{}", img.name), img.bytes.clone()));
+        }
+        let refs: Vec<(&str, &[u8])> = owned
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect();
+        Self::build_zip(&refs)
+    }
+
+    /// Slide title for the PPTX core-properties title: the presented sheet's
+    /// inferred title, without needing the sheet itself.
+    fn inferred_title_from_slide(slide: &Slide) -> String {
+        if slide.title.is_empty() {
+            "Ariadne presentation".to_string()
+        } else {
+            slide.title.clone()
+        }
+    }
+
+    /// Save the presented deck from the Style tab: aspect-sized PDF
+    /// (slides only) or editable PPTX (with real notes slides), styled like
+    /// the audience window.
+    /// Minimal app for the export worker thread: only the fields the
+    /// presenter renderers read are populated; everything else is empty.
+    /// Bytes are byte-identical to the in-app renderers because they call
+    /// the same methods.
+    fn present_export_worker_app(snap: &PresentExportSnapshot) -> WritingApp {
+        let mut theme = ResolvedTheme::default();
+        theme.palette.bg_app = snap.theme_bg;
+        theme.palette.text_bright = snap.theme_bright;
+        theme.palette.text_main = snap.theme_main;
+        theme.palette.text_dim = snap.theme_dim;
+        WritingApp {
+            groups: Vec::new(),
+            sheets: vec![Sheet {
+                id: "export".to_string(),
+                content: snap.content.clone(),
+                group: None,
+                section: Section::Documents,
+                trashed: false,
+                modified: SystemTime::now(),
+                conflict_of: None,
+            }],
+            selection: SidebarSelection::Sheet(0),
+            selected_sheet: 0,
+            selected_sheets: vec![0],
+            export_css: String::new(),
+            export_css_name: "Built-in".to_string(),
+            style_guide_added: false,
+            present_demo_added: false,
+            style_guide_version: 0,
+            attached_fonts: snap.attached_fonts.clone(),
+            attached_images: snap.attached_images.clone(),
+            font_db: None,
+            image_textures: std::collections::HashMap::new(),
+            style_editor: None,
+            export_format: ExportFormat::default(),
+            editor_font_size: 17.0,
+            typewriter: false,
+            focus_mode: false,
+            library_visible: true,
+            sheets_visible: true,
+            word_goal: 0,
+            goals_visible: false,
+            sheets_hover: None,
+            app_theme: AppTheme::default(),
+            theme,
+            custom_themes: Vec::new(),
+            active_custom: None,
+            theme_draft: None,
+            theme_editor: None,
+            editor_font_family: None,
+            icloud_dir: snap.icloud_dir.clone(),
+            loaded_editor_font: None,
+            preview_fonts_queued: std::collections::HashSet::new(),
+            settings_open: false,
+            settings_tab: SettingsTab::default(),
+            goal_draft: String::new(),
+            outline_open: false,
+            swipe_accum_x: 0.0,
+            swipe_accum_y: 0.0,
+            swipe_cooldown_until: 0.0,
+            show_export_popover: false,
+            search_open: false,
+            search_query: String::new(),
+            search_cursor: 0,
+            typewriter_last: None,
+            find_open: false,
+            find_query: String::new(),
+            find_replace: String::new(),
+            find_undo: None,
+            find_case: false,
+            find_index: 0,
+            find_matches: Vec::new(),
+            find_scroll: false,
+            search_focus: false,
+            history_open: false,
+            group_rename: None,
+            group_rename_draft: String::new(),
+            group_rename_focus: false,
+            history: std::collections::HashMap::new(),
+            preview_window_open: false,
+            preview_window_placed: false,
+            present_window_open: false,
+            present_window_placed: false,
+            present_sheet: Some(0),
+            present_index: 0,
+            present_notes_visible: true,
+            present_started_at: None,
+            handout_notes: false,
+            present_colors: snap.present_colors.clone(),
+            present_font_family: None,
+            present_header_font: snap.header_family.clone(),
+            present_body_font: snap.body_family.clone(),
+            present_aspect: snap.aspect,
+            present_tab: PresentTab::default(),
+            coolors_draft: String::new(),
+            preview_cache: PreviewCache::default(),
+            present_slides_cache: None,
+            cached_font_families: None,
+            font_db_rx: None,
+            present_export_rx: None,
+            present_export_pending: None,
+            image_decodes_this_frame: 0,
+            present_image_tx: None,
+            present_image_rx: None,
+            present_image_pending: std::collections::HashSet::new(),
+            present_image_failed: std::collections::HashSet::new(),
+            present_open_ticks: 0,
+            image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            status: String::new(),
+            screenshot_path: None,
+            frame_count: 0,
+            screenshot_requested: false,
+            caret_blink_start: 0.0,
+            caret_key: (usize::MAX, usize::MAX),
+            tombstones: Vec::new(),
+            sync_hashes: std::collections::HashMap::new(),
+            last_sync_check: 0.0,
+            show_conflicts: false,
+            gdrive: GdriveSync::default(),
+            update_state: UpdateState::default(),
+            grammar: GrammarState::default(),
+            last_window_state: None,
+            last_window_save: 0.0,
+            window_t0: None,
+        }
+    }
+
+    /// Snapshot the presenter inputs for the worker thread.
+    fn present_export_snapshot(&self, idx: usize) -> Option<PresentExportSnapshot> {
+        let sheet = self.sheets.get(idx)?;
+        Some(PresentExportSnapshot {
+            content: sheet.content.clone(),
+            aspect: self.present_aspect,
+            header_family: self.present_header_family(),
+            body_family: self.present_body_family(),
+            present_colors: self.present_colors.clone(),
+            theme_bg: self.theme.bg_app(),
+            theme_bright: self.theme.text_bright(),
+            theme_main: self.theme.text_main(),
+            theme_dim: self.theme.text_dim(),
+            attached_images: self.attached_images.clone(),
+            attached_fonts: self.attached_fonts.clone(),
+            icloud_dir: self.icloud_dir.clone(),
+        })
+    }
+
+    /// Whether a presenter export is currently rendering.
+    fn present_export_busy(&self) -> bool {
+        self.present_export_pending.is_some()
+    }
+
+    /// Poll a finished worker export (non-blocking). Shows the save dialog
+    /// on the main thread once bytes are ready.
+    fn poll_present_export(&mut self, _ctx: &egui::Context) {
+        let done = match &self.present_export_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status = "Export failed".to_string();
+                    self.present_export_rx = None;
+                    self.present_export_pending = None;
+                    return;
+                }
+            },
+            None => None,
+        };
+        if let Some(result) = done {
+            self.present_export_rx = None;
+            let pending = self.present_export_pending.take();
+            if result.bytes.is_empty() && !result.pptx {
+                self.status = "Nothing to present".to_string();
+                return;
+            }
+            let (filename, label) = match pending {
+                Some(p) => (p.filename, p.label),
+                None => (result.filename.clone(), if result.pptx { "PowerPoint".to_string() } else { "PDF".to_string() }),
+            };
+            self.write_present_file(&result.bytes, &filename, &label, &result.warnings);
+        }
+    }
+
+    fn do_present_export(&mut self, pptx: bool) {
+        if self.present_export_busy() {
+            self.status = "Export already rendering…".to_string();
+            return;
+        }
+        // Drop a stale finished receiver before starting.
+        if let Some(rx) = &self.present_export_rx {
+            if rx.try_recv().is_ok() {
+                self.present_export_rx = None;
+                self.present_export_pending = None;
+            }
+        }
+        let Some(idx) = self.present_sheet else {
+            self.status = "Nothing to present".to_string();
+            return;
+        };
+        if self.sheets.get(idx).is_none() {
+            self.status = "Nothing to present".to_string();
+            return;
+        }
+        let Some(snap) = self.present_export_snapshot(idx) else {
+            self.status = "Nothing to present".to_string();
+            return;
+        };
+        let stem = Self::export_stem(&self.sheets, &[idx]);
+        let aspect = self.present_aspect;
+        let (filename, label) = if pptx {
+            (format!("{stem}.pptx"), "PowerPoint".to_string())
+        } else {
+            (format!("{stem}.pdf"), "PDF".to_string())
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.present_export_rx = Some(rx);
+        self.present_export_pending = Some(PresentExportPending {
+            pptx,
+            filename: filename.clone(),
+            label: label.clone(),
+        });
+        self.status = format!("Rendering presentation ({label})…");
+        std::thread::spawn(move || {
+            let mut worker = Self::present_export_worker_app(&snap);
+            let (bytes, warnings) = if pptx {
+                (worker.export_present_pptx_bytes(aspect), Vec::new())
+            } else {
+                worker.export_present_pdf_bytes(aspect)
+            };
+            let _ = tx.send(PresentExportResult {
+                pptx,
+                bytes,
+                warnings,
+                filename,
+            });
+        });
+    }
+
+    /// Write finished presenter bytes via a save dialog (or Downloads without
+    /// the dialogs feature), reporting into the status bar.
+    fn write_present_file(
+        &mut self, bytes: &[u8], filename: &str, label: &str, warnings: &[String],
+    ) {
+        #[cfg(feature = "dialogs")]
+        {
+            let mut dialog = rfd::FileDialog::new().set_file_name(filename);
+            dialog = if label == "PDF" {
+                dialog.add_filter("PDF", &["pdf"])
+            } else {
+                dialog.add_filter("PowerPoint", &["pptx"])
+            };
+            match dialog.save_file() {
+                Some(path) => match std::fs::write(&path, bytes) {
+                    Ok(()) => {
+                        self.status = format!("Exported presentation ({label}) to {}", path.display());
+                        Self::append_warnings(&mut self.status, warnings);
+                    }
+                    Err(e) => self.status = format!("Export failed: {e}"),
+                },
+                None => self.status = "Export cancelled".to_string(),
+            }
+        }
+        #[cfg(not(feature = "dialogs"))]
+        {
+            let _ = label;
+            let dir = directories::UserDirs::new()
+                .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
+                .unwrap_or_else(std::env::temp_dir);
+            let path = dir.join(filename);
+            match std::fs::write(&path, bytes) {
+                Ok(()) => {
+                    self.status = format!("Exported presentation to {}", path.display());
+                    Self::append_warnings(&mut self.status, warnings);
+                }
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
     /// The original hand-rolled writer: base-14 fonts, byte-identical output
     /// for exports without embeddable fonts.
     fn render_pdf_legacy(
@@ -10882,8 +12872,21 @@ blockquote {
         dims: (f32, f32),
         margins: [f32; 4],
     ) -> Vec<u8> {
+        Self::render_pdf_legacy_with_bg(pages, dims, &[margins], None)
+    }
+
+    /// Legacy writer with optional per-page solid backgrounds (presenter
+    /// export). `None` keeps the document look byte-identical. Text x
+    /// positions use per-page margins so split slides (narrow text column
+    /// beside images) render where they were laid out.
+    fn render_pdf_legacy_with_bg(
+        pages: &[Vec<PdfPlaced>],
+        dims: (f32, f32),
+        page_margins: &[[f32; 4]],
+        bgs: Option<&[(u8, u8, u8)]>,
+    ) -> Vec<u8> {
         let (page_w, page_h) = dims;
-        let [_, mr, _, ml] = margins;
+        let fallback = page_margins.first().copied().unwrap_or([48.0; 4]);
         let use_color = pages.iter().flat_map(|p| p.iter()).any(|l| match l {
             PdfPlaced::Text(t) => t.3.is_some(),
             PdfPlaced::Image(_) => false,
@@ -10968,7 +12971,21 @@ blockquote {
         for (i, page) in pages.iter().enumerate() {
             let page_id = 9 + 2 * i;
             let content_id = 10 + 2 * i;
-            let mut stream = String::from("BT\n");
+            let [_, mr, _, ml] = page_margins.get(i).copied().unwrap_or(fallback);
+            let mut stream = String::new();
+            if let Some(bgs) = bgs {
+                if let Some(&(r, g, b)) = bgs.get(i) {
+                    stream.push_str(&format!(
+                        "{:.3} {:.3} {:.3} rg 0 0 {} {} re f\n",
+                        r as f32 / 255.0,
+                        g as f32 / 255.0,
+                        b as f32 / 255.0,
+                        page_w,
+                        page_h,
+                    ));
+                }
+            }
+            stream.push_str("BT\n");
             let mut cur_color: Option<(u8, u8, u8)> = None;
             for placed in page {
                 // Unreachable in practice: the planner picks the embedded
@@ -11380,7 +13397,7 @@ blockquote {
                 link_color,
                 bb,
             ));
-            for b in Self::export_blocks(&sheet.content) {
+            for b in self.content_blocks(&sheet.content) {
                 match b {
                     Block::Heading(n, t) => {
                         let style = if n <= 1 {
@@ -11586,7 +13603,7 @@ blockquote {
                 continue;
             };
             let title = Self::inferred_title(&sheet.content);
-            let body = self.blocks_html_fragment(&Self::export_blocks(&sheet.content), &mut images, true);
+            let body = self.blocks_html_fragment(&self.content_blocks(&sheet.content), &mut images, true);
             let chapter = format!(
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>{}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"stylesheet.css\"/></head><body><h1>{}</h1>\n{}</body></html>",
                 Self::escape_xml(&title),
@@ -12171,7 +14188,7 @@ blockquote {
             .filter_map(|i| self.sheets.get(*i))
             .map(|s| PreviewDoc {
                 title: Self::inferred_title(&s.content),
-                blocks: Self::export_blocks(&s.content),
+                blocks: self.content_blocks(&s.content),
             })
             .collect()
     }
@@ -12420,6 +14437,11 @@ blockquote {
     /// Cached texture for an export-preview image, keyed by source so each
     /// file uploads to the GPU once. Missing/unreadable images are `None`
     /// (the preview shows their alt text, like the exports do).
+    /// Shell-first: this never blocks. Cache hits return immediately;
+    /// anything else queues a background decode (after the shell has
+    /// painted) and returns a placeholder until `poll_present_images`
+    /// uploads the finished texture. Exports still read full-res bytes via
+    /// `resolve_image_bytes`, so output quality is unaffected.
     fn export_preview_texture(
         &mut self,
         ctx: &egui::Context,
@@ -12429,17 +14451,194 @@ blockquote {
         if let Some(handle) = self.image_textures.get(&key) {
             return Some(handle.clone());
         }
-        let (bytes, _kind) = self.resolve_image_bytes(src)?;
-        let img = image::load_from_memory(&bytes).map(|d| d.to_rgba8()).ok()?;
-        let (w, h) = (img.width(), img.height());
-        let pixels = img.into_raw();
-        let handle = ctx.load_texture(
-            key.clone(),
-            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels),
-            egui::TextureOptions::LINEAR,
-        );
-        self.image_textures.insert(key, handle.clone());
-        Some(handle)
+        if self.present_image_failed.contains(src) {
+            return None;
+        }
+        if self.present_image_pending.contains(src) {
+            // Decode in flight: keep painting until the upload lands.
+            ctx.request_repaint();
+            return None;
+        }
+        if !self.present_shell_ready() {
+            // Shell not up yet: placeholder this frame, queue after paint.
+            ctx.request_repaint();
+            return None;
+        }
+        self.queue_present_image(src);
+        ctx.request_repaint();
+        None
+    }
+
+    /// Whether the presenter shell has painted and images may be queued.
+    /// True outside presenter mode so the editor/export preview keeps its
+    /// old immediate-queue behavior.
+    fn present_shell_ready(&self) -> bool {
+        if !self.present_window_open {
+            return true;
+        }
+        self.present_open_ticks >= 2
+    }
+
+    /// Start the background presenter-image worker once per run.
+    fn kick_present_image_worker(&mut self) {
+        if self.present_image_tx.is_some() {
+            return;
+        }
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<PresentImageJob>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<PresentDecodedImage>();
+        self.present_image_tx = Some(job_tx);
+        self.present_image_rx = Some(res_rx);
+        std::thread::spawn(move || {
+            while let Ok(job) = job_rx.recv() {
+                let bytes = Self::resolve_image_bytes_uncached(
+                    &job.attached,
+                    job.icloud_dir.as_deref(),
+                    &job.src,
+                )
+                .map(|(b, _)| b);
+                let image = bytes.and_then(|b| image::load_from_memory(&b).ok()).map(
+                    |img| {
+                        let img = if img.width().max(img.height()) > 1600 {
+                            img.thumbnail(1600, 1600)
+                        } else {
+                            img
+                        };
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        (w, h, rgba.into_raw())
+                    },
+                );
+                if res_tx
+                    .send(PresentDecodedImage {
+                        src: job.src,
+                        image,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Queue one `src` for background decode (deduplicated). No-ops when
+    /// already cached, pending, or failed.
+    fn queue_present_image(&mut self, src: &str) {
+        if self.image_textures.contains_key(&format!("ariadne-export-src:{src}"))
+            || self.present_image_pending.contains(src)
+            || self.present_image_failed.contains(src)
+        {
+            return;
+        }
+        self.kick_present_image_worker();
+        let Some(tx) = &self.present_image_tx else {
+            return;
+        };
+        let job = PresentImageJob {
+            src: src.to_string(),
+            attached: self.attached_images.clone(),
+            icloud_dir: self.icloud_dir.clone(),
+        };
+        if tx.send(job).is_ok() {
+            self.present_image_pending.insert(src.to_string());
+        }
+    }
+
+    /// Upload finished background decodes (a few per frame so big uploads
+    /// never jank one frame). Call once per `update`.
+    fn poll_present_images(&mut self, ctx: &egui::Context) {
+        // Drain completed decodes without blocking; cap uploads per frame.
+        let mut uploads = 0;
+        loop {
+            if uploads >= 4 {
+                ctx.request_repaint();
+                break;
+            }
+            let done = match &self.present_image_rx {
+                Some(rx) => rx.try_recv().ok(),
+                None => None,
+            };
+            let Some(res) = done else { break };
+            self.present_image_pending.remove(&res.src);
+            match res.image {
+                Some((w, h, pixels)) if w > 0 && h > 0 => {
+                    let key = format!("ariadne-export-src:{}", res.src);
+                    let handle = ctx.load_texture(
+                        key.clone(),
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            &pixels,
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.image_textures.insert(key, handle);
+                    uploads += 1;
+                }
+                _ => {
+                    self.present_image_failed.insert(res.src);
+                }
+            }
+        }
+        if !self.present_image_pending.is_empty() {
+            ctx.request_repaint();
+        }
+        // Keep the now-unused per-frame counter moving for any external
+        // readers; uploads are capped above instead of decodes.
+        self.image_decodes_this_frame = uploads;
+    }
+
+    /// Image sources for one slide, capped like the renderers (first 4).
+    fn present_slide_image_srcs(slide: &Slide) -> Vec<String> {
+        slide
+            .visual
+            .iter()
+            .filter_map(|b| match b {
+                Block::Image { src, .. } => Some(src.clone()),
+                _ => None,
+            })
+            .take(4)
+            .collect()
+    }
+
+    /// Whether the current slide's images are already uploaded (or proven
+    /// missing, which renders as an instant placeholder). Used to keep the
+    /// filmstrip on cheap summary cards until the audience slide is ready,
+    /// so minis never queue ahead of the first audience paint. Never blocks:
+    /// unqueued `src`s simply read as not-ready.
+    fn present_current_images_ready(&self, slides: &[Slide], index: usize) -> bool {
+        let Some(slide) = slides.get(index.min(slides.len().saturating_sub(1))) else {
+            return true;
+        };
+        Self::present_slide_image_srcs(slide).iter().all(|src| {
+            self.image_textures
+                .contains_key(&format!("ariadne-export-src:{src}"))
+                || self.present_image_failed.contains(src)
+        })
+    }
+
+    /// Queue the current audience slide first, before the console filmstrip
+    /// gets to queue. Call at the top of the presenter console so
+    /// `show_present_windows` (which runs later in the same frame) wins the
+    /// worker queue. Never decodes: just orders the background jobs.
+    fn warm_present_current_images(&mut self, ctx: &egui::Context) {
+        if !self.present_window_open {
+            return;
+        }
+        if !self.present_shell_ready() {
+            ctx.request_repaint();
+            return;
+        }
+        let slides = self.present_slides_cached();
+        if slides.is_empty() {
+            return;
+        }
+        let idx = self.present_index.min(slides.len() - 1);
+        for src in Self::present_slide_image_srcs(&slides[idx]) {
+            self.queue_present_image(&src);
+        }
+        if !self.present_image_pending.is_empty() {
+            ctx.request_repaint();
+        }
     }
 
     /// Render the staged export as styled pages: one continuous paper card
@@ -13320,6 +15519,7 @@ blockquote {
             ("Toggle typewriter scrolling", Some((M::COMMAND | M::ALT, egui::Key::T)), PaletteCommand::ToggleTypewriter),
             ("Toggle focus mode", Some((M::COMMAND | M::ALT, egui::Key::F)), PaletteCommand::ToggleFocus),
             ("Share / export", Some((M::COMMAND, egui::Key::E)), PaletteCommand::Export),
+            ("Present", Some((M::COMMAND, egui::Key::P)), PaletteCommand::Present),
             ("Show history", Some((M::COMMAND, egui::Key::Y)), PaletteCommand::History),
             ("Writing goals", Some((M::COMMAND, egui::Key::G)), PaletteCommand::Goals),
             ("Style suggestions", Some((M::COMMAND, egui::Key::Slash)), PaletteCommand::Style),
@@ -13341,6 +15541,9 @@ blockquote {
             }
             PaletteCommand::Export => {
                 self.show_export_popover = !self.show_export_popover;
+            }
+            PaletteCommand::Present => {
+                self.toggle_present();
             }
             PaletteCommand::Goals => {
                 self.goals_visible = !self.goals_visible;
@@ -15472,6 +17675,7 @@ blockquote {
                                 }
                             });
                         ui.add_space(10.0);
+                        ui.add_space(10.0);
                         ui.label(RichText::new("Output").small().color(self.theme.text_dim()));
                         // Main actions as labeled buttons.
                         let can_act = !targets.is_empty();
@@ -15778,6 +17982,2260 @@ blockquote {
                 Err(e) => self.status = format!("Could not open: {e}"),
             },
             None => self.status = "Could not prepare the preview".to_string(),
+        }
+    }
+}
+
+impl WritingApp {
+    /// Viewport id of the presentation audience window.
+    fn present_viewport_id() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("ariadne-present-audience")
+    }
+
+    /// Live slides for the sheet under presentation, rebuilt every frame so
+    /// edits apply immediately.
+    fn present_slides(&self) -> Vec<Slide> {
+        match self.present_sheet.and_then(|i| self.sheets.get(i)) {
+            Some(sheet) => Self::slides_from_content(&sheet.content),
+            None => Vec::new(),
+        }
+    }
+
+    /// Cheap hash of the presented sheet content for cache invalidation.
+    fn present_content_hash(content: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut h);
+        h.finish()
+    }
+
+    /// Refresh the cached deck when the sheet or its content changed.
+    /// Hashing is O(n) but parsing + allocation is far heavier; no content
+    /// clone is kept.
+    fn refresh_present_cache(&mut self) {
+        let (sheet, hash) = match self.present_sheet.and_then(|i| self.sheets.get(i)) {
+            Some(sheet) => (self.present_sheet, Self::present_content_hash(&sheet.content)),
+            None => (None, 0),
+        };
+        let stale = match &self.present_slides_cache {
+            Some(c) => c.sheet != sheet || c.content_hash != hash,
+            None => true,
+        };
+        if stale {
+            let slides: Vec<Slide> = match self.present_sheet.and_then(|i| self.sheets.get(i)) {
+                Some(sheet) => Self::slides_from_content(&sheet.content),
+                None => Vec::new(),
+            };
+            let layouts = Self::slide_layouts(&slides);
+            self.present_slides_cache = Some(PresentSlidesCache {
+                sheet,
+                content_hash: hash,
+                slides: std::sync::Arc::new(slides),
+                layouts: std::sync::Arc::new(layouts),
+            });
+        }
+    }
+
+    /// Cached slides (cheap `Arc` clone; single parse per content change).
+    fn present_slides_cached(&mut self) -> std::sync::Arc<Vec<Slide>> {
+        self.refresh_present_cache();
+        self.present_slides_cache
+            .as_ref()
+            .map(|c| c.slides.clone())
+            .unwrap_or_default()
+    }
+
+    /// Cached layouts (cheap `Arc` clone; single compute per content change).
+    fn present_layouts_cached(&mut self) -> std::sync::Arc<Vec<SlideLayout>> {
+        self.refresh_present_cache();
+        self.present_slides_cache
+            .as_ref()
+            .map(|c| c.layouts.clone())
+            .unwrap_or_default()
+    }
+
+    /// Cached slide count without cloning the deck.
+    fn present_count_cached(&mut self) -> usize {
+        self.refresh_present_cache();
+        self.present_slides_cache.as_ref().map(|c| c.slides.len()).unwrap_or(0)
+    }
+
+    /// Open or close presentation mode. Opening presents the primary export
+    /// target (the focused sheet, or the first of a multi-selection).
+    fn toggle_present(&mut self) {
+        if self.present_window_open {
+            self.close_present();
+            return;
+        }
+        let targets = self.export_targets();
+        let Some(&sheet) = targets.first() else {
+            self.status = "Nothing to present".to_string();
+            return;
+        };
+        self.present_sheet = Some(sheet);
+        self.present_index = 0;
+        self.present_notes_visible = true;
+        self.present_started_at = None;
+        self.present_window_open = true;
+        self.present_window_placed = false;
+        self.present_tab = PresentTab::Style;
+        // Shell-first: paint text before queuing any image decodes.
+        self.present_open_ticks = 0;
+        self.present_image_pending.clear();
+        self.present_image_failed.clear();
+    }
+
+    fn close_present(&mut self) {
+        self.present_window_open = false;
+        self.present_window_placed = false;
+        self.present_sheet = None;
+        self.present_index = 0;
+        self.present_started_at = None;
+        self.present_tab = PresentTab::Style;
+        self.present_open_ticks = 0;
+    }
+
+    fn present_step(&mut self, delta: isize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let next = self.present_index as isize + delta;
+        self.present_index = next.clamp(0, total as isize - 1) as usize;
+    }
+
+    /// Elapsed presentation time as `mm:ss` (or `h:mm:ss` past an hour).
+    fn present_elapsed(&self, now: f64) -> String {
+        let secs = match self.present_started_at {
+            Some(t) => (now - t).max(0.0) as u64,
+            None => 0,
+        };
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m:02}:{s:02}")
+        }
+    }
+
+    /// Render one slide's title plus visuals (never the speaker notes).
+    /// `scale` grows fonts and spacing for the big audience window.
+    /// One layout per slide: a lone image goes full-bleed, one or more
+    /// images alongside text split the slide (images grid the image half),
+    /// text-free multi-image slides grid the whole slide, alternating the
+    /// image side across split slides so consecutive ones mirror each other.
+    /// Only the first four images render on split/grid slides; the handout
+    /// still shows them all. Speaker notes never affect layout: the audience
+    /// never sees them.
+    fn slide_layouts(slides: &[Slide]) -> Vec<SlideLayout> {
+        let mut splits = 0usize;
+        slides
+            .iter()
+            .map(|s| {
+                let images = s
+                    .visual
+                    .iter()
+                    .filter(|b| matches!(b, Block::Image { .. }))
+                    .count();
+                let has_text = !s.title.is_empty()
+                    || s.visual.iter().any(|b| {
+                        !matches!(b, Block::Image { .. } | Block::Para(_) | Block::Hr)
+                    });
+                if images == 1 && !has_text {
+                    SlideLayout::FullBleed
+                } else if images >= 1 && has_text {
+                    splits += 1;
+                    SlideLayout::Split {
+                        image_left: splits % 2 == 0,
+                    }
+                } else if images >= 2 {
+                    SlideLayout::Grid
+                } else {
+                    SlideLayout::Stacked
+                }
+            })
+            .collect()
+    }
+
+    /// Hex string (`#rrggbb`) for a color, for the persisted style.
+    fn present_color_hex(c: Color32) -> String {
+        format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+    }
+
+    /// Parse a `#rrggbb` hex string (leading `#` optional, case-insensitive).
+    fn present_color_from_hex(s: &str) -> Option<Color32> {
+        let t = s.strip_prefix('#').unwrap_or(s);
+        if t.len() != 6 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let v = u32::from_str_radix(t, 16).ok()?;
+        Some(Color32::from_rgb(
+            ((v >> 16) & 0xff) as u8,
+            ((v >> 8) & 0xff) as u8,
+            (v & 0xff) as u8,
+        ))
+    }
+
+    /// Parse a Coolors palette link such as
+    /// `https://coolors.co/palette/ccd5ae-e9edc9-fefae0-faedcd-d4a373`
+    /// into normalized `#rrggbb` colors (lowercase, capped at 8). Returns
+    /// `None` when no valid codes are found. Pure string parsing: no
+    /// network involved, so it works offline.
+    fn present_colors_from_coolors_link(s: &str) -> Option<Vec<String>> {
+        let t = s.trim();
+        if !t.to_lowercase().contains("coolors.co") {
+            return None;
+        }
+        let lower = t.to_lowercase();
+        let marker = "palette/";
+        let start = lower.find(marker)? + marker.len();
+        // Cut at whitespace, query, fragment, or trailing slash content.
+        let mut end = t.len();
+        for (i, b) in t.bytes().enumerate().skip(start) {
+            if b.is_ascii_whitespace() || b == b'?' || b == b'#' || b == b'/' {
+                end = i;
+                break;
+            }
+        }
+        if end <= start {
+            return None;
+        }
+        let mut out = Vec::new();
+        for seg in t[start..end].split('-') {
+            let hex = seg.strip_prefix('#').unwrap_or(seg);
+            if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                out.push(format!("#{}", hex.to_lowercase()));
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// Custom slide background for one slide index, rotating through the
+    /// style colors (`slide i` uses `colors[i % len]`). `None` when no
+    /// custom colors are set, or when none of them parse.
+    fn slide_bg(&self, index: usize) -> Option<Color32> {
+        let colors: Vec<Color32> = self
+            .present_colors
+            .iter()
+            .filter_map(|s| Self::present_color_from_hex(s))
+            .collect();
+        if colors.is_empty() {
+            return None;
+        }
+        Some(colors[index % colors.len()])
+    }
+
+    /// Paint scheme for one slide: the rotating background (if any) with
+    /// black or white text picked for contrast, else the app theme colors.
+    fn slide_scheme(&self, index: usize) -> SlideScheme {
+        match self.slide_bg(index) {
+            None => {
+                let theme = self.theme;
+                SlideScheme {
+                    bg: None,
+                    bright: theme.text_bright(),
+                    main: theme.text_main(),
+                    dim: theme.text_dim(),
+                }
+            }
+            Some(bg) => {
+                let lum =
+                    (0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32)
+                        / 255.0;
+                // `dim` (quotes, placeholders, counters) is `main` at reduced
+                // alpha instead of a fixed gray: fixed grays vanish on
+                // mid-tone backgrounds (e.g. 1.3:1 on Rainbow `#bd5d5d`),
+                // while blending toward `main` keeps >=3:1 everywhere since
+                // `main` itself is max-contrast. Italics still set quotes
+                // apart from body text.
+                if lum > 0.45 {
+                    SlideScheme {
+                        bg: Some(bg),
+                        bright: Color32::BLACK,
+                        main: Color32::from_rgb(24, 24, 24),
+                        dim: Color32::from_rgba_unmultiplied(24, 24, 24, 225),
+                    }
+                } else {
+                    SlideScheme {
+                        bg: Some(bg),
+                        bright: Color32::WHITE,
+                        main: Color32::WHITE,
+                        dim: Color32::from_rgba_unmultiplied(255, 255, 255, 210),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Static slide scheme for the export worker (no `&self`).
+    fn present_scheme_for(
+        present_colors: &[String],
+        _theme_bg: Color32,
+        theme_bright: Color32,
+        theme_main: Color32,
+        theme_dim: Color32,
+        index: usize,
+    ) -> SlideScheme {
+        let colors: Vec<Color32> = present_colors
+            .iter()
+            .filter_map(|s| Self::present_color_from_hex(s))
+            .collect();
+        let bg = if colors.is_empty() {
+            None
+        } else {
+            Some(colors[index % colors.len()])
+        };
+        match bg {
+            None => SlideScheme {
+                bg: None,
+                bright: theme_bright,
+                main: theme_main,
+                dim: theme_dim,
+            },
+            Some(bg) => {
+                let lum =
+                    (0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32)
+                        / 255.0;
+                if lum > 0.45 {
+                    SlideScheme {
+                        bg: Some(bg),
+                        bright: Color32::BLACK,
+                        main: Color32::from_rgb(24, 24, 24),
+                        dim: Color32::from_rgba_unmultiplied(24, 24, 24, 225),
+                    }
+                } else {
+                    SlideScheme {
+                        bg: Some(bg),
+                        bright: Color32::WHITE,
+                        main: Color32::WHITE,
+                        dim: Color32::from_rgba_unmultiplied(255, 255, 255, 210),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Static font queries for the export worker (takes an explicit db).
+    fn query_system_font_static(
+        db: &fontdb::Database,
+        family: &str,
+        bold: bool,
+    ) -> Option<EmbeddedFont> {
+        let id = db.query(&fontdb::Query {
+            families: &[fontdb::Family::Name(family)],
+            weight: if bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        })?;
+        let (bytes, index) = Self::face_bytes(db, id)?;
+        let info = db.face(id)?;
+        Some(EmbeddedFont {
+            family: info
+                .families
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| family.to_string()),
+            weight: info.weight,
+            bytes,
+            index,
+        })
+    }
+
+    /// Static generic font query for the export worker.
+    fn query_generic_font_static(
+        db: &fontdb::Database,
+        mono: bool,
+        bold: bool,
+    ) -> Option<EmbeddedFont> {
+        let fam = if mono {
+            fontdb::Family::Monospace
+        } else {
+            fontdb::Family::SansSerif
+        };
+        let id = db.query(&fontdb::Query {
+            families: &[fam],
+            weight: if bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        })?;
+        let (bytes, index) = Self::face_bytes(db, id)?;
+        let info = db.face(id)?;
+        Some(EmbeddedFont {
+            family: info
+                .families
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_default(),
+            weight: info.weight,
+            bytes,
+            index,
+        })
+    }
+
+    /// Static attached-font map for the export worker.
+    fn attached_font_map_static(
+        attached_fonts: &[String],
+    ) -> (std::collections::HashMap<String, Vec<EmbeddedFont>>, Vec<String>) {
+        let mut map: std::collections::HashMap<String, Vec<EmbeddedFont>> =
+            std::collections::HashMap::new();
+        let mut problems = Vec::new();
+        for path in attached_fonts {
+            match Self::probe_font_file(path) {
+                Some((_, faces)) => {
+                    for face in faces {
+                        map.entry(Self::font_key(&face.family)).or_default().push(face);
+                    }
+                }
+                None => problems.push(format!("Font file not found or unreadable: {path}")),
+            }
+        }
+        (map, problems)
+    }
+
+    /// Prebuilt slide background palettes (from the author's Coolors
+    /// page). Applying one copies all its colors into the rotating
+    /// custom colors, so slides cycle through the full palette.
+    const PRESENT_THEMES: [(&'static str, [&'static str; 5]); 10] = [
+        (
+            "Evergreen",
+            ["#cad2c5", "#84a98c", "#52796f", "#354f52", "#2f3e46"],
+        ),
+        (
+            "Rosette",
+            ["#ffcdb2", "#ffb4a2", "#e5989b", "#b5838d", "#6d6875"],
+        ),
+        (
+            "Spring",
+            ["#ccd5ae", "#e9edc9", "#fefae0", "#faedcd", "#d4a373"],
+        ),
+        (
+            "Warm",
+            ["#8c1c13", "#bf4342", "#e7d7c1", "#a78a7f", "#735751"],
+        ),
+        (
+            "Neutral",
+            ["#fbfbfb", "#eee4e1", "#e7d8c9", "#e6beae", "#b2967d"],
+        ),
+        (
+            "Lowkey",
+            ["#f6bd60", "#f7ede2", "#f5cac3", "#84a59d", "#f28482"],
+        ),
+        (
+            "Pastel",
+            ["#ff99c8", "#fcf6bd", "#d0f4de", "#a9def9", "#e4c1f9"],
+        ),
+        (
+            "Cobalt",
+            ["#01161e", "#124559", "#598392", "#aec3b0", "#eff6e0"],
+        ),
+        (
+            "Cherry Blossom",
+            ["#724319", "#d88180", "#f7b1b0", "#feeac7", "#cad182"],
+        ),
+        (
+            "Rainbow",
+            ["#bd5d5d", "#f6b46e", "#f2db6b", "#629e55", "#546a8f"],
+        ),
+    ];
+
+    /// Colors for a prebuilt theme by name. Slides rotate through these
+    /// exactly like custom colors.
+    fn present_preset_colors(name: &str) -> Vec<String> {
+        Self::PRESENT_THEMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, cols)| cols.iter().map(|c| c.to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Which prebuilt theme the current custom colors match, if any.
+    /// Empty colors mean "follow the app theme" (`None` here too); callers
+    /// distinguish via `present_colors.is_empty()`.
+    fn present_preset_match(&self) -> Option<&'static str> {
+        if self.present_colors.is_empty() {
+            return None;
+        }
+        Self::PRESENT_THEMES
+            .iter()
+            .find(|(_, cols)| {
+                self.present_colors
+                    == cols.iter().map(|c| c.to_string()).collect::<Vec<_>>()
+            })
+            .map(|(name, _)| *name)
+    }
+
+    /// Effective header font family: the split field, falling back to the
+    /// legacy single font for older saves. `None` = built-in.
+    fn present_header_family(&self) -> Option<String> {
+        self.present_header_font
+            .clone()
+            .or_else(|| self.present_font_family.clone())
+    }
+
+    /// Effective body font family: the split field, falling back to the
+    /// legacy single font for older saves. `None` = built-in.
+    fn present_body_family(&self) -> Option<String> {
+        self.present_body_font
+            .clone()
+            .or_else(|| self.present_font_family.clone())
+    }
+
+    /// egui family for one slide font choice: the chosen system font once
+    /// bound, else the built-in proportional font. Mirrors the export
+    /// preview's queued font loading so a fresh choice can never panic
+    /// the layout.
+    fn present_font_for(
+        &mut self,
+        ctx: &egui::Context,
+        family: Option<String>,
+        slot_prefix: &str,
+    ) -> egui::FontFamily {
+        let Some(family) = family else {
+            return egui::FontFamily::Proportional;
+        };
+        let slot = format!("{slot_prefix} {family}");
+        let named = egui::FontFamily::Name(slot.clone().into());
+        if Self::preview_family_bound(ctx, &named) {
+            return named;
+        }
+        if self.preview_fonts_queued.insert(slot.clone()) {
+            let loaded = self
+                .system_font_db()
+                .and_then(|db| Self::query_regular_face(db, &family));
+            if let Some((bytes, index)) = loaded {
+                Self::merge_font_into_egui(ctx, &slot, bytes, index);
+            }
+        }
+        egui::FontFamily::Proportional
+    }
+
+    /// egui family for slide headers (titles + subheadings).
+    fn present_header_font(&mut self, ctx: &egui::Context) -> egui::FontFamily {
+        let family = self.present_header_family();
+        self.present_font_for(ctx, family, "Present header")
+    }
+
+    /// egui family for slide body text (bullets, quotes, placeholders).
+    fn present_body_font(&mut self, ctx: &egui::Context) -> egui::FontFamily {
+        let family = self.present_body_family();
+        self.present_font_for(ctx, family, "Present body")
+    }
+
+    /// One text visual (heading, list, quote, or code) at presentation size.
+    /// Images, notes, and rules are handled by the caller. Headings use the
+    /// header font, body blocks use the body font; code stays monospace.
+    fn render_text_block(
+        &self,
+        ui: &mut egui::Ui,
+        block: &Block,
+        scale: f32,
+        scheme: &SlideScheme,
+        header_font: &egui::FontFamily,
+        body_font: &egui::FontFamily,
+    ) {
+        match block {
+            Block::Heading(level, text) => {
+                let size = match level {
+                    3 => 28.0,
+                    4 => 24.0,
+                    _ => 20.0,
+                } * scale;
+                ui.label(
+                    RichText::new(Self::heading_plain_text(text))
+                        .font(FontId::new(size, header_font.clone()))
+                        .strong()
+                        .color(scheme.bright),
+                );
+                ui.add_space(4.0 * scale);
+            }
+            Block::Bullet(text) => {
+                ui.label(
+                    RichText::new(format!(
+                        "\u{2022}  {}",
+                        Self::heading_plain_text(text)
+                    ))
+                    .font(FontId::new(24.0 * scale, body_font.clone()))
+                    .color(scheme.main),
+                );
+                ui.add_space(6.0 * scale);
+            }
+            Block::Numbered(n, text) => {
+                ui.label(
+                    RichText::new(format!(
+                        "{n}.  {}",
+                        Self::heading_plain_text(text)
+                    ))
+                    .font(FontId::new(24.0 * scale, body_font.clone()))
+                    .color(scheme.main),
+                );
+                ui.add_space(6.0 * scale);
+            }
+            Block::Task(done, text) => {
+                let box_glyph = if *done { "\u{2611}" } else { "\u{2610}" };
+                ui.label(
+                    RichText::new(format!(
+                        "{box_glyph}  {}",
+                        Self::heading_plain_text(text)
+                    ))
+                    .font(FontId::new(24.0 * scale, body_font.clone()))
+                    .color(scheme.main),
+                );
+                ui.add_space(6.0 * scale);
+            }
+            Block::Quote(text) => {
+                ui.label(
+                    RichText::new(Self::heading_plain_text(text))
+                        .font(FontId::new(24.0 * scale, body_font.clone()))
+                        .italics()
+                        .color(scheme.dim),
+                );
+                ui.add_space(6.0 * scale);
+            }
+            Block::Code(code) => {
+                for line in code.lines() {
+                    ui.label(
+                        RichText::new(line)
+                            .font(FontId::monospace(18.0 * scale))
+                            .color(scheme.main),
+                    );
+                }
+                ui.add_space(6.0 * scale);
+            }
+            Block::Para(_) | Block::Hr | Block::Image { .. } => {}
+        }
+    }
+
+    /// Estimated height of the split-slide text column (title plus text
+    /// visuals, same spacing as `render_slide` uses). egui lays top-down
+    /// children from the top, so `with_main_align(Center)` never centered
+    /// the column — it hugged the top. Measuring up front lets the caller
+    /// pad the top by half the remainder for true vertical centering.
+    /// Wrapping is estimated from character count; close enough that the
+    /// column lands centered within a few points either way.
+    fn estimate_split_text_height(slide: &Slide, content_w: f32, scale: f32) -> f32 {
+        fn wrapped_h(text: &str, font_size: f32, width: f32) -> f32 {
+            if width <= 0.0 {
+                return font_size * 1.3;
+            }
+            let avg_char_w = (font_size * 0.55).max(1.0);
+            let per_line = (width / avg_char_w).max(1.0);
+            let lines = (text.chars().count() as f32 / per_line).ceil().max(1.0);
+            lines * font_size * 1.3
+        }
+        let mut h = if slide.title.is_empty() {
+            22.0 * scale * 1.3
+        } else {
+            wrapped_h(&slide.title, 44.0 * scale, content_w)
+        };
+        let mut has_text = false;
+        for block in &slide.visual {
+            match block {
+                Block::Heading(level, text) => {
+                    let size = match level {
+                        3 => 28.0,
+                        4 => 24.0,
+                        _ => 20.0,
+                    } * scale;
+                    h += 4.0 * scale + wrapped_h(&Self::heading_plain_text(text), size, content_w);
+                    has_text = true;
+                }
+                Block::Bullet(text) => {
+                    let size = 24.0 * scale;
+                    let plain = format!("\u{2022}  {}", Self::heading_plain_text(text));
+                    h += 6.0 * scale + wrapped_h(&plain, size, content_w);
+                    has_text = true;
+                }
+                Block::Numbered(n, text) => {
+                    let size = 24.0 * scale;
+                    let plain = format!("{n}.  {}", Self::heading_plain_text(text));
+                    h += 6.0 * scale + wrapped_h(&plain, size, content_w);
+                    has_text = true;
+                }
+                Block::Task(done, text) => {
+                    let size = 24.0 * scale;
+                    let plain = format!(
+                        "{}  {}",
+                        if *done { "\u{2611}" } else { "\u{2610}" },
+                        Self::heading_plain_text(text)
+                    );
+                    h += 6.0 * scale + wrapped_h(&plain, size, content_w);
+                    has_text = true;
+                }
+                Block::Quote(text) => {
+                    let size = 24.0 * scale;
+                    h += 6.0 * scale
+                        + wrapped_h(&Self::heading_plain_text(text), size, content_w);
+                    has_text = true;
+                }
+                Block::Code(code) => {
+                    let size = 18.0 * scale;
+                    let mut lines = 0.0;
+                    for line in code.lines() {
+                        lines += 1.0;
+                        // Long code lines wrap like the labels do.
+                        if !line.is_empty() {
+                            let avg_char_w = (size * 0.6).max(1.0);
+                            let per_line = (content_w / avg_char_w).max(1.0);
+                            let extra =
+                                (line.chars().count() as f32 / per_line).ceil().max(1.0) - 1.0;
+                            lines += extra.max(0.0);
+                        }
+                    }
+                    h += lines * size * 1.3 + 6.0 * scale;
+                    if lines > 0.0 {
+                        has_text = true;
+                    }
+                }
+                Block::Para(_) | Block::Hr | Block::Image { .. } => {}
+            }
+        }
+        if has_text {
+            h += 14.0 * scale;
+        }
+        h
+    }
+
+    /// Slide title at presentation size (or the untitled marker).
+    /// Uses the header font.
+    fn render_slide_title(
+        &self,
+        ui: &mut egui::Ui,
+        slide: &Slide,
+        scale: f32,
+        scheme: &SlideScheme,
+        header_font: &egui::FontFamily,
+    ) {
+        if slide.title.is_empty() {
+            ui.label(
+                RichText::new("(untitled)")
+                    .font(FontId::new(22.0 * scale, header_font.clone()))
+                    .italics()
+                    .color(scheme.dim),
+            );
+        } else {
+            ui.label(
+                RichText::new(&slide.title)
+                    .font(FontId::new(44.0 * scale, header_font.clone()))
+                    .strong()
+                    .color(scheme.bright),
+            );
+        }
+    }
+
+    /// Missing-image placeholder at presentation size. Uses the body font.
+    fn render_missing_image(
+        &self,
+        ui: &mut egui::Ui,
+        alt: &str,
+        scale: f32,
+        scheme: &SlideScheme,
+        body_font: &egui::FontFamily,
+    ) {
+        ui.label(
+            RichText::new(format!(
+                "[image: {}]",
+                if alt.is_empty() { "untitled" } else { alt }
+            ))
+            .font(FontId::new(18.0 * scale, body_font.clone()))
+            .italics()
+            .color(scheme.dim),
+        );
+    }
+
+    /// Paint `src` center-cropped to fill exactly `target` (like a slide
+    /// background). Allocates precisely `target`, so surrounding layout is
+    /// unaffected — no clip scrollers, no out-of-flow painting.
+    /// `body_font` is only for the missing-image fallback.
+    fn render_cover_image(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        alt: &str,
+        src: &str,
+        target: Vec2,
+        scale: f32,
+        scheme: &SlideScheme,
+        body_font: &egui::FontFamily,
+    ) {
+        match self.export_preview_texture(ctx, src) {
+            Some(handle) => {
+                let native = handle.size_vec2();
+                if native.x <= 0.0 || native.y <= 0.0 {
+                    self.render_missing_image(ui, alt, scale, scheme, body_font);
+                    return;
+                }
+                let (rect, _) = ui.allocate_exact_size(target, egui::Sense::hover());
+                // Cover scale, then the centered source region for that scale.
+                let s = (target.x / native.x).max(target.y / native.y);
+                let need = Vec2::new(target.x / s, target.y / s);
+                let src_min = ((native - need) * 0.5).max(Vec2::ZERO);
+                let uv = egui::Rect::from_min_size(
+                    egui::Pos2::new(src_min.x / native.x, src_min.y / native.y),
+                    Vec2::new(need.x / native.x, need.y / native.y),
+                );
+                ui.painter()
+                    .with_clip_rect(rect)
+                    .image(handle.id(), rect, uv, Color32::WHITE);
+            }
+            None => self.render_missing_image(ui, alt, scale, scheme, body_font),
+        }
+    }
+
+    /// One grid cell: cover image when resolvable, otherwise a fixed-size
+    /// missing-image box so the grid stays aligned.
+    fn render_grid_cell(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        alt: &str,
+        src: &str,
+        size: Vec2,
+        scale: f32,
+        scheme: &SlideScheme,
+        body_font: &egui::FontFamily,
+    ) {
+        if self.export_preview_texture(ctx, src).is_some() {
+            self.render_cover_image(ctx, ui, alt, src, size, scale, scheme, body_font);
+        } else {
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("[image: {}]", if alt.is_empty() { "untitled" } else { alt }),
+                FontId::new((18.0 * scale).max(10.0), body_font.clone()),
+                scheme.dim,
+            );
+        }
+    }
+
+    /// Grid up to four images into `area` (silent first-4): one fills it,
+    /// two split along the shorter side (columns when wide, rows when
+    /// tall), three use two on top plus one full-width below, four form
+    /// a 2x2. Cells tile exactly with no gutters and center-crop, matching
+    /// the full-bleed cover grids of the PDF/PPTX exports.
+    fn render_image_grid(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        images: &[(String, String)],
+        area: Vec2,
+        scale: f32,
+        scheme: &SlideScheme,
+        body_font: &egui::FontFamily,
+    ) {
+        let n = images.len().min(4);
+        if n == 0 {
+            return;
+        }
+        if n == 1 {
+            let (alt, src) = &images[0];
+            self.render_cover_image(ctx, ui, alt, src, area, scale, scheme, body_font);
+            return;
+        }
+        // Exact-fit cells: silence the container's item spacing so the
+        // cells sum to precisely `area` with no slivers between them.
+        let old_spacing = ui.spacing().item_spacing;
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        if n == 2 {
+            // Single divider runs parallel to the shorter side (split the
+            // long axis): wide areas get side-by-side columns, tall areas
+            // get stacked rows. Ties go to columns.
+            if area.x >= area.y {
+                let cw = (area.x / 2.0).max(20.0);
+                let (a0, s0) = &images[0];
+                let (a1, s1) = &images[1];
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    self.render_grid_cell(ctx, ui, a0, s0, Vec2::new(cw, area.y), scale, scheme, body_font);
+                    self.render_grid_cell(ctx, ui, a1, s1, Vec2::new(cw, area.y), scale, scheme, body_font);
+                });
+            } else {
+                let ch = (area.y / 2.0).max(20.0);
+                let (a0, s0) = &images[0];
+                let (a1, s1) = &images[1];
+                self.render_grid_cell(ctx, ui, a0, s0, Vec2::new(area.x, ch), scale, scheme, body_font);
+                self.render_grid_cell(ctx, ui, a1, s1, Vec2::new(area.x, ch), scale, scheme, body_font);
+            }
+            ui.spacing_mut().item_spacing = old_spacing;
+            return;
+        }
+        let cw = (area.x / 2.0).max(20.0);
+        let ch = (area.y / 2.0).max(20.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            let (a0, s0) = &images[0];
+            let (a1, s1) = &images[1];
+            self.render_grid_cell(ctx, ui, a0, s0, Vec2::new(cw, ch), scale, scheme, body_font);
+            self.render_grid_cell(ctx, ui, a1, s1, Vec2::new(cw, ch), scale, scheme, body_font);
+        });
+        if n == 3 {
+            let (a2, s2) = &images[2];
+            self.render_grid_cell(
+                ctx, ui, a2, s2, Vec2::new(area.x, ch), scale, scheme, body_font,
+            );
+        } else {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let (a2, s2) = &images[2];
+                let (a3, s3) = &images[3];
+                self.render_grid_cell(ctx, ui, a2, s2, Vec2::new(cw, ch), scale, scheme, body_font);
+                self.render_grid_cell(ctx, ui, a3, s3, Vec2::new(cw, ch), scale, scheme, body_font);
+            });
+        }
+        ui.spacing_mut().item_spacing = old_spacing;
+    }
+
+    /// Render one slide's title plus visuals (never the speaker notes).
+    /// `layout` comes from [`slide_layouts`](Self::slide_layouts); `row_h`
+    /// is the split row height, measured by the caller where available
+    /// sizes are valid (it's meaningless inside horizontal layouts).
+    /// `index` selects the rotating custom background (`slide i` uses
+    /// `colors[i % len]`) and drives the scheme for the whole slide.
+    fn render_slide(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        slide: &Slide,
+        index: usize,
+        scale: f32,
+        layout: SlideLayout,
+        row_h: f32,
+    ) {
+        let scheme = self.slide_scheme(index);
+        let header_font = self.present_header_font(ctx);
+        let body_font = self.present_body_font(ctx);
+        match layout {
+            SlideLayout::FullBleed => {
+                let target = Vec2::new(
+                    ui.available_width().max(80.0),
+                    ui.available_height().max(80.0),
+                );
+                if let Some((alt, src)) =
+                    slide.visual.iter().find_map(|b| match b {
+                        Block::Image { alt, src } => Some((alt.clone(), src.clone())),
+                        _ => None,
+                    })
+                {
+                    self.render_cover_image(
+                        ctx,
+                        ui,
+                        &alt,
+                        &src,
+                        target,
+                        scale,
+                        &scheme,
+                        &body_font,
+                    );
+                }
+            }
+            SlideLayout::Split { image_left } => {
+                // Text on one side, images gridding the entire other half
+                // edge-to-edge: the row is exactly `row_h` tall (passed in,
+                // measured where available sizes are valid), the text is
+                // vertically centered in its half, images center-crop to
+                // their grid cells. The halves touch with no gap; grid gaps
+                // show the slide background.
+                let half_w = (ui.available_width() / 2.0).max(80.0);
+                let images: Vec<(String, String)> = slide
+                    .visual
+                    .iter()
+                    .filter_map(|b| match b {
+                        Block::Image { alt, src } => Some((alt.clone(), src.clone())),
+                        _ => None,
+                    })
+                    .take(4)
+                    .collect();
+                // Generous side padding so text never touches the slide or
+                // image edges.
+                let pad_l = (half_w * 0.12).max(20.0 * scale);
+                let pad_r = (half_w * 0.05).max(12.0 * scale);
+                let content_w = (half_w - pad_l - pad_r).max(40.0);
+                // True vertical centering: egui's `with_main_align(Center)`
+                // only centers content *within* widgets, not the whole
+                // text column within its half, so top-down layout always
+                // hugged the top. Estimate the text height up front and
+                // pad the top by half the remainder.
+                let text_h = Self::estimate_split_text_height(slide, content_w, scale);
+                let top_pad = ((row_h - text_h) / 2.0).max(0.0);
+                let has_text = slide.visual.iter().any(|b| {
+                    matches!(
+                        b,
+                        Block::Heading(_, _)
+                            | Block::Bullet(_)
+                            | Block::Numbered(_, _)
+                            | Block::Task(_, _)
+                            | Block::Quote(_)
+                            | Block::Code(_)
+                    )
+                });
+                let scheme_c = scheme;
+                let header_c = header_font.clone();
+                let body_c = body_font.clone();
+                let mut text_side = |s: &mut Self, ui: &mut egui::Ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(half_w, row_h),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            ui.add_space(top_pad);
+                            ui.horizontal(|ui| {
+                                ui.add_space(pad_l);
+                                ui.vertical(|ui| {
+                                    ui.set_width(content_w);
+                                    s.render_slide_title(ui, slide, scale, &scheme_c, &header_c);
+                                    if has_text {
+                                        ui.add_space(14.0 * scale);
+                                    }
+                                    for block in &slide.visual {
+                                        s.render_text_block(
+                                            ui,
+                                            block,
+                                            scale,
+                                            &scheme_c,
+                                            &header_c,
+                                            &body_c,
+                                        );
+                                    }
+                                });
+                                // Trailing pad: `pad_r` is subtracted from
+                                // `content_w` above, so it must be allocated
+                                // here or the text column shrinks and the
+                                // image half drifts off the slide edge.
+                                ui.add_space(pad_r);
+                            });
+                        },
+                    );
+                };
+                let scheme_i = scheme;
+                let body_i = body_font.clone();
+                let mut image_side = |s: &mut Self, ui: &mut egui::Ui| {
+                    s.render_image_grid(
+                        ctx,
+                        ui,
+                        &images,
+                        Vec2::new(half_w, row_h),
+                        scale,
+                        &scheme_i,
+                        &body_i,
+                    );
+                };
+                ui.horizontal_top(|ui| {
+                    // No gap between halves: like the exports, the text
+                    // column and the image half touch exactly.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // Each side gets its own vertical child so the columns
+                    // lay out (and advance) independently.
+                    if image_left {
+                        ui.vertical(|ui| {
+                            image_side(self, ui);
+                        });
+                        ui.vertical(|ui| {
+                            text_side(self, ui);
+                        });
+                    } else {
+                        ui.vertical(|ui| {
+                            text_side(self, ui);
+                        });
+                        ui.vertical(|ui| {
+                            image_side(self, ui);
+                        });
+                    }
+                });
+            }
+            SlideLayout::Grid => {
+                // Text-free multi-image: full-slide 2x2 cover grid. Height
+                // is `row_h` (not the full available height) so the
+                // counter strip below survives in the audience window; in
+                // minis `row_h` equals the card height, so they are
+                // unchanged.
+                let target = Vec2::new(
+                    ui.available_width().max(80.0),
+                    row_h.max(80.0),
+                );
+                let images: Vec<(String, String)> = slide
+                    .visual
+                    .iter()
+                    .filter_map(|b| match b {
+                        Block::Image { alt, src } => Some((alt.clone(), src.clone())),
+                        _ => None,
+                    })
+                    .take(4)
+                    .collect();
+                self.render_image_grid(ctx, ui, &images, target, scale, &scheme, &body_font);
+            }
+            SlideLayout::Stacked => {
+                self.render_slide_title(ui, slide, scale, &scheme, &header_font);
+                if !slide.visual.is_empty() {
+                    ui.add_space(14.0 * scale);
+                }
+                for block in &slide.visual {
+                    match block {
+                        Block::Image { alt, src } => {
+                            match self.export_preview_texture(ctx, src) {
+                                Some(handle) => {
+                                    let native = handle.size_vec2();
+                                    let max_w = ui.available_width().max(80.0);
+                                    let max_h = 420.0 * scale;
+                                    let fit = (max_w / native.x)
+                                        .min(max_h / native.y)
+                                        .min(1.0)
+                                        .max(0.05);
+                                    ui.add(
+                                        egui::Image::new(&handle)
+                                            .fit_to_exact_size(native * fit),
+                                    );
+                                }
+                                None => {
+                                    self.render_missing_image(ui, alt, scale, &scheme, &body_font)
+                                }
+                            }
+                            ui.add_space(6.0 * scale);
+                        }
+                        _ => {
+                            self.render_text_block(ui, block, scale, &scheme, &header_font, &body_font)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Audience window contents: the current slide only, edge-to-edge like
+    /// the exports. No counter and no reserved strips: the console shows
+    /// the slide number. Speaker notes never render here.
+    fn render_audience_viewport(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        // Valid here (vertical context): every layout below derives its
+        // sizes from this, never from inside a horizontal row.
+        let avail = ui.available_size();
+        let slides = self.present_slides_cached();
+        let total = slides.len();
+        if total == 0 {
+            ui.centered_and_justified(|ui| {
+                ui.label("Nothing to present.");
+            });
+            return;
+        }
+        if self.present_index >= total {
+            self.present_index = total - 1;
+        }
+        let slide = slides[self.present_index].clone();
+        let layouts = self.present_layouts_cached();
+        let layout = layouts[self.present_index];
+        let slide_idx = self.present_index;
+        let scheme = self.slide_scheme(slide_idx);
+        let body_font = self.present_body_font(ctx);
+        if layout == SlideLayout::FullBleed {
+            // Lone image: cover the whole window edge-to-edge.
+            let target = Vec2::new(avail.x.max(80.0), avail.y.max(80.0));
+            if let Some((alt, src)) =
+                slide.visual.iter().find_map(|b| match b {
+                    Block::Image { alt, src } => Some((alt.clone(), src.clone())),
+                    _ => None,
+                })
+            {
+                self.render_cover_image(ctx, ui, &alt, &src, target, 1.0, &scheme, &body_font);
+            }
+            return;
+        }
+        let scale = (avail.x / 900.0).clamp(0.7, 1.6);
+        if layout != SlideLayout::Stacked {
+            // Split and grid slides fill the whole window edge-to-edge,
+            // exactly like the PDF/PPTX exports.
+            self.render_slide(ctx, ui, &slide, slide_idx, scale, layout, avail.y);
+            return;
+        }
+        // Vertical centering: flexible space above and below the slide.
+        ui.vertical(|ui| {
+            ui.add_space(ui.available_height() * 0.08);
+            ui.horizontal(|ui| {
+                let margin = (ui.available_width() * 0.1).clamp(24.0, 140.0);
+                ui.add_space(margin);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    self.render_slide(ctx, ui, &slide, slide_idx, scale, layout, avail.y);
+                });
+            });
+        });
+    }
+
+    /// Drive the audience window: open centered on the main window, close with
+    /// the OS chrome, keep the elapsed timer ticking.
+    fn show_present_windows(&mut self, ctx: &egui::Context) {
+        if !self.present_window_open {
+            return;
+        }
+        // The audience window only launches on the Slides tab: the Style
+        // tab is for setup (and opening it shouldn't freeze on a second
+        // window). Skipping the viewport here closes it when leaving
+        // Slides, and reopens it when returning.
+        if self.present_tab != PresentTab::Slides {
+            return;
+        }
+        if self.present_started_at.is_none() {
+            self.present_started_at = Some(ctx.input(|i| i.time));
+        }
+        // Tick the console timer about once a second.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        let closed = ctx.input(|i| {
+            i.raw
+                .viewports
+                .get(&Self::present_viewport_id())
+                .map(|v| v.close_requested())
+                .unwrap_or(false)
+        });
+        if closed {
+            self.close_present();
+            return;
+        }
+        let title = match self.present_sheet.and_then(|i| self.sheets.get(i)) {
+            Some(sheet) => format!("Present — {}", Self::inferred_title(&sheet.content)),
+            None => "Present".to_string(),
+        };
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([960.0, 640.0])
+            .with_min_inner_size([480.0, 320.0]);
+        if !self.present_window_placed {
+            if let Some(outer) = ctx.input(|i| i.raw.viewport().outer_rect) {
+                let c = outer.center();
+                builder = builder
+                    .with_position([(c.x - 480.0).max(0.0), (c.y - 320.0).max(0.0)]);
+            }
+            self.present_window_placed = true;
+        }
+        // Fill + margin live on the panel frame itself: CentralPanel
+        // adds its own 8px inset, which would ring bleed images.
+        // Image layouts bleed edge-to-edge like the PDF/PPTX exports;
+        // text-only slides keep the padded look.
+        let (bg, edge_to_edge) = {
+            let total = self.present_count_cached();
+            if total == 0 {
+                (self.theme.bg_app(), false)
+            } else {
+                let idx = self.present_index.min(total - 1);
+                let layouts = self.present_layouts_cached();
+                let edge = matches!(
+                    layouts.get(idx).copied().unwrap_or(SlideLayout::Stacked),
+                    SlideLayout::FullBleed | SlideLayout::Grid | SlideLayout::Split { .. }
+                );
+                (
+                    self.slide_scheme(idx).bg.unwrap_or(self.theme.bg_app()),
+                    edge,
+                )
+            }
+        };
+        ctx.show_viewport_immediate(Self::present_viewport_id(), builder, |vctx, _| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(bg)
+                        .inner_margin(if edge_to_edge {
+                            egui::Margin::same(0)
+                        } else {
+                            egui::Margin::symmetric(32, 24)
+                        }),
+                )
+                .show(vctx, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    // Audience viewport input: arrows/space advance, Esc ends.
+                    if vctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    }) {
+                        self.close_present();
+                        return;
+                    }
+                    let total = self.present_count_cached();
+                    if vctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+                            || i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown)
+                            || i.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                    }) {
+                        self.present_step(1, total);
+                    }
+                    if vctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+                            || i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp)
+                    }) {
+                        self.present_step(-1, total);
+                    }
+                    self.render_audience_viewport(vctx, ui);
+                });
+        });
+    }
+
+    /// Presenter console: replaces the editor in the main window while
+    /// presenting. Opens on the Style tab for setup; the Slides tab shows
+    /// the console plus the audience window. Fills the window: console on
+    /// the left with a teleprompter that takes the leftover height,
+    /// filmstrip in a right column when room permits, else a horizontal
+    /// row below. The Style tab edits the slide theme (font + rotating
+    /// background colors) with a live filmstrip preview.
+    fn show_presenter_console(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        // Audience-first: decode the current slide before the filmstrip
+        // below can spend the frame's image budget, so the separate
+        // audience viewport (rendered later this frame) hits warm textures.
+        self.warm_present_current_images(ctx);
+        let slides = self.present_slides_cached();
+        let total = slides.len();
+        if total == 0 {
+            ui.centered_and_justified(|ui| {
+                ui.label("Nothing to present.");
+                if ui.button("End presentation").clicked() {
+                    self.close_present();
+                }
+            });
+            return;
+        }
+        if self.present_index >= total {
+            self.present_index = total - 1;
+        }
+        let layouts = self.present_layouts_cached();
+        // Tab bar: Style (setup, first) vs Slides (console + audience).
+        ui.horizontal(|ui| {
+            for tab in [PresentTab::Style, PresentTab::Slides] {
+                if ui
+                    .selectable_label(self.present_tab == tab, tab.title())
+                    .clicked()
+                {
+                    self.present_tab = tab;
+                    if tab == PresentTab::Slides {
+                        // (Re)open the audience window centered on the main one.
+                        self.present_window_placed = false;
+                    }
+                }
+            }
+        });
+        ui.separator();
+        ui.add_space(4.0);
+        if self.present_tab == PresentTab::Style {
+            let avail_h = ui.available_height();
+            if ui.available_width() > 1060.0 {
+                let strip_w = 292.0;
+                let main_w = (ui.available_width() - strip_w - 16.0).max(420.0);
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(main_w);
+                        ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.presenter_style(ctx, ui);
+                            });
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_width(280.0);
+                        self.presenter_filmstrip(ctx, ui, slides.as_slice(), layouts.as_slice(), true);
+                    });
+                });
+            } else {
+                let style_h = (avail_h - 220.0).max(200.0);
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(style_h)
+                    .max_height(style_h)
+                    .show(ui, |ui| {
+                        self.presenter_style(ctx, ui);
+                    });
+                ui.add_space(8.0);
+                ui.separator();
+                self.presenter_filmstrip(ctx, ui, slides.as_slice(), layouts.as_slice(), false);
+            }
+            return;
+        }
+        let avail_h = ui.available_height();
+        if ui.available_width() > 1060.0 {
+            let strip_w = 292.0;
+            let main_w = (ui.available_width() - strip_w - 16.0).max(420.0);
+            // Transport, title, next peek, and buttons take ~250pt; the
+            // teleprompter gets everything left over (no upper cap, so the
+            // console fills tall windows instead of leaving dead space).
+            let notes_h = (avail_h - 250.0).max(140.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(main_w);
+                    self.presenter_main(ctx, ui, slides.as_slice(), notes_h);
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.set_width(280.0);
+                    self.presenter_filmstrip(ctx, ui, slides.as_slice(), layouts.as_slice(), true);
+                });
+            });
+        } else {
+            // Teleprompter plus a fixed strip and ~330pt of chrome; the
+            // teleprompter gets everything left over (no upper cap, so the
+            // console fills tall windows instead of leaving dead space).
+            // Short windows clip the strip rather than overlap anything.
+            let notes_h = (avail_h - 470.0).max(120.0);
+            self.presenter_main(ctx, ui, slides.as_slice(), notes_h);
+            ui.add_space(8.0);
+            ui.separator();
+            self.presenter_filmstrip(ctx, ui, slides.as_slice(), layouts.as_slice(), false);
+        }
+    }
+
+    /// Presenter console body: transport bar, current title, teleprompter
+    /// notes, next-slide peek, and Prev/Next buttons. `notes_h` is the fixed
+    /// teleprompter height, sized by the caller to fill the window.
+    fn presenter_main(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        slides: &[Slide],
+        notes_h: f32,
+    ) {
+        let total = slides.len();
+        let index = self.present_index;
+        let theme = self.theme;
+        // Transport bar.
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{}  End", icon::X))
+                .on_hover_text("End presentation (Esc)")
+                .clicked()
+            {
+                self.close_present();
+                return;
+            }
+            ui.label(
+                RichText::new(format!("{} / {total}", index + 1))
+                    .strong()
+                    .color(theme.text_bright()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "{} {}",
+                    icon::CLOCK_COUNTER_CLOCKWISE,
+                    self.present_elapsed(ctx.input(|i| i.time))
+                ))
+                .color(theme.text_dim()),
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let mut visible = self.present_notes_visible;
+                    if ui
+                        .checkbox(&mut visible, "Notes")
+                        .on_hover_text("Show speaker notes here (never on the audience screen)")
+                        .changed()
+                    {
+                        self.present_notes_visible = visible;
+                    }
+                },
+            );
+        });
+        ui.separator();
+        ui.add_space(4.0);
+        // Current slide title.
+        let title = slides[index].title.clone();
+        if title.is_empty() {
+            ui.label(
+                RichText::new("(untitled slide)")
+                    .size(26.0)
+                    .italics()
+                    .color(theme.text_dim()),
+            );
+        } else {
+            ui.label(
+                RichText::new(title)
+                    .size(30.0)
+                    .strong()
+                    .color(theme.text_bright()),
+            );
+        }
+        ui.add_space(6.0);
+        // Speaker notes teleprompter. Fixed height, sized by the caller to
+        // fill the window (never shrink-to-fit: shrink measurement can
+        // disagree with wrapped drawing and let the rows below overlap
+        // long notes). Long notes scroll instead.
+        if self.present_notes_visible {
+            let notes = slides[index].notes_text();
+            ScrollArea::vertical()
+                .id_salt("present-notes")
+                .min_scrolled_height(notes_h)
+                .max_height(notes_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(if notes.is_empty() {
+                            "No notes for this slide.".to_string()
+                        } else {
+                            notes
+                        })
+                        .size(17.0)
+                        .color(theme.text_main()),
+                    );
+                });
+            ui.add_space(4.0);
+        }
+        // Next slide peek.
+        if index + 1 < total {
+            let next_title = slides[index + 1].title.clone();
+            ui.label(
+                RichText::new(format!(
+                    "Next: {}",
+                    if next_title.is_empty() {
+                        "(untitled slide)".to_string()
+                    } else {
+                        next_title
+                    }
+                ))
+                .size(15.0)
+                .color(theme.text_dim()),
+            );
+            ui.add_space(4.0);
+        }
+        // Transport buttons.
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    index > 0,
+                    egui::Button::new(format!("{} Prev", icon::ARROW_LEFT)),
+                )
+                .clicked()
+            {
+                self.present_step(-1, total);
+            }
+            if ui
+                .add_enabled(
+                    index + 1 < total,
+                    egui::Button::new(format!("Next {}", icon::ARROW_RIGHT)),
+                )
+                .clicked()
+            {
+                self.present_step(1, total);
+            }
+        });
+    }
+
+    /// Presenter Style tab: header/body fonts plus rotating background
+    /// colors. Empty colors follow the app theme; otherwise slide `i` uses
+    /// `colors[i % len]`, so multiple colors rotate every slide.
+    fn presenter_style(&mut self, _ctx: &egui::Context, ui: &mut egui::Ui) {
+        let theme = self.theme;
+        // Large Play button: moves to the Slides tab and launches the
+        // audience window.
+        ui.add_space(4.0);
+        if ui
+            .add_sized(
+                egui::Vec2::new(ui.available_width(), 48.0),
+                egui::Button::new(
+                    RichText::new(format!("{}  Play", icon::PLAY))
+                        .size(18.0)
+                        .strong(),
+                ),
+            )
+            .on_hover_text("Start presenting: open the Slides tab and the audience window")
+            .clicked()
+        {
+            self.present_tab = PresentTab::Slides;
+            self.present_window_placed = false;
+        }
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Slide style")
+                .size(22.0)
+                .strong()
+                .color(theme.text_bright()),
+        );
+        ui.label(
+            RichText::new("Fonts and background colors for the audience window and minis.")
+                .small()
+                .color(theme.text_dim()),
+        );
+        ui.add_space(10.0);
+        // Prebuilt color themes from the author's Coolors page. Applying
+        // copies all its colors below; edits afterwards become Custom.
+        ui.label(
+            RichText::new("Color theme")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        ui.label(
+            RichText::new("Prebuilt palettes from Coolors. Applying copies its colors below — tweak them freely afterwards.")
+                .small()
+                .color(theme.text_dim()),
+        );
+        let matched = self.present_preset_match();
+        let selected = if self.present_colors.is_empty() {
+            "App theme".to_string()
+        } else if let Some(name) = matched {
+            name.to_string()
+        } else {
+            "Custom".to_string()
+        };
+        let mut apply_preset: Option<Option<&'static str>> = None;
+        egui::ComboBox::from_id_salt("present color preset")
+            .selected_text(selected)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        self.present_colors.is_empty(),
+                        "App theme",
+                    )
+                    .on_hover_text("Follow the current UI theme")
+                    .clicked()
+                {
+                    apply_preset = Some(None);
+                }
+                for (name, cols) in Self::PRESENT_THEMES {
+                    // Swatch preview: small squares before the name.
+                    let is_sel = matched == Some(name);
+                    ui.horizontal(|ui| {
+                        for hex in cols.iter() {
+                            let c = Self::present_color_from_hex(hex)
+                                .unwrap_or(Color32::GRAY);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::Vec2::splat(12.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(rect, 3.0, c);
+                        }
+                        if ui
+                            .selectable_label(is_sel, name)
+                            .clicked()
+                        {
+                            apply_preset = Some(Some(name));
+                        }
+                    });
+                }
+                if !self.present_colors.is_empty() && matched.is_none()
+                    && ui
+                        .selectable_label(true, "Custom")
+                        .on_hover_text("Your edited colors")
+                        .clicked()
+                {
+                    // Already custom: nothing to apply.
+                }
+            });
+        if let Some(p) = apply_preset {
+            match p {
+                None => {
+                    self.present_colors.clear();
+                    self.save_library();
+                }
+                Some(name) => {
+                    self.present_colors = Self::present_preset_colors(name);
+                    self.save_library();
+                }
+            }
+        }
+        ui.add_space(12.0);
+        // Header + body font pickers. Deferred apply so combo rows stay read-only.
+        let families = self.system_font_families();
+        ui.label(
+            RichText::new("Header font")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        let header_current = self
+            .present_header_family()
+            .unwrap_or_else(|| "Built-in".to_string());
+        let mut apply_header: Option<Option<String>> = None;
+        egui::ComboBox::from_id_salt("present header font")
+            .selected_text(header_current)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        self.present_header_family().is_none(),
+                        "Built-in",
+                    )
+                    .on_hover_text("The default proportional font")
+                    .clicked()
+                {
+                    apply_header = Some(None);
+                }
+                for name in &families {
+                    if ui
+                        .selectable_label(
+                            self.present_header_family().as_deref() == Some(name),
+                            name,
+                        )
+                        .clicked()
+                    {
+                        apply_header = Some(Some(name.clone()));
+                    }
+                }
+            });
+        if let Some(f) = apply_header {
+            self.present_header_font = f;
+            // Legacy field stays empty going forward.
+            self.present_font_family = None;
+            self.save_library();
+        }
+        ui.label(
+            RichText::new("Slide titles and subheadings.")
+                .small()
+                .color(theme.text_dim()),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Body font")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        let body_current = self
+            .present_body_family()
+            .unwrap_or_else(|| "Built-in".to_string());
+        let mut apply_body: Option<Option<String>> = None;
+        egui::ComboBox::from_id_salt("present body font")
+            .selected_text(body_current)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        self.present_body_family().is_none(),
+                        "Built-in",
+                    )
+                    .on_hover_text("The default proportional font")
+                    .clicked()
+                {
+                    apply_body = Some(None);
+                }
+                for name in &families {
+                    if ui
+                        .selectable_label(
+                            self.present_body_family().as_deref() == Some(name),
+                            name,
+                        )
+                        .clicked()
+                    {
+                        apply_body = Some(Some(name.clone()));
+                    }
+                }
+            });
+        if let Some(f) = apply_body {
+            self.present_body_font = f;
+            self.present_font_family = None;
+            self.save_library();
+        }
+        ui.label(
+            RichText::new("Bullets, quotes, and placeholders; code stays monospace.")
+                .small()
+                .color(theme.text_dim()),
+        );
+        ui.add_space(12.0);
+        // Background colors, rotating per slide.
+        ui.label(
+            RichText::new("Background colors")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        ui.label(
+            RichText::new(
+                "Slides rotate through these: slide 1 uses color 1, slide 2 uses color 2, then repeats. Empty = the app theme.",
+            )
+            .small()
+            .color(theme.text_dim()),
+        );
+        ui.add_space(4.0);
+        let mut remove_idx: Option<usize> = None;
+        let mut colors_dirty = false;
+        for i in 0..self.present_colors.len() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{}", i + 1)).small().color(theme.text_dim()));
+                let mut col =
+                    Self::present_color_from_hex(&self.present_colors[i]).unwrap_or(Color32::GRAY);
+                if ui
+                    .color_edit_button_srgba(&mut col)
+                    .on_hover_text("Pick this slide color")
+                    .changed()
+                {
+                    self.present_colors[i] = Self::present_color_hex(col);
+                    colors_dirty = true;
+                }
+                // Hex field for precise edits and paste.
+                let mut hex = self.present_colors[i].clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut hex)
+                        .desired_width(80.0)
+                        .hint_text("#rrggbb"),
+                );
+                if resp.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
+                    let norm = if hex.starts_with('#') {
+                        hex.clone()
+                    } else {
+                        format!("#{hex}")
+                    };
+                    if Self::present_color_from_hex(&norm).is_some() {
+                        self.present_colors[i] = norm;
+                        colors_dirty = true;
+                    } else {
+                        self.status = format!("Invalid color “{hex}” — use #rrggbb");
+                    }
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Remove this color")
+                    .clicked()
+                {
+                    remove_idx = Some(i);
+                }
+            });
+        }
+        if let Some(idx) = remove_idx {
+            self.present_colors.remove(idx);
+            self.save_library();
+        } else if colors_dirty {
+            self.save_library();
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .button("＋ Add color")
+                .on_hover_text("Add another rotating background color")
+                .clicked()
+            {
+                const PRESETS: [&str; 8] = [
+                    "#1f2933", "#0f2a44", "#264653", "#5b2333", "#1e3a2f", "#3d2b56",
+                    "#7a2e2e", "#134e4a",
+                ];
+                let next = PRESETS
+                    .iter()
+                    .find(|p| {
+                        !self
+                            .present_colors
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(*p))
+                    })
+                    .unwrap_or(&PRESETS[0]);
+                self.present_colors.push(next.to_string());
+                self.save_library();
+            }
+            if !self.present_colors.is_empty()
+                && ui
+                    .button("Use app theme")
+                    .on_hover_text("Clear custom colors")
+                    .clicked()
+            {
+                self.present_colors.clear();
+                self.save_library();
+            }
+        });
+        ui.add_space(4.0);
+        // Coolors palette import: paste a coolors.co/palette/… link to
+        // replace the colors above (offline string parsing, no network).
+        ui.label(
+            RichText::new("Import from Coolors")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        ui.label(
+            RichText::new("Paste a palette link, e.g. coolors.co/palette/ccd5ae-e9edc9-fefae0-faedcd-d4a373. Importing replaces the colors above.")
+                .small()
+                .color(theme.text_dim()),
+        );
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.coolors_draft)
+                    .desired_width(220.0)
+                    .hint_text("coolors.co/palette/…"),
+            );
+            let import_clicked = ui
+                .button("Import")
+                .on_hover_text("Replace colors with the linked palette")
+                .clicked();
+            let enter_pressed =
+                resp.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+            if import_clicked || enter_pressed {
+                match Self::present_colors_from_coolors_link(&self.coolors_draft) {
+                    Some(colors) => {
+                        let n = colors.len();
+                        self.present_colors = colors;
+                        self.coolors_draft.clear();
+                        self.save_library();
+                        self.status = format!("Imported {n} colors from Coolors");
+                    }
+                    None => {
+                        self.status = "Couldn't find colors in that link — paste a coolors.co/palette/… link".to_string();
+                    }
+                }
+            }
+        });
+        if !self.present_colors.is_empty() {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} color{}: slide 1 uses {}, slide 2 uses {}, and so on.",
+                    self.present_colors.len(),
+                    if self.present_colors.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    self.present_colors[0],
+                    if self.present_colors.len() > 1 {
+                        self.present_colors[1].as_str()
+                    } else {
+                        self.present_colors[0].as_str()
+                    },
+                ))
+                .small()
+                .color(theme.text_dim()),
+            );
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Export")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        ui.label(
+            RichText::new("Save this deck with the style above: background colors, header/body fonts, and contrast text.")
+                .small()
+                .color(theme.text_dim()),
+        );
+        ui.label(
+            RichText::new("Aspect ratio")
+                .strong()
+                .color(theme.text_bright()),
+        );
+        let aspect_title = self.present_aspect.hint().to_string();
+        let mut apply_aspect: Option<PresentAspect> = None;
+        egui::ComboBox::from_id_salt("present aspect")
+            .selected_text(aspect_title)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for aspect in [PresentAspect::SixteenNine, PresentAspect::FourThree] {
+                    if ui
+                        .selectable_label(self.present_aspect == aspect, aspect.hint())
+                        .on_hover_text(if aspect == PresentAspect::SixteenNine {
+                            "Widescreen slides (13.33×7.5in)"
+                        } else {
+                            "Classic slides (10×7.5in)"
+                        })
+                        .clicked()
+                    {
+                        apply_aspect = Some(aspect);
+                    }
+                }
+            });
+        if let Some(aspect) = apply_aspect {
+            self.present_aspect = aspect;
+            self.save_library();
+        }
+        let aspect_hint = self.present_aspect.title();
+        let busy = self.present_export_busy();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!busy, |ui| {
+                if ui
+                    .button(format!("{} PDF", icon::FILE_PDF))
+                    .on_hover_text(format!("One {aspect_hint} page per slide, no notes"))
+                    .clicked()
+                {
+                    self.do_present_export(false);
+                }
+                if ui
+                    .button(format!("{} PowerPoint", icon::FILE_DOC))
+                    .on_hover_text(format!("Editable {aspect_hint} .pptx with real notes slides"))
+                    .clicked()
+                {
+                    self.do_present_export(true);
+                }
+            });
+            if busy {
+                ui.spinner();
+            }
+        });
+        ui.label(
+            RichText::new("PDF has slides only; PowerPoint includes the speaker notes as real notes slides. Shapes stay editable.")
+                .small()
+                .color(theme.text_dim()),
+        );
+    }
+
+    /// Filmstrip of slide miniatures for jumping anywhere in the deck:
+    /// a right-hand column when `vertical`, a horizontal row otherwise.
+    /// Large decks render lightweight cards (title + summary) instead of
+    /// full slide layouts so opening never lays out hundreds of slides.
+    fn presenter_filmstrip(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        slides: &[Slide],
+        layouts: &[SlideLayout],
+        vertical: bool,
+    ) {
+        let theme = self.theme;
+        let index = self.present_index;
+        ui.label(
+            RichText::new("Slides")
+                .small()
+                .color(theme.text_dim()),
+        );
+        // Full miniature layouts cost a full text layout + image decode
+        // per slide. Past ~40 slides that freezes opening, so use a cheap
+        // summary card (no images, no per-block layout). Also stay simple
+        // until the current audience slide is uploaded, so minis never
+        // steal the decode budget from the first audience paint.
+        let simple = slides.len() > 40 || !self.present_current_images_ready(slides, index);
+        if vertical {
+            ScrollArea::vertical()
+                .id_salt("present-strip-v")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for ((i, slide), layout) in slides.iter().enumerate().zip(layouts) {
+                        if simple {
+                            self.show_slide_card_simple(ui, slide, i, i == index, 248.0);
+                        } else {
+                            self.show_slide_mini(ctx, ui, slide, i, i == index, 248.0, *layout);
+                        }
+                    }
+                });
+        } else {
+            // Bottom row: fixed height so minis never push the layout
+            // around; the strip scrolls horizontally.
+            ScrollArea::horizontal()
+                .id_salt("present-strip-h")
+                .min_scrolled_height(172.0)
+                .max_height(172.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        for ((i, slide), layout) in slides.iter().enumerate().zip(layouts) {
+                            if simple {
+                                self.show_slide_card_simple(ui, slide, i, i == index, 210.0);
+                            } else {
+                                self.show_slide_mini(ctx, ui, slide, i, i == index, 210.0, *layout);
+                            }
+                        }
+                    });
+                });
+        }
+    }
+
+    /// One clickable slide miniature: the real slide rendered small on a
+    /// fixed 16:9 card (traditional PowerPoint ratio), clipped like a slide
+    /// sorter, with the selected slide outlined in the accent color.
+    /// Wrapped in its own vertical layout: minis live in a horizontal
+    /// filmstrip row, and a child Ui inherits the row's horizontal layout
+    /// unless told otherwise — which would lay the slide out as one
+    /// unwrapped line and stretch the card absurdly wide.
+    fn show_slide_mini(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        slide: &Slide,
+        number: usize,
+        selected: bool,
+        width: f32,
+        layout: SlideLayout,
+    ) {
+        ui.vertical(|ui| {
+            self.show_slide_card(ctx, ui, slide, number, selected, width, layout);
+        });
+    }
+
+    /// The miniature slide card itself: number label plus fixed-ratio
+    /// clipped slide. Must run inside a vertical layout (see above).
+    /// Lightweight summary card for large decks: title + visual summary,
+    /// no per-block layout and no image decodes, at the same fixed size so
+    /// the strip scans identically.
+    fn show_slide_card_simple(
+        &mut self,
+        ui: &mut egui::Ui,
+        slide: &Slide,
+        number: usize,
+        selected: bool,
+        width: f32,
+    ) {
+        let theme = self.theme;
+        let scheme = self.slide_scheme(number);
+        ui.label(
+            RichText::new(format!("{}", number + 1))
+                .small()
+                .color(theme.text_dim()),
+        );
+        let card_h = width * 9.0 / 16.0;
+        let card_bg = scheme.bg.unwrap_or(if selected {
+            theme.card_selected()
+        } else {
+            theme.bg_sheets()
+        });
+        let title = if slide.title.is_empty() {
+            "(untitled)".to_string()
+        } else {
+            slide.title.clone()
+        };
+        let visuals = slide.visual.len();
+        let images = slide
+            .visual
+            .iter()
+            .filter(|b| matches!(b, Block::Image { .. }))
+            .count();
+        let summary = if images > 0 && visuals > images {
+            format!("{visuals} blocks · {images} img")
+        } else if images > 0 {
+            format!("{images} image{}", if images == 1 { "" } else { "s" })
+        } else if visuals == 0 {
+            "notes only".to_string()
+        } else {
+            format!("{visuals} block{}", if visuals == 1 { "" } else { "s" })
+        };
+        let frame = egui::Frame::new()
+            .fill(card_bg)
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_width(width);
+                ui.set_min_height(card_h);
+                ui.set_max_height(card_h);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(title)
+                            .strong()
+                            .color(scheme.bright),
+                    );
+                    ui.label(
+                        RichText::new(summary)
+                            .small()
+                            .color(scheme.dim),
+                    );
+                });
+            });
+        let resp = ui.interact(
+            frame.response.rect,
+            egui::Id::new(("present-mini", number)),
+            egui::Sense::click(),
+        );
+        if selected {
+            ui.painter().rect_stroke(
+                frame.response.rect,
+                6.0,
+                egui::Stroke::new(2.0, theme.accent()),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            self.present_index = number;
+        }
+        ui.add_space(6.0);
+    }
+
+    /// The miniature slide card itself: number label plus fixed-ratio
+    /// clipped slide. Must run inside a vertical layout (see above).
+    fn show_slide_card(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        slide: &Slide,
+        number: usize,
+        selected: bool,
+        width: f32,
+        layout: SlideLayout,
+    ) {
+        let theme = self.theme;
+        let scheme = self.slide_scheme(number);
+        ui.label(
+            RichText::new(format!("{}", number + 1))
+                .small()
+                .color(theme.text_dim()),
+        );
+        // Fixed slide ratio: overlong slides clip instead of stretching
+        // the card, so the strip scans like PowerPoint's slide sorter.
+        // Custom colors paint the card itself so the rotation is visible
+        // in the sorter. Image slides bleed to the card edges like the
+        // audience window; text slides keep the padded card look.
+        let card_h = width * 9.0 / 16.0;
+        let card_bg = scheme.bg.unwrap_or(if selected {
+            theme.card_selected()
+        } else {
+            theme.bg_sheets()
+        });
+        let image_layout = !matches!(layout, SlideLayout::Stacked);
+        let frame = egui::Frame::new()
+            .fill(card_bg)
+            .corner_radius(6.0)
+            .inner_margin(if image_layout {
+                egui::Margin::same(0)
+            } else {
+                egui::Margin::symmetric(10, 8)
+            })
+            .show(ui, |ui| {
+                ui.set_width(width);
+                ScrollArea::vertical()
+                    .id_salt(("present-mini-clip", number))
+                    .min_scrolled_width(width)
+                    .max_width(width)
+                    .min_scrolled_height(card_h)
+                    .max_height(card_h)
+                    .auto_shrink([false, false])
+                    .enable_scrolling(false)
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(width);
+                            self.render_slide(ctx, ui, slide, number, 0.25, layout, card_h);
+                        });
+                    });
+            });
+        let resp = ui.interact(
+            frame.response.rect,
+            egui::Id::new(("present-mini", number)),
+            egui::Sense::click(),
+        );
+        if selected {
+            ui.painter().rect_stroke(
+                frame.response.rect,
+                6.0,
+                egui::Stroke::new(2.0, theme.accent()),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            self.present_index = number;
+        }
+        ui.add_space(6.0);
+    }
+
+    /// Keyboard transport for presentation mode. Guarded so typing in the
+    /// find bar, palette, or settings never advances slides.
+    fn present_key_transport(&mut self, ctx: &egui::Context) {
+        if !self.present_window_open
+            || self.find_open
+            || self.search_open
+            || self.settings_open
+        {
+            return;
+        }
+        let total = self.present_count_cached();
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.close_present();
+            return;
+        }
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown)
+        }) {
+            self.present_step(1, total);
+        }
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp)
+        }) {
+            self.present_step(-1, total);
         }
     }
 }
@@ -16114,6 +20572,19 @@ impl eframe::App for WritingApp {
         if self.screenshot_path.is_some() {
             ctx.request_repaint();
         }
+        // New frame: track presenter shell age and warm system fonts
+        // in the background so presenter open never blocks on them.
+        // Images decode on a worker thread and pop in after the shell.
+        self.image_decodes_this_frame = 0;
+        if self.present_window_open {
+            self.present_open_ticks = self.present_open_ticks.saturating_add(1);
+        }
+        self.kick_font_db_load();
+        if self.poll_font_db() {
+            ctx.request_repaint();
+        }
+        self.poll_present_images(ctx);
+        self.poll_present_export(ctx);
         self.track_window_state(ctx);
         self.handle_screenshot(ctx);
         self.handle_dropped_files(ctx);
@@ -16129,9 +20600,9 @@ impl eframe::App for WritingApp {
         // from double-triggering through focused widgets. While the
         // in-document find bar is open its own keys (Enter/Esc) own the
         // keyboard, so the panel shortcuts stay out of the way.
-        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_settings, key_typewriter, key_focus) =
+        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_present, key_settings, key_typewriter, key_focus) =
             if self.find_open {
-                (false, false, false, false, false, false, false, false, false, false)
+                (false, false, false, false, false, false, false, false, false, false, false)
             } else {
                 (
                     ctx.input_mut(|i| {
@@ -16157,6 +20628,9 @@ impl eframe::App for WritingApp {
                     }),
                     ctx.input_mut(|i| {
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)
+                    }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)
                     }),
                     ctx.input_mut(|i| {
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)
@@ -16210,6 +20684,18 @@ impl eframe::App for WritingApp {
                 key,
             )
         };
+        // Presentation transport (arrows/pgup/pgdn/Esc) lives outside the
+        // find-bar guard: it is itself guarded on popups and text fields.
+        self.present_key_transport(ctx);
+        // Docs hook: set ARIADNE_SCREENSHOT_PRESENT=1 with --screenshot to
+        // open present mode from the first frame for screenshots.
+        if self.screenshot_path.is_some()
+            && std::env::var("ARIADNE_SCREENSHOT_PRESENT").is_ok()
+            && !self.present_window_open
+            && self.present_sheet.is_none()
+        {
+            self.toggle_present();
+        }
 
         egui::TopBottomPanel::top("top")
             .frame(
@@ -16379,6 +20865,20 @@ impl eframe::App for WritingApp {
                         {
                             self.show_export_popover = !self.show_export_popover;
                         }
+                        if Self::header_button(
+                            ui,
+                            RichText::new(icon::PRESENTATION).size(17.0),
+                        )
+                        .on_hover_text(if self.present_window_open {
+                            "End presentation".to_string()
+                        } else {
+                            hint_cmd(ui.ctx(), "Present", egui::Key::P)
+                        })
+                        .clicked()
+                            || key_present
+                        {
+                            self.toggle_present();
+                        }
                     });
                 });
             });
@@ -16388,6 +20888,11 @@ impl eframe::App for WritingApp {
         let mods = ctx.input(|i| i.modifiers);
         self.handle_sidebar_swipe(ctx);
         self.maybe_autosnapshot();
+        // Presenting hides both sidebars (session-only: the remembered
+        // flags are untouched, so everything reappears on End exactly as
+        // it was). This also keeps the narrow/wide flip point predictable:
+        // it no longer depends on sidebar widths.
+        let chrome_visible = !self.present_window_open;
         let _ = egui::SidePanel::left("groups")
             .resizable(true)
             .default_width(200.0)
@@ -16396,7 +20901,7 @@ impl eframe::App for WritingApp {
                     .fill(self.theme.bg_sidebar())
                     .inner_margin(egui::Margin::symmetric(8, 2)),
             )
-            .show_animated(ctx, self.library_visible, |ui| {
+            .show_animated(ctx, self.library_visible && chrome_visible, |ui| {
                 #[derive(Clone, Copy)]
                 enum TreeAction {
                     Select(SidebarSelection),
@@ -17064,7 +21569,7 @@ impl eframe::App for WritingApp {
                 egui::Frame::new()
                     .fill(self.theme.bg_sheets())
             )
-            .show_animated(ctx, self.sheets_visible, |ui| {
+            .show_animated(ctx, self.sheets_visible && chrome_visible, |ui| {
                 // Hover paints one frame behind: read last frame's target
                 // while rendering, collect this frame's, commit at the end.
                 let mut hovered_now: Option<SheetHover> = None;
@@ -17538,6 +22043,9 @@ impl eframe::App for WritingApp {
                 });
             frame.show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
+                if self.present_window_open {
+                    self.show_presenter_console(ctx, ui);
+                } else {
                 if self.find_open {
                     self.show_find_bar(ui);
                 }
@@ -17600,6 +22108,7 @@ impl eframe::App for WritingApp {
                         }
                     });
                 }
+                } // else: not presenting — show the editor above.
             });
         });
 
@@ -17611,6 +22120,7 @@ impl eframe::App for WritingApp {
         self.show_theme_editor(ctx);
         self.show_conflicts_popup(ctx);
         self.show_preview_window(ctx);
+        self.show_present_windows(ctx);
         // Window-wide drop hint, painted above everything else.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let theme = self.theme;
@@ -17644,7 +22154,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PresentAspect, PresentTab, PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SlideLayout, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -17837,6 +22347,7 @@ mod tests {
             export_css: String::new(),
             export_css_name: "Built-in".to_string(),
             style_guide_added: false,
+            present_demo_added: false,
             style_guide_version: 0,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
@@ -17850,6 +22361,11 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             typewriter: false,
             focus_mode: false,
             loaded_editor_font: None,
@@ -17884,7 +22400,29 @@ mod tests {
             history: std::collections::HashMap::new(),
             preview_window_open: false,
             preview_window_placed: false,
+            present_window_open: false,
+            present_window_placed: false,
+            present_sheet: None,
+            present_index: 0,
+            present_notes_visible: true,
+            present_started_at: None,
+            handout_notes: false,
+            present_tab: PresentTab::default(),
+            coolors_draft: String::new(),
             preview_cache: PreviewCache::default(),
+            present_slides_cache: None,
+            cached_font_families: None,
+            font_db_rx: None,
+            present_export_rx: None,
+            present_export_pending: None,
+            image_decodes_this_frame: 0,
+            present_image_tx: None,
+            present_image_rx: None,
+            present_image_pending: std::collections::HashSet::new(),
+            present_image_failed: std::collections::HashSet::new(),
+            present_open_ticks: 0,
+            image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             status: String::new(),
             screenshot_path: None,
             frame_count: 0,
@@ -18495,6 +23033,7 @@ mod tests {
             export_css: app.export_css.clone(),
             export_css_name: app.export_css_name.clone(),
             style_guide_added: app.style_guide_added,
+            present_demo_added: app.present_demo_added,
             style_guide_version: app.style_guide_version,
             attached_fonts: app.attached_fonts.clone(),
             attached_images: app.attached_images.clone(),
@@ -18506,6 +23045,11 @@ mod tests {
             word_goal: app.word_goal,
             app_theme: app.app_theme,
             editor_font_family: app.editor_font_family.clone(),
+            present_colors: app.present_colors.clone(),
+            present_font_family: app.present_font_family.clone(),
+            present_header_font: app.present_header_font.clone(),
+            present_body_font: app.present_body_font.clone(),
+            present_aspect: app.present_aspect,
             tombstones: Vec::new(),
             sheet_order: Vec::new(),
             selection_id: None,
@@ -18967,6 +23511,7 @@ mod tests {
             export_css: String::new(),
             export_css_name: "Built-in".to_string(),
             style_guide_added: true,
+            present_demo_added: true,
             style_guide_version: WritingApp::STYLE_GUIDE_VERSION,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
@@ -18980,6 +23525,11 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             typewriter: false,
             focus_mode: false,
             loaded_editor_font: None,
@@ -19014,7 +23564,29 @@ mod tests {
             history: std::collections::HashMap::new(),
             preview_window_open: false,
             preview_window_placed: false,
+            present_window_open: false,
+            present_window_placed: false,
+            present_sheet: None,
+            present_index: 0,
+            present_notes_visible: true,
+            present_started_at: None,
+            handout_notes: false,
+            present_tab: PresentTab::default(),
+            coolors_draft: String::new(),
             preview_cache: PreviewCache::default(),
+            present_slides_cache: None,
+            cached_font_families: None,
+            font_db_rx: None,
+            present_export_rx: None,
+            present_export_pending: None,
+            image_decodes_this_frame: 0,
+            present_image_tx: None,
+            present_image_rx: None,
+            present_image_pending: std::collections::HashSet::new(),
+            present_image_failed: std::collections::HashSet::new(),
+            present_open_ticks: 0,
+            image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             status: String::new(),
             screenshot_path: None,
             frame_count: 0,
@@ -19566,6 +24138,219 @@ mod tests {
             .unwrap();
         let doc_text = String::from_utf8_lossy(&found);
         assert!(doc_text.contains("<w:pgSz w:w=\"12240\" w:h=\"15840\"/>"));
+    }
+
+    #[test]
+    fn present_pptx_has_styled_slides_and_real_notes() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content =
+            "# AlphaTitle\n\n- bullet one\n\nSecretNoteXYZ\n\n## BetaTitle\n\nBody text.\n"
+                .to_string();
+        app.present_sheet = Some(0);
+        app.present_colors = vec!["#123456".to_string()];
+        app.present_header_font = Some("Georgia".to_string());
+        app.present_body_font = Some("Arial".to_string());
+        let pptx = app.export_present_pptx_bytes(PresentAspect::SixteenNine);
+        let entries = parse_stored_zip(&pptx).expect("valid pptx");
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"ppt/slides/slide1.xml"));
+        assert!(names.contains(&"ppt/slides/slide2.xml"));
+        assert!(names.contains(&"ppt/notesSlides/notesSlide1.xml"));
+        let slide1 = entries
+            .iter()
+            .find(|(n, _)| n == "ppt/slides/slide1.xml")
+            .map(|(_, d)| d.clone())
+            .unwrap();
+        let s1 = String::from_utf8_lossy(&slide1);
+        assert!(s1.contains("AlphaTitle"), "slide has title");
+        assert!(s1.contains("bullet one"), "slide has editable bullet");
+        assert!(s1.contains("123456"), "slide uses the Style tab background");
+        assert!(s1.contains("Georgia"), "slide uses the header font");
+        assert!(s1.contains("Arial"), "slide uses the body font");
+        assert!(s1.contains("<p:sp"), "editable shapes");
+        assert!(!s1.contains("SecretNoteXYZ"), "notes stay out of the slide");
+        let notes1 = entries
+            .iter()
+            .find(|(n, _)| n == "ppt/notesSlides/notesSlide1.xml")
+            .map(|(_, d)| d.clone())
+            .unwrap();
+        let n1 = String::from_utf8_lossy(&notes1);
+        assert!(n1.contains("SecretNoteXYZ"), "real notes slide");
+    }
+
+    #[test]
+    fn present_pdf_is_16x9_slides_only() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content =
+            "# AlphaTitle\n\n- bullet one\n\nSecretNoteXYZ\n\n## BetaTitle\n\nBody text.\n"
+                .to_string();
+        app.present_sheet = Some(0);
+        app.present_colors = vec!["#123456".to_string()];
+        let (pdf, warnings) = app.export_present_pdf_bytes(PresentAspect::SixteenNine);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(check_pdf_xref(&pdf));
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/MediaBox [0 0 960 540]"), "16:9 slide size");
+        assert_eq!(text.matches("/Type /Page ").count(), 2, "one page per slide");
+        assert!(text.contains("AlphaTitle"));
+        assert!(text.contains("BetaTitle"));
+        assert!(!text.contains("SecretNoteXYZ"), "notes excluded from PDF");
+    }
+
+    #[test]
+    fn present_exports_support_4x3() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "# SoloTitle\n\n- one\n".to_string();
+        app.present_sheet = Some(0);
+        let (pdf, warnings) = app.export_present_pdf_bytes(PresentAspect::FourThree);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(check_pdf_xref(&pdf));
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/MediaBox [0 0 720 540]"), "4:3 slide size");
+        assert!(text.contains("SoloTitle"));
+        let pptx = app.export_present_pptx_bytes(PresentAspect::FourThree);
+        let entries = parse_stored_zip(&pptx).expect("valid pptx");
+        let presentation = entries
+            .iter()
+            .find(|(n, _)| n == "ppt/presentation.xml")
+            .map(|(_, d)| d.clone())
+            .unwrap();
+        let p = String::from_utf8_lossy(&presentation);
+        assert!(p.contains("<p:sldSz cx=\"9144000\" cy=\"6858000\""), "4:3 slide size");
+    }
+
+    /// Notes slides must be discoverable: exactly one notes-master
+    /// reference in the presentation, and no notes-slide rels at the
+    /// presentation level (each notes slide points at its slide itself).
+    #[test]
+    fn present_pptx_notes_linkage_is_valid() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content =
+            "# T1\n\nNote one.\n\n## T2\n\nNote two.\n".to_string();
+        app.present_sheet = Some(0);
+        let pptx = app.export_present_pptx_bytes(PresentAspect::SixteenNine);
+        let entries = parse_stored_zip(&pptx).expect("valid pptx");
+        let presentation = entries
+            .iter()
+            .find(|(n, _)| n == "ppt/presentation.xml")
+            .map(|(_, d)| d.clone())
+            .unwrap();
+        let p = String::from_utf8_lossy(&presentation);
+        assert_eq!(
+            p.matches("<p:notesMasterId ").count(), 1,
+            "single notes-master reference"
+        );
+        assert!(
+            p.contains("<p:notesMasterId r:id=\"rId4\"/>"),
+            "notes master referenced, got: {p}"
+        );
+        let pres_rels = entries
+            .iter()
+            .find(|(n, _)| n == "ppt/_rels/presentation.xml.rels")
+            .map(|(_, d)| d.clone())
+            .unwrap();
+        let rels = String::from_utf8_lossy(&pres_rels);
+        assert!(!rels.contains("notesSlide"), "no presentation-level notes rels");
+        assert!(
+            rels.contains("Target=\"notesMasters/notesMaster1.xml\""),
+            "notes master reachable"
+        );
+        for i in 1..=2 {
+            let name = format!("ppt/notesSlides/_rels/notesSlide{i}.xml.rels");
+            let nr = entries
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, d)| d.clone())
+                .unwrap();
+            let nrt = String::from_utf8_lossy(&nr);
+            assert!(
+                nrt.contains(&format!("Target=\"../slides/slide{i}.xml\"")),
+                "notes slide {i} points at its slide"
+            );
+            // ECMA-376: the notes part root is p:notes (p:notesSlide
+            // is rejected, silently dropping the notes).
+            let xml_name = format!("ppt/notesSlides/notesSlide{i}.xml");
+            let xml = entries
+                .iter()
+                .find(|(n, _)| *n == xml_name)
+                .map(|(_, d)| d.clone())
+                .unwrap();
+            let xt = String::from_utf8_lossy(&xml);
+            assert!(
+                xt.contains("<p:notes "),
+                "notes part uses the p:notes root"
+            );
+            // Each slide points at its own notes slide, as PowerPoint does.
+            let rel_name = format!("ppt/slides/_rels/slide{i}.xml.rels");
+            let sr = entries
+                .iter()
+                .find(|(n, _)| *n == rel_name)
+                .map(|(_, d)| d.clone())
+                .unwrap();
+            let srt = String::from_utf8_lossy(&sr);
+            assert!(
+                srt.contains(&format!("Target=\"../notesSlides/notesSlide{i}.xml\"")),
+                "slide {i} points at its notes slide"
+            );
+        }
+    }
+
+    /// Split slides must keep the title inside the text column (a
+    /// full-width box hides behind the picture and PowerPoint clips it),
+    /// cover-crop the image like the audience window, and omit the body
+    /// box when there is no body text (no "Click to add text" prompt).
+    #[test]
+    fn present_pptx_split_matches_audience_layout() {
+        let _storage = isolate_storage();
+        // Wide image in the tall half-box: cover-cropping must trim the
+        // sides, exactly like the app's center-cropped cover images.
+        let pixels = image::RgbaImage::from_pixel(200, 100, image::Rgba([200, 100, 50, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        use base64::Engine as _;
+        let uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        );
+        let mut app = sample_app();
+        app.sheets[0].content = format!("# SplitTitle\n\n![desk]({uri})\n");
+        app.present_sheet = Some(0);
+        let pptx = app.export_present_pptx_bytes(PresentAspect::SixteenNine);
+        let entries = parse_stored_zip(&pptx).expect("valid pptx");
+        let slide = entries
+            .iter()
+            .find(|(n, _)| n == "ppt/slides/slide1.xml")
+            .map(|(_, d)| d.clone())
+            .unwrap();
+        let s = String::from_utf8_lossy(&slide);
+        assert!(s.contains("SplitTitle"));
+        // Title box constrained to the left text column (image is on the
+        // right half starting at x=6096000): 457200 + 5282400 = 5739600.
+        assert!(
+            s.contains("<a:off x=\"457200\" y=\"274320\"/><a:ext cx=\"5282400\""),
+            "title stays in the text column, got: {s}"
+        );
+        // No body box at all: nothing for PowerPoint to prompt about.
+        assert!(
+            !s.contains("<p:ph type=\"body\"/>"),
+            "no empty body placeholder"
+        );
+        // Cover-crop: the 2:1 image fills the 0.89:1 half-box by trimming
+        // left and right (l and r nonzero, t and b zero).
+        assert!(s.contains("<a:srcRect"), "cover-crop emitted");
+        let l = s.find("<a:srcRect").unwrap();
+        let rect = &s[l..l + 60];
+        assert!(rect.contains("t=\"0\"") && rect.contains("b=\"0\""), "no vertical crop: {rect}");
+        assert!(!rect.contains("l=\"0\""), "sides cropped: {rect}");
     }
 
     #[test]
@@ -20566,6 +25351,194 @@ mod tests {
     }
 
     #[test]
+    fn present_style_colors_rotate_and_persist() {
+        let _storage = isolate_storage();
+        // Hex parsing is case-insensitive, `#` optional.
+        assert!(WritingApp::present_color_from_hex("#ff0000").is_some());
+        assert!(WritingApp::present_color_from_hex("00FF00").is_some());
+        assert!(WritingApp::present_color_from_hex("#zzz").is_none());
+        assert_eq!(
+            WritingApp::present_color_hex(egui::Color32::from_rgb(1, 2, 3)),
+            "#010203"
+        );
+        // Empty colors fall back to the app theme (no custom bg).
+        let mut app = sample_app();
+        assert!(app.slide_bg(0).is_none());
+        assert!(app.slide_scheme(0).bg.is_none());
+        // Multiple colors rotate per slide index.
+        app.present_colors = vec!["#ff0000".to_string(), "#00ff00".to_string()];
+        assert_eq!(
+            app.slide_bg(0),
+            WritingApp::present_color_from_hex("#ff0000")
+        );
+        assert_eq!(
+            app.slide_bg(1),
+            WritingApp::present_color_from_hex("#00ff00")
+        );
+        assert_eq!(
+            app.slide_bg(2),
+            WritingApp::present_color_from_hex("#ff0000")
+        );
+        // Invalid entries are skipped, not fatal.
+        app.present_colors = vec!["not-a-color".to_string()];
+        assert!(app.slide_bg(0).is_none());
+        // Header/body fonts persist through save/load.
+        app.present_colors = vec!["#123456".to_string(), "#abcdef".to_string()];
+        app.present_header_font = Some("Georgia".to_string());
+        app.present_body_font = Some("Helvetica".to_string());
+        app.present_font_family = None;
+        app.save_library();
+        let back = WritingApp::load_library().expect("reloads");
+        assert_eq!(back.present_colors, vec!["#123456", "#abcdef"]);
+        assert_eq!(back.present_header_font.as_deref(), Some("Georgia"));
+        assert_eq!(back.present_body_font.as_deref(), Some("Helvetica"));
+        // Legacy single font migrates to both header and body.
+        app.present_header_font = None;
+        app.present_body_font = None;
+        app.present_font_family = Some("Georgia".to_string());
+        app.save_library();
+        // Simulate an older save that only has the legacy field: reload
+        // through SavedLibrary JSON with just that field set.
+        let legacy_font = r#"{"version":1,"groups":[],"sheets":[],"selection":{"Group":0},"selected_sheet":0,"present_font_family":"Georgia"}"#;
+        let saved_legacy: SavedLibrary =
+            serde_json::from_str(legacy_font).expect("legacy font parses");
+        assert_eq!(saved_legacy.present_font_family.as_deref(), Some("Georgia"));
+        assert!(saved_legacy.present_header_font.is_none());
+        // Split fields fall back to the legacy font until set.
+        let mut migrated = sample_app();
+        migrated.present_font_family = Some("Georgia".to_string());
+        assert_eq!(
+            migrated.present_header_family().as_deref(),
+            Some("Georgia")
+        );
+        assert_eq!(migrated.present_body_family().as_deref(), Some("Georgia"));
+        migrated.present_header_font = Some("Helvetica".to_string());
+        assert_eq!(
+            migrated.present_header_family().as_deref(),
+            Some("Helvetica")
+        );
+        assert_eq!(migrated.present_body_family().as_deref(), Some("Georgia"));
+        // Legacy saves without the fields stay on the app theme.
+        let legacy = r#"{"version":1,"groups":[],"sheets":[],"selection":{"Group":0},"selected_sheet":0}"#;
+        let saved: SavedLibrary = serde_json::from_str(legacy).expect("legacy parses");
+        assert!(saved.present_colors.is_empty());
+        assert_eq!(saved.present_font_family, None);
+        assert!(saved.present_header_font.is_none());
+        assert!(saved.present_body_font.is_none());
+    }
+
+    #[test]
+    fn present_preset_themes_match_ui_themes() {
+        // Every prebuilt Coolors palette parses and has 5 colors.
+        for (name, cols) in WritingApp::PRESENT_THEMES {
+            assert_eq!(cols.len(), 5, "{name} preset length");
+            for hex in cols {
+                assert!(
+                    WritingApp::present_color_from_hex(hex).is_some(),
+                    "{name} preset color {hex} parses"
+                );
+            }
+            let via_lookup = WritingApp::present_preset_colors(name);
+            assert_eq!(
+                via_lookup,
+                cols.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "{name} lookup round-trips"
+            );
+        }
+        assert!(WritingApp::present_preset_colors("No Such Theme").is_empty());
+        // Applying a preset is detected; editing breaks the match.
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        assert!(app.present_preset_match().is_none());
+        app.present_colors = WritingApp::present_preset_colors("Rosette");
+        assert_eq!(app.present_preset_match(), Some("Rosette"));
+        app.present_colors.push("#123456".to_string());
+        assert!(app.present_preset_match().is_none());
+        app.present_colors.clear();
+        assert!(app.present_preset_match().is_none());
+    }
+
+    /// Dim slide text (quotes, placeholders, counters) must stay readable:
+    /// WCAG large-text floor is 3:1 against its own slide background.
+    /// Fixed grays failed this on mid-tones (1.3:1 on `#bd5d5d`).
+    #[test]
+    fn present_dim_text_contrast_floor() {
+        fn lin(c: f32) -> f32 {
+            let c = c / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn lum(c: egui::Color32) -> f32 {
+            0.2126 * lin(c.r() as f32) + 0.7152 * lin(c.g() as f32) + 0.0722 * lin(c.b() as f32)
+        }
+        fn blended(bg: egui::Color32, fg: egui::Color32) -> egui::Color32 {
+            let a = fg.a() as f32 / 255.0;
+            egui::Color32::from_rgb(
+                (fg.r() as f32 * a + bg.r() as f32 * (1.0 - a)).round() as u8,
+                (fg.g() as f32 * a + bg.g() as f32 * (1.0 - a)).round() as u8,
+                (fg.b() as f32 * a + bg.b() as f32 * (1.0 - a)).round() as u8,
+            )
+        }
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        // Every prebuilt palette color plus mid-tone grays near the
+        // light/dark threshold.
+        let mut hexes: Vec<String> = WritingApp::PRESENT_THEMES
+            .iter()
+            .flat_map(|(_, cols)| cols.iter().map(|c| c.to_string()))
+            .collect();
+        hexes.extend(
+            ["#808080", "#737373", "#8c8c8c", "#bd5d5d", "#84a98c"]
+                .iter()
+                .map(|c| c.to_string()),
+        );
+        for hex in &hexes {
+            let bg = WritingApp::present_color_from_hex(hex).expect("parses");
+            app.present_colors = vec![hex.clone()];
+            let scheme = app.slide_scheme(0);
+            let eff = blended(bg, scheme.dim);
+            let (hi, lo) = (lum(bg).max(lum(eff)), lum(bg).min(lum(eff)));
+            let ratio = (hi + 0.05) / (lo + 0.05);
+            assert!(
+                ratio >= 3.0,
+                "dim contrast {ratio:.2}:1 on {hex} below 3:1 floor"
+            );
+        }
+    }
+
+    #[test]
+    fn present_coolors_link_imports_palette() {
+        // The documented example link yields its 5 colors, normalized.
+        let cols = WritingApp::present_colors_from_coolors_link(
+            "https://coolors.co/palette/ccd5ae-e9edc9-fefae0-faedcd-d4a373",
+        )
+        .expect("example parses");
+        assert_eq!(
+            cols,
+            vec!["#ccd5ae", "#e9edc9", "#fefae0", "#faedcd", "#d4a373"]
+        );
+        // Case-insensitive, trailing slash and query strings tolerated.
+        let cols = WritingApp::present_colors_from_coolors_link(
+            "https://coolors.co/palette/CCD5AE-E9EDC9/?ref=share",
+        )
+        .expect("variants parse");
+        assert_eq!(cols, vec!["#ccd5ae", "#e9edc9"]);
+        // Non-palette pages, bad hex, and non-Coolors text fail.
+        assert!(WritingApp::present_colors_from_coolors_link(
+            "https://coolors.co/color/ccd5ae"
+        )
+        .is_none());
+        assert!(
+            WritingApp::present_colors_from_coolors_link("https://coolors.co/palette/zzzzzz").is_none()
+        );
+        assert!(WritingApp::present_colors_from_coolors_link("not a link").is_none());
+        assert!(WritingApp::present_colors_from_coolors_link("").is_none());
+    }
+
+    #[test]
     fn sheet_hover_states_are_distinct_from_rest_and_selected() {
         // Hover must read as its own state on every theme: different from
         // the resting card and from the selected card.
@@ -20855,6 +25828,384 @@ mod tests {
         let long = format!("# {}", "x".repeat(70));
         let blocks = WritingApp::export_blocks(&long);
         assert!(matches!(&blocks[0], Block::Heading(1, _)));
+    }
+
+    #[test]
+    fn slides_split_headings_and_rules() {
+        // `#` and `##` each start a slide: titles on slides, paragraphs as
+        // speaker notes, lists and images as visuals.
+        let slides = WritingApp::slides_from_content(
+            "# Intro\n\nSay hello.\n\n- point one\n\n![Desk](attachment:abc)\n\n## Next\n\nMore notes.\n",
+        );
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].title, "Intro");
+        assert_eq!(slides[0].notes.len(), 1);
+        assert!(matches!(&slides[0].notes[0], Block::Para(t) if t == "Say hello."));
+        assert_eq!(slides[0].visual.len(), 2);
+        assert!(matches!(&slides[0].visual[0], Block::Bullet(t) if t == "point one"));
+        assert!(matches!(&slides[0].visual[1], Block::Image { .. }));
+        assert_eq!(slides[1].title, "Next");
+        assert_eq!(slides[1].notes_text(), "More notes.");
+        // `---` forces an untitled split; `###` stays inside the slide.
+        let slides = WritingApp::slides_from_content("# A\n\n---\n\n### Sub\n\nBody\n");
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].title, "A");
+        assert!(slides[1].title.is_empty());
+        assert!(matches!(&slides[1].visual[0], Block::Heading(3, t) if t == "Sub"));
+        assert_eq!(slides[1].notes_text(), "Body");
+        // No headings: one slide titled with the inferred title.
+        let slides = WritingApp::slides_from_content("Just notes.\n");
+        assert_eq!(slides.len(), 1);
+        assert_eq!(slides[0].title, "Just notes.");
+        assert_eq!(slides[0].notes_text(), "Just notes.");
+    }
+
+    #[test]
+    fn handout_blocks_group_slides_with_notes() {
+        let blocks = WritingApp::handout_blocks("# Intro\n\nSay hello.\n\n- point\n\n## Next\n\nMore.\n");
+        // Slide 1 section: h2 title, bullet visual, note paragraph.
+        assert!(matches!(&blocks[0], Block::Heading(2, t) if t.contains("Intro") && t.contains("slide 1 of 2")));
+        assert!(matches!(&blocks[1], Block::Bullet(t) if t == "point"));
+        assert!(matches!(&blocks[2], Block::Para(t) if t == "Say hello."));
+        // Slide 2 section after a rule.
+        assert!(matches!(&blocks[3], Block::Hr));
+        assert!(matches!(&blocks[4], Block::Heading(2, t) if t.contains("Next") && t.contains("slide 2 of 2")));
+        assert!(matches!(&blocks[5], Block::Para(t) if t == "More."));
+    }
+
+    #[test]
+    fn handout_toggle_flows_into_html() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "# Intro\n\nSay hello.\n".to_string();
+        let plain = app.export_html(&[0]);
+        assert!(plain.contains("Say hello."));
+        assert!(!plain.contains("slide 1 of 1"));
+        app.handout_notes = true;
+        let handout = app.export_html(&[0]);
+        assert!(handout.contains("Say hello."));
+        assert!(handout.contains("slide 1 of 1"));
+    }
+
+    /// Audience-window bleed guard: images must tile the window exactly
+    /// (full-bleed cover, split halves touching, grid cells gapless),
+    /// with no counter strip or panel insets reserving space.
+    #[test]
+    fn present_audience_images_bleed_edge_to_edge() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 50, 50, 255]));
+        let mut bytes = Vec::new();
+        {
+            let mut cur = std::io::Cursor::new(&mut bytes);
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut cur, image::ImageFormat::Png)
+                .unwrap();
+        }
+        use base64::Engine as _;
+        let uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+        let render_images = |app: &mut WritingApp| {
+            let ctx = egui::Context::default();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(960.0, 640.0),
+                )),
+                ..Default::default()
+            };
+            // Pump the background decode worker until the queued image
+            // uploads (or fails), then render the final frame. Shell-first
+            // means the first frame is a placeholder by design.
+            let mut rects = Vec::new();
+            for _ in 0..200 {
+                let output = ctx.run(raw.clone(), |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::new()
+                                .fill(app.theme.bg_app())
+                                .inner_margin(egui::Margin::same(0)),
+                        )
+                        .show(ctx, |ui| {
+                            ui.set_min_size(ui.available_size());
+                            app.render_audience_viewport(ctx, ui);
+                        });
+                });
+                app.poll_present_images(&ctx);
+                rects.clear();
+                for clipped in &output.shapes {
+                    if let egui::Shape::Mesh(mesh) = &clipped.shape {
+                        if mesh.texture_id != egui::TextureId::default() {
+                            rects.push(mesh.calc_bounds());
+                        }
+                    }
+                }
+                // Break only once the upload has painted: the poll above
+                // lands after this frame's shapes were produced, so a
+                // just-drained queue still needs one more run to show.
+                if !rects.is_empty() {
+                    break;
+                }
+                if app.present_image_pending.is_empty() {
+                    // No job in flight and still no image: give the worker
+                    // a beat to pick up the queue, then re-render. After a
+                    // bounded wait the asserts below report the failure.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            rects
+        };
+        // Full-bleed lone image covers the whole window.
+        app.sheets[0].content = format!("# Deck\n\n---\n\n![red]({uri})\n");
+        app.present_sheet = Some(0);
+        app.present_index = 1;
+        app.present_tab = PresentTab::Slides;
+        let rects = render_images(&mut app);
+        assert_eq!(rects.len(), 1, "one cover image, got {rects:?}");
+        let r = rects[0];
+        assert!((r.min.x - 0.0).abs() < 0.5, "left bleeds: {r:?}");
+        assert!((r.min.y - 0.0).abs() < 0.5, "top bleeds: {r:?}");
+        assert!((r.max.x - 960.0).abs() < 0.5, "right bleeds: {r:?}");
+        assert!((r.max.y - 640.0).abs() < 0.5, "bottom fills (no counter strip): {r:?}");
+        // Split: image covers exactly the right half, touching the text.
+        app.sheets[0].content = format!("# Title here\n\n![red]({uri})\n");
+        app.present_sheet = Some(0);
+        app.present_index = 0;
+        app.present_slides_cache = None;
+        app.image_decodes_this_frame = 0;
+        let rects = render_images(&mut app);
+        assert_eq!(rects.len(), 1, "one split image, got {rects:?}");
+        let r = rects[0];
+        assert!((r.min.x - 480.0).abs() < 0.5, "image starts at midline: {r:?}");
+        assert!((r.max.x - 960.0).abs() < 0.5, "right bleeds: {r:?}");
+        assert!((r.max.y - 640.0).abs() < 0.5, "bottom fills: {r:?}");
+        // Grid pair: cells tile with no sliver between them.
+        app.sheets[0].content = format!("# Deck\n\n---\n\n![a]({uri})\n\n![b]({uri})\n");
+        app.present_sheet = Some(0);
+        app.present_index = 1;
+        app.present_slides_cache = None;
+        app.image_decodes_this_frame = 0;
+        let mut rects = render_images(&mut app);
+        assert_eq!(rects.len(), 2, "two grid cells, got {rects:?}");
+        rects.sort_by(|a, b| a.min.x.partial_cmp(&b.min.x).unwrap());
+        assert!((rects[0].min.x - 0.0).abs() < 0.5, "left bleeds: {rects:?}");
+        assert!((rects[1].max.x - 960.0).abs() < 0.5, "right bleeds: {rects:?}");
+        assert!(
+            (rects[1].min.x - rects[0].max.x).abs() < 0.5,
+            "no sliver between cells: {rects:?}"
+        );
+        assert!((rects[0].max.y - 640.0).abs() < 0.5, "cells fill height: {rects:?}");
+    }
+
+    #[test]
+    fn slide_layouts_fullbleed_split_and_alternation() {
+        // Lone image, no title: full-bleed.
+        let slides = WritingApp::slides_from_content("---\n\n![Solo](attachment:a)\n");
+        assert_eq!(slides.len(), 1);
+        assert_eq!(WritingApp::slide_layouts(&slides), vec![SlideLayout::FullBleed]);
+        // Image plus bullets: split, image right first, then mirrored.
+        let slides = WritingApp::slides_from_content(
+            "# A\n\n- one\n\n![One](attachment:a)\n\n# B\n\n![Two](attachment:b)\n\n- two\n\n# C\n\nJust text.\n",
+        );
+        assert_eq!(slides.len(), 3);
+        assert_eq!(
+            WritingApp::slide_layouts(&slides),
+            vec![
+                SlideLayout::Split { image_left: false },
+                SlideLayout::Split { image_left: true },
+                SlideLayout::Stacked,
+            ]
+        );
+        // Two images plus text: split grid (title counts as the text side).
+        let slides = WritingApp::slides_from_content("# A\n\n![One](attachment:a)\n\n![Two](attachment:b)\n");
+        assert_eq!(
+            WritingApp::slide_layouts(&slides),
+            vec![SlideLayout::Split { image_left: false }]
+        );
+        // Two images, no text at all: full-slide grid.
+        let slides = WritingApp::slides_from_content("---\n\n![One](attachment:a)\n\n![Two](attachment:b)\n");
+        assert_eq!(WritingApp::slide_layouts(&slides), vec![SlideLayout::Grid]);
+        // No image at all: stacked.
+        let slides = WritingApp::slides_from_content("# A\n\nJust text.\n");
+        assert_eq!(WritingApp::slide_layouts(&slides), vec![SlideLayout::Stacked]);
+        // Title plus a lone image splits (title is the text side).
+        let slides = WritingApp::slides_from_content("# A\n\n![One](attachment:a)\n");
+        assert_eq!(
+            WritingApp::slide_layouts(&slides),
+            vec![SlideLayout::Split { image_left: false }]
+        );
+    }
+
+    #[test]
+    fn slide_layouts_grid_and_split_mirroring() {
+        // Three images plus text: split, alternating side preserved.
+        let slides = WritingApp::slides_from_content(
+            "# A\n\n- one\n\n![1](attachment:a)\n\n![2](attachment:b)\n\n![3](attachment:c)\n\n# B\n\n- two\n\n![4](attachment:d)\n\n![5](attachment:e)\n",
+        );
+        assert_eq!(slides.len(), 2);
+        assert_eq!(
+            WritingApp::slide_layouts(&slides),
+            vec![
+                SlideLayout::Split { image_left: false },
+                SlideLayout::Split { image_left: true },
+            ]
+        );
+        // Four text-free images: grid; five still grid (silent first-4).
+        let slides = WritingApp::slides_from_content(
+            "---\n\n![1](attachment:a)\n\n![2](attachment:b)\n\n![3](attachment:c)\n\n![4](attachment:d)\n",
+        );
+        assert_eq!(WritingApp::slide_layouts(&slides), vec![SlideLayout::Grid]);
+        let slides = WritingApp::slides_from_content(
+            "---\n\n![1](attachment:a)\n\n![2](attachment:b)\n\n![3](attachment:c)\n\n![4](attachment:d)\n\n![5](attachment:e)\n",
+        );
+        assert_eq!(WritingApp::slide_layouts(&slides), vec![SlideLayout::Grid]);
+        // Grid cell geometry mirrors the on-screen grid.
+        let cells = WritingApp::pptx_grid_cells(0, 0, 1000, 1000, 1);
+        assert_eq!(cells, vec![(0, 0, 1000, 1000)]);
+        // Two images split along the shorter side: wide areas (and ties)
+        // get columns, tall areas get rows.
+        let wide = WritingApp::pptx_grid_cells(0, 0, 12_192_000, 6_858_000, 2);
+        assert_eq!(wide.len(), 2);
+        assert!(wide[0].2 < 12_192_000, "wide area splits into columns");
+        assert_eq!(wide[0].3, 6_858_000);
+        assert_eq!(wide[1].0, wide[0].0 + wide[0].2 + 114_300);
+        let square = WritingApp::pptx_grid_cells(0, 0, 6_858_000, 6_858_000, 2);
+        assert!(square[0].2 < 6_858_000, "ties go to columns");
+        let tall = WritingApp::pptx_grid_cells(0, 0, 6_096_000, 6_858_000, 2);
+        assert_eq!(tall.len(), 2);
+        assert_eq!(tall[0].2, 6_096_000, "tall area stacks into rows");
+        assert_eq!(tall[1].1, tall[0].1 + tall[0].3 + 114_300);
+        let cells = WritingApp::pptx_grid_cells(0, 0, 1000, 1000, 4);
+        assert_eq!(cells.len(), 4);
+        assert_eq!(cells[0].2, cells[1].2);
+        assert_eq!(cells[0].3, cells[2].3);
+    }
+
+    #[test]
+    fn present_demo_backfills_once_and_respects_delete() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        // sample_app predates the demo: backfill appends it exactly once.
+        assert!(!app.present_demo_added);
+        assert!(app.ensure_present_demo());
+        assert!(app.present_demo_added);
+        let count = app
+            .sheets
+            .iter()
+            .filter(|s| WritingApp::inferred_title(&s.content) == "Write First, Present Later")
+            .count();
+        assert_eq!(count, 1);
+        assert!(!app.ensure_present_demo());
+        // Deleting it afterwards is respected: never re-added.
+        app.sheets
+            .retain(|s| WritingApp::inferred_title(&s.content) != "Write First, Present Later");
+        assert!(!app.ensure_present_demo());
+        // A hand-pasted copy is claimed, not duplicated.
+        app.present_demo_added = false;
+        app.sheets.push(Sheet {
+            section: Section::Documents,
+            id: new_sheet_id(),
+            conflict_of: None,
+            content: "# Write First, Present Later\n\nMy own notes.\n".to_string(),
+            group: Some(0),
+            trashed: false,
+            modified: SystemTime::now(),
+        });
+        assert!(app.ensure_present_demo());
+        let count = app
+            .sheets
+            .iter()
+            .filter(|s| WritingApp::inferred_title(&s.content) == "Write First, Present Later")
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn present_views_render_without_panic() {
+        use egui_kittest::Harness;
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "# A\n\nNotes here.\n\n- point\n\n```\ncode\n```\n\n> quote\n\n![Alt](attachment:missing)\n\n## B\n\nMore.\n".to_string();
+        app.present_sheet = Some(0);
+        app.present_index = 0;
+        app.present_notes_visible = true;
+        struct PresentState {
+            app: WritingApp,
+            view: u8,
+        }
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut PresentState| {
+                let ctx = ui.ctx().clone();
+                if state.view == 0 {
+                    state.app.render_audience_viewport(&ctx, ui);
+                } else if state.view == 1 {
+                    state.app.show_presenter_console(&ctx, ui);
+                } else {
+                    let slides = state.app.present_slides();
+                    let layouts = WritingApp::slide_layouts(&slides);
+                    state.app.presenter_filmstrip(
+                        &ctx,
+                        ui,
+                        &slides,
+                        &layouts,
+                        state.view == 2,
+                    );
+                }
+                // Upload any finished background decodes so image pop-in
+                // does not leave a perpetual repaint request behind.
+                state.app.poll_present_images(&ctx);
+            },
+            PresentState { app, view: 0 },
+        );
+        // Shell-first image loading repaints until background decodes land,
+        // so step a fixed number of frames instead of waiting for settle.
+        harness.run_steps(10);
+        harness.state_mut().view = 1;
+        harness.run_steps(10);
+        // Advance to slide 2 in the console and render again.
+        harness.state_mut().app.present_index = 1;
+        harness.run_steps(10);
+        // Style tab renders with custom header/body fonts and a preset palette.
+        harness.state_mut().app.present_tab = PresentTab::Style;
+        harness.state_mut().app.present_header_font = Some("No Such Font".to_string());
+        harness.state_mut().app.present_body_font = Some("No Such Font".to_string());
+        harness.state_mut().app.present_colors =
+            WritingApp::present_preset_colors("Spring");
+        harness.run_steps(10);
+        // Both filmstrip orientations render without panic.
+        harness.state_mut().view = 2;
+        harness.run_steps(10);
+        harness.state_mut().view = 3;
+        harness.run_steps(10);
+    }
+    #[test]
+    fn present_toggle_steps_and_clamps() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "# A\n\n## B\n\n## C\n".to_string();
+        app.selected_sheets = vec![0];
+        assert!(!app.present_window_open);
+        app.toggle_present();
+        assert!(app.present_window_open);
+        assert_eq!(app.present_sheet, Some(0));
+        assert_eq!(app.present_slides().len(), 3);
+        app.present_step(1, 3);
+        assert_eq!(app.present_index, 1);
+        app.present_step(10, 3);
+        assert_eq!(app.present_index, 2);
+        app.present_step(-10, 3);
+        assert_eq!(app.present_index, 0);
+        // Elapsed timer formats mm:ss without a start and h:mm:ss after.
+        assert_eq!(app.present_elapsed(61.0), "00:00");
+        app.present_started_at = Some(0.0);
+        assert_eq!(app.present_elapsed(61.0), "01:01");
+        assert_eq!(app.present_elapsed(3661.0), "1:01:01");
+        app.toggle_present();
+        assert!(!app.present_window_open);
     }
 
     #[test]
@@ -22408,6 +27759,7 @@ mod tests {
             export_css: String::new(),
             export_css_name: String::new(),
             style_guide_added: true,
+            present_demo_added: true,
             style_guide_version: 0,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
@@ -22419,6 +27771,11 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             selection_id: None,
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
@@ -22644,6 +28001,7 @@ mod tests {
             export_css: String::new(),
             export_css_name: String::new(),
             style_guide_added: true,
+            present_demo_added: true,
             style_guide_version: 0,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
@@ -22655,6 +28013,11 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             tombstones: Vec::new(),
             sheet_order: Vec::new(),
             selection_id: None,
@@ -22770,6 +28133,7 @@ mod tests {
             export_css: String::new(),
             export_css_name: String::new(),
             style_guide_added: true,
+            present_demo_added: true,
             style_guide_version: 0,
             attached_fonts: Vec::new(),
             attached_images: Vec::new(),
@@ -22781,6 +28145,11 @@ mod tests {
             word_goal: 0,
             app_theme: AppTheme::default(),
             editor_font_family: None,
+            present_colors: Vec::new(),
+            present_font_family: None,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             selection_id: None,
             selected_sheet_id: None,
             selected_sheets_ids: Vec::new(),
@@ -23161,4 +28530,8 @@ mod tests {
             "renamed group missing, got {names:?}"
         );
     }
+
+
 }
+
+
