@@ -21842,7 +21842,8 @@ impl eframe::App for WritingApp {
                             // One click-and-drag interaction for the whole card,
                             // so egui applies its press-then-decide grace:
                             // plain clicks select, real drags reorder.
-                            let card_rect = render_card(ui).rect;
+                            let card_resp = render_card(ui);
+                            let card_rect = card_resp.rect;
                             let resp = if dnd_enabled {
                                 ui.interact(
                                     card_rect,
@@ -21850,8 +21851,7 @@ impl eframe::App for WritingApp {
                                     egui::Sense::click_and_drag(),
                                 )
                             } else {
-                                render_card(ui)
-                                    .interact(egui::Sense::click())
+                                card_resp.interact(egui::Sense::click())
                             };
                             // Grace means is_being_dragged is only true after
                             // real movement, so the ghost never flashes on a
