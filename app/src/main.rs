@@ -1490,6 +1490,10 @@ struct WritingApp {
     typewriter: bool,
     /// Focus mode: dim paragraphs outside the caret's. Remembered.
     focus_mode: bool,
+    /// Zen mode: hide all chrome (headerbar, sidebars, status bar) and
+    /// show only the editor. Session-only: always starts off, never
+    /// persisted, so a restart can never trap the app chromeless.
+    zen_mode: bool,
     /// Whether the library sidebar is shown. Remembered across runs;
     /// toggled from the headerbar or with a two-finger swipe.
     library_visible: bool,
@@ -1776,6 +1780,7 @@ enum PaletteCommand {
     Style,
     ToggleTypewriter,
     ToggleFocus,
+    ToggleZen,
     Settings,
     SettingsTab(SettingsTab),
     ToggleTheme,
@@ -3175,6 +3180,7 @@ impl WritingApp {
             editor_font_family: None,
             typewriter: false,
             focus_mode: false,
+            zen_mode: false,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -12624,6 +12630,7 @@ blockquote {
             editor_font_size: 17.0,
             typewriter: false,
             focus_mode: false,
+            zen_mode: false,
             library_visible: true,
             sheets_visible: true,
             word_goal: 0,
@@ -15518,6 +15525,7 @@ blockquote {
             ("Toggle theme", None, PaletteCommand::ToggleTheme),
             ("Toggle typewriter scrolling", Some((M::COMMAND | M::ALT, egui::Key::T)), PaletteCommand::ToggleTypewriter),
             ("Toggle focus mode", Some((M::COMMAND | M::ALT, egui::Key::F)), PaletteCommand::ToggleFocus),
+            ("Zen mode", Some((M::COMMAND | M::ALT, egui::Key::Z)), PaletteCommand::ToggleZen),
             ("Share / export", Some((M::COMMAND, egui::Key::E)), PaletteCommand::Export),
             ("Present", Some((M::COMMAND, egui::Key::P)), PaletteCommand::Present),
             ("Show history", Some((M::COMMAND, egui::Key::Y)), PaletteCommand::History),
@@ -15597,7 +15605,17 @@ blockquote {
                 self.focus_mode = !self.focus_mode;
                 self.save_library();
             }
+            PaletteCommand::ToggleZen => {
+                self.set_zen_mode(!self.zen_mode);
+            }
         }
+    }
+
+    /// Enter or leave zen mode (editor-only: every chrome panel stays
+    /// hidden while it is on). Session-only by design: never persisted,
+    /// so it always starts off.
+    fn set_zen_mode(&mut self, zen: bool) {
+        self.zen_mode = zen;
     }
 
     /// Fuzzy match score for the command palette (higher = better),
@@ -17038,6 +17056,15 @@ blockquote {
                 {
                     self.save_library();
                 }
+                ui.checkbox(&mut self.zen_mode, "Zen mode (hide all interface except the editor)")
+                    .on_hover_text(format!(
+                        "Show only the editor; Esc leaves ({})",
+                        Self::shortcut_label(
+                            ui.ctx(),
+                            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                            egui::Key::Z,
+                        )
+                    ));
                                 }
                                 SettingsTab::Checking => {
                 // Grammar checking: master toggle plus the synced custom
@@ -20600,9 +20627,9 @@ impl eframe::App for WritingApp {
         // from double-triggering through focused widgets. While the
         // in-document find bar is open its own keys (Enter/Esc) own the
         // keyboard, so the panel shortcuts stay out of the way.
-        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_present, key_settings, key_typewriter, key_focus) =
+        let (key_search, key_new, key_sidebars, key_goals, key_style, key_history, key_export, key_present, key_settings, key_typewriter, key_focus, key_zen) =
             if self.find_open {
-                (false, false, false, false, false, false, false, false, false, false, false)
+                (false, false, false, false, false, false, false, false, false, false, false, false)
             } else {
                 (
                     ctx.input_mut(|i| {
@@ -20647,6 +20674,12 @@ impl eframe::App for WritingApp {
                             egui::Key::F,
                         )
                     }),
+                    ctx.input_mut(|i| {
+                        i.consume_key(
+                            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                            egui::Key::Z,
+                        )
+                    }),
                 )
             };
         if key_typewriter {
@@ -20658,6 +20691,21 @@ impl eframe::App for WritingApp {
         if key_focus {
             self.focus_mode = !self.focus_mode;
             self.save_library();
+        }
+        if key_zen {
+            self.set_zen_mode(!self.zen_mode);
+        }
+        // Esc leaves zen mode, but only when nothing else owns Escape:
+        // the find bar, the search popup and inline group rename each
+        // close/cancel with it, so they keep it while open. Global egui
+        // behaviors (abort drag, drop focus) still run alongside.
+        if self.zen_mode
+            && !self.find_open
+            && !self.search_open
+            && self.group_rename.is_none()
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.set_zen_mode(false);
         }
         let key_find = ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)
@@ -20697,6 +20745,8 @@ impl eframe::App for WritingApp {
             self.toggle_present();
         }
 
+        // Zen mode hides every chrome panel, leaving only the editor.
+        // Popups (search, settings, export) still open via shortcuts.
         egui::TopBottomPanel::top("top")
             .frame(
                 egui::Frame::new()
@@ -20708,7 +20758,7 @@ impl eframe::App for WritingApp {
                         bottom: 6,
                     }),
             )
-            .show(ctx, |ui| {
+            .show_animated(ctx, !self.zen_mode, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     // Sidebar toggle stays visible so hidden sidebars can
@@ -20886,7 +20936,9 @@ impl eframe::App for WritingApp {
         // Keyboard modifiers for shift / cmd+click multi-select in the tree
         // and the sheet list below.
         let mods = ctx.input(|i| i.modifiers);
-        self.handle_sidebar_swipe(ctx);
+        if !self.zen_mode {
+            self.handle_sidebar_swipe(ctx);
+        }
         self.maybe_autosnapshot();
         // Presenting hides both sidebars (session-only: the remembered
         // flags are untouched, so everything reappears on End exactly as
@@ -20901,7 +20953,7 @@ impl eframe::App for WritingApp {
                     .fill(self.theme.bg_sidebar())
                     .inner_margin(egui::Margin::symmetric(8, 2)),
             )
-            .show_animated(ctx, self.library_visible && chrome_visible, |ui| {
+            .show_animated(ctx, self.library_visible && chrome_visible && !self.zen_mode, |ui| {
                 #[derive(Clone, Copy)]
                 enum TreeAction {
                     Select(SidebarSelection),
@@ -21569,7 +21621,7 @@ impl eframe::App for WritingApp {
                 egui::Frame::new()
                     .fill(self.theme.bg_sheets())
             )
-            .show_animated(ctx, self.sheets_visible && chrome_visible, |ui| {
+            .show_animated(ctx, self.sheets_visible && chrome_visible && !self.zen_mode, |ui| {
                 // Hover paints one frame behind: read last frame's target
                 // while rendering, collect this frame's, commit at the end.
                 let mut hovered_now: Option<SheetHover> = None;
@@ -21988,25 +22040,25 @@ impl eframe::App for WritingApp {
         let _ = egui::SidePanel::right("goals")
             .resizable(true)
             .default_width(230.0)
-            .show_animated(ctx, self.goals_visible, |ui| {
+            .show_animated(ctx, self.goals_visible && !self.zen_mode, |ui| {
                 self.show_goals_sidebar(ui);
             });
 
         let _ = egui::SidePanel::right("style")
             .resizable(true)
             .default_width(260.0)
-            .show_animated(ctx, self.grammar.style_visible, |ui| {
+            .show_animated(ctx, self.grammar.style_visible && !self.zen_mode, |ui| {
                 self.show_style_sidebar(ui);
             });
 
         let _ = egui::SidePanel::right("history")
             .resizable(true)
             .default_width(300.0)
-            .show_animated(ctx, self.history_open, |ui| {
+            .show_animated(ctx, self.history_open && !self.zen_mode, |ui| {
                 self.show_history_sidebar(ui);
             });
 
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("status").show_animated(ctx, !self.zen_mode, |ui| {
             let targets = self.export_targets();
             let mut words = 0usize;
             let mut chars = 0usize;
@@ -22368,6 +22420,7 @@ mod tests {
             present_aspect: PresentAspect::default(),
             typewriter: false,
             focus_mode: false,
+            zen_mode: false,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -23532,6 +23585,7 @@ mod tests {
             present_aspect: PresentAspect::default(),
             typewriter: false,
             focus_mode: false,
+            zen_mode: false,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -27417,6 +27471,38 @@ mod tests {
         assert!(app.settings_open);
         assert!(app.settings_tab == SettingsTab::Updates);
         assert!(matches!(app.update_state.status, UpdateStatus::Idle));
+    }
+
+    #[test]
+    fn zen_mode_toggles_and_stays_session_only() {
+        let _storage = isolate_storage();
+        // Zen mode is session-only: it always starts off and is never
+        // persisted, so a restart can never trap the app chromeless.
+        let mut app = sample_app();
+        assert!(!app.zen_mode);
+        // The command palette exposes it with the Cmd/Ctrl+Alt+Z shortcut.
+        let cmds = WritingApp::palette_commands();
+        let zen_entry = cmds
+            .iter()
+            .find(|(_, _, cmd)| *cmd == PaletteCommand::ToggleZen)
+            .expect("zen mode in palette");
+        assert_eq!(
+            zen_entry.1,
+            Some((
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                egui::Key::Z
+            ))
+        );
+        // Toggling flips the flag without touching the saved library.
+        app.run_palette_command(PaletteCommand::ToggleZen);
+        assert!(app.zen_mode);
+        app.run_palette_command(PaletteCommand::ToggleZen);
+        assert!(!app.zen_mode);
+        // Saving while in zen mode records nothing: a fresh app still
+        // starts with chrome visible.
+        app.run_palette_command(PaletteCommand::ToggleZen);
+        app.save_library();
+        assert!(!sample_app().zen_mode);
     }
 
     #[test]
