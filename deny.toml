@@ -66,6 +66,14 @@ ignore = [
   { id = "RUSTSEC-2026-0368", reason = "harper-core reads bundled data in-memory; no archive extraction" },
   { id = "RUSTSEC-2026-0369", reason = "harper-core reads bundled data in-memory; no archive extraction" },
   { id = "RUSTSEC-2026-0429", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  # Same story, November batch: AES auth bypass on truncated archives,
+  # symlink escape on extract, decoder preallocation, and local-header
+  # name mismatch — all need a malicious archive or an extract-to-disk
+  # flow the app never performs.
+  { id = "RUSTSEC-2026-0545", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  { id = "RUSTSEC-2026-0546", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  { id = "RUSTSEC-2026-0547", reason = "harper-core reads bundled data in-memory; no archive extraction" },
+  { id = "RUSTSEC-2026-0548", reason = "harper-core reads bundled data in-memory; no archive extraction" },
 ]
 
 [bans]
