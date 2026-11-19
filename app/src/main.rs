@@ -264,6 +264,39 @@ enum SidebarSelection {
     Sheet(usize),
 }
 
+/// Tab shown in the unified right inspector. The three old sidebars
+/// (goals, style, history) live here now; the headerbar holds a single
+/// toggle that shows the last-used tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+enum RightTab {
+    #[default]
+    Goals,
+    Style,
+    History,
+}
+
+impl RightTab {
+    fn title(self) -> &'static str {
+        match self {
+            RightTab::Goals => "Writing goals",
+            RightTab::Style => "Style",
+            RightTab::History => "History",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            RightTab::Goals => icon::TARGET,
+            RightTab::Style => icon::BOOK_OPEN,
+            RightTab::History => icon::CLOCK_COUNTER_CLOCKWISE,
+        }
+    }
+
+    fn all() -> [RightTab; 3] {
+        [RightTab::Goals, RightTab::Style, RightTab::History]
+    }
+}
+
 /// App chrome color scheme. Dark is the original look; the rest are
 /// popular editor palettes expressed through the same roles, so every
 /// surface re-skins through the table in [`AppTheme::palette`].
@@ -1351,8 +1384,14 @@ struct SavedLibrary {
     #[serde(default)]
     focus_mode: bool,
     /// Whether the style sidebar is shown. Remembered across runs.
+    /// Legacy alias for `right_tab == Style` (old saves). New saves use
+    /// `right_tab`; both are written so downgrades keep working.
     #[serde(default)]
     style_visible: bool,
+    /// Active tab of the unified right inspector. Remembered across runs;
+    /// visibility itself (`WritingApp::right_visible`) is session-only.
+    #[serde(default)]
+    right_tab: RightTab,
     /// Custom dictionary additions, synced across devices via the union
     /// merge below (either side may add words independently).
     #[serde(default)]
@@ -1556,9 +1595,11 @@ struct WritingApp {
     /// Target word count for the writing-goal sidebar. `0` = no goal set.
     /// Remembered across runs.
     word_goal: u32,
-    /// Whether the writing-goal sidebar is shown. Session-only: always
-    /// starts collapsed and is never persisted.
-    goals_visible: bool,
+    /// Whether the unified right inspector (goals/style/history tabs)
+    /// is shown. Session-only: always starts collapsed, never persisted.
+    right_visible: bool,
+    /// Active tab in the unified right inspector. Remembered across runs.
+    right_tab: RightTab,
     /// Sheets-panel hover target from the previous frame (cards and header
     /// buttons brighten on hover). Session-only, reset every frame before
     /// the panel paints.
@@ -1632,8 +1673,6 @@ struct WritingApp {
     typewriter_last: Option<(usize, usize)>,
     /// Request keyboard focus in the search field on the next frame.
     search_focus: bool,
-    /// Whether the history popup is open. Session-only.
-    history_open: bool,
     /// Group being renamed inline in the library list, if any.
     /// Stored by UUID so list reorders can't desync it. Session-only:
     /// cancelled on selection change, never persisted.
@@ -1899,8 +1938,6 @@ struct GrammarState {
     dict_adds: std::collections::BTreeSet<String>,
     /// Custom dictionary removals; beats additions on both sides.
     dict_removes: std::collections::BTreeSet<String>,
-    /// Style sidebar visibility (persisted).
-    style_visible: bool,
     /// Lazy background lint worker; never blocks the UI thread.
     worker: Option<GrammarWorker>,
     /// Sheet index -> latest un-linted content, with last-change time.
@@ -3238,7 +3275,8 @@ impl WritingApp {
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
             settings_tab: SettingsTab::default(),
-            goals_visible: false,
+            right_visible: false,
+            right_tab: RightTab::default(),
             sheets_hover: None,
             goal_draft: String::new(),
             outline_open: false,
@@ -3261,7 +3299,6 @@ impl WritingApp {
             find_matches: Vec::new(),
             find_scroll: false,
             search_focus: false,
-            history_open: false,
             group_rename: None,
             group_rename_draft: String::new(),
             group_rename_focus: false,
@@ -3380,12 +3417,19 @@ impl WritingApp {
             app.grammar.enabled = saved.grammar_enabled;
         app.typewriter = saved.typewriter;
         app.focus_mode = saved.focus_mode;
-            app.grammar.style_visible = saved.style_visible;
+            // Unified inspector: the persisted tab wins; old saves that
+            // only knew `style_visible` map an open style panel onto it.
+            // Visibility itself stays session-only (starts collapsed).
+            app.right_tab = saved.right_tab;
+            if app.right_tab == RightTab::Goals && saved.style_visible {
+                app.right_tab = RightTab::Style;
+            }
+            app.right_visible = false;
             app.grammar.dict_adds = saved.dictionary_adds.into_iter().collect();
             app.grammar.dict_removes = saved.dictionary_removes.into_iter().collect();
             // A load that merged remote changes converges the stores below.
             dirty_after_load = saved.dirty;
-            // The goals sidebar is session-only: it always starts collapsed.
+            // The inspector is session-only: it always starts collapsed.
             // Sanitize references that may no longer line up.
             for sheet in app.sheets.iter_mut() {
                 if let Some(g) = sheet.group {
@@ -3491,15 +3535,16 @@ impl WritingApp {
             app.search_focus = true;
         }
         if std::env::var("ARIADNE_SCREENSHOT_STYLE").is_ok() {
-            app.grammar.style_visible = true;
-            app.goals_visible = false;
+            app.right_tab = RightTab::Style;
+            app.right_visible = true;
         }
         if std::env::var("ARIADNE_SCREENSHOT_GOALS").is_ok() {
-            app.goals_visible = true;
-            app.grammar.style_visible = false;
+            app.right_tab = RightTab::Goals;
+            app.right_visible = true;
         }
         if std::env::var("ARIADNE_SCREENSHOT_HISTORY").is_ok() {
-            app.history_open = true;
+            app.right_tab = RightTab::History;
+            app.right_visible = true;
         }
         app
     }
@@ -7039,7 +7084,8 @@ blockquote {
             grammar_enabled: self.grammar.enabled,
             typewriter: self.typewriter,
             focus_mode: self.focus_mode,
-            style_visible: self.grammar.style_visible,
+            style_visible: self.right_tab == RightTab::Style,
+            right_tab: self.right_tab,
             dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
@@ -7258,7 +7304,8 @@ blockquote {
             grammar_enabled: self.grammar.enabled,
             typewriter: self.typewriter,
             focus_mode: self.focus_mode,
-            style_visible: self.grammar.style_visible,
+            style_visible: self.right_tab == RightTab::Style,
+            right_tab: self.right_tab,
             dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
@@ -7377,7 +7424,8 @@ blockquote {
             grammar_enabled: self.grammar.enabled,
             typewriter: self.typewriter,
             focus_mode: self.focus_mode,
-            style_visible: self.grammar.style_visible,
+            style_visible: self.right_tab == RightTab::Style,
+            right_tab: self.right_tab,
             dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
@@ -7430,6 +7478,7 @@ blockquote {
                     typewriter: false,
                     focus_mode: false,
                     style_visible: false,
+                    right_tab: RightTab::default(),
                     dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
                     dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
                     dirty: false,
@@ -7554,6 +7603,7 @@ blockquote {
             typewriter: false,
             focus_mode: false,
             style_visible: false,
+            right_tab: RightTab::default(),
             dictionary_adds: store.dictionary_adds,
             dictionary_removes: store.dictionary_removes,
             dirty: false,
@@ -7745,6 +7795,7 @@ blockquote {
             typewriter: false,
             focus_mode: false,
             style_visible: false,
+            right_tab: RightTab::default(),
             dictionary_adds: istore.dictionary_adds.clone(),
             dictionary_removes: istore.dictionary_removes.clone(),
             dirty: true,
@@ -13017,7 +13068,8 @@ blockquote {
             library_visible: true,
             sheets_visible: true,
             word_goal: 0,
-            goals_visible: false,
+            right_visible: false,
+            right_tab: RightTab::default(),
             sheets_hover: None,
             app_theme: AppTheme::default(),
             theme,
@@ -13050,7 +13102,6 @@ blockquote {
             find_matches: Vec::new(),
             find_scroll: false,
             search_focus: false,
-            history_open: false,
             group_rename: None,
             group_rename_draft: String::new(),
             group_rename_focus: false,
@@ -16114,6 +16165,76 @@ blockquote {
         ]
     }
 
+    /// Show the unified inspector on `tab`. Toggling the active tab
+    /// closes the panel; switching tabs keeps it open. The goals draft
+    /// is synced when opening goals so it starts from the live target.
+    fn open_right_tab(&mut self, tab: RightTab) {
+        if self.right_visible && self.right_tab == tab {
+            self.right_visible = false;
+            return;
+        }
+        self.right_tab = tab;
+        self.right_visible = true;
+        if tab == RightTab::Goals {
+            self.goal_draft = if self.word_goal == 0 {
+                String::new()
+            } else {
+                self.word_goal.to_string()
+            };
+        }
+        self.save_library();
+    }
+
+    /// Contents of the unified right inspector: a tab bar (goals, style,
+    /// history) plus the active tab's body.
+    fn show_inspector_sidebar(&mut self, ui: &mut egui::Ui) {
+        let dim = self.theme.text_dim();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(self.right_tab.title()).size(12.5).color(dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Close inspector").clicked() {
+                    self.right_visible = false;
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            for tab in RightTab::all() {
+                let active = self.right_tab == tab;
+                let label = RichText::new(format!("{} {}", tab.icon(), tab.title()))
+                    .size(12.5)
+                    .color(if active {
+                        self.theme.text_bright()
+                    } else {
+                        self.theme.text_dim()
+                    });
+                if ui
+                    .selectable_label(active, label)
+                    .on_hover_text(format!("Show {}", tab.title()))
+                    .clicked()
+                {
+                    self.right_tab = tab;
+                    if tab == RightTab::Goals {
+                        self.goal_draft = if self.word_goal == 0 {
+                            String::new()
+                        } else {
+                            self.word_goal.to_string()
+                        };
+                    }
+                    self.save_library();
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+        match self.right_tab {
+            RightTab::Goals => self.show_goals_sidebar(ui),
+            RightTab::Style => self.show_style_sidebar(ui),
+            RightTab::History => self.show_history_sidebar(ui),
+        }
+    }
+
     /// Run a palette command (same effects as the headerbar buttons).
     fn run_palette_command(&mut self, cmd: PaletteCommand) {
         match cmd {
@@ -16125,7 +16246,7 @@ blockquote {
                 self.save_library();
             }
             PaletteCommand::History => {
-                self.history_open = !self.history_open;
+                self.open_right_tab(RightTab::History);
             }
             PaletteCommand::Export => {
                 self.show_export_popover = !self.show_export_popover;
@@ -16134,22 +16255,10 @@ blockquote {
                 self.toggle_present();
             }
             PaletteCommand::Goals => {
-                self.goals_visible = !self.goals_visible;
-                if self.goals_visible {
-                    self.grammar.style_visible = false;
-                    self.goal_draft = if self.word_goal == 0 {
-                        String::new()
-                    } else {
-                        self.word_goal.to_string()
-                    };
-                }
+                self.open_right_tab(RightTab::Goals);
             }
             PaletteCommand::Style => {
-                self.grammar.style_visible = !self.grammar.style_visible;
-                if self.grammar.style_visible {
-                    self.goals_visible = false;
-                }
-                self.save_library();
+                self.open_right_tab(RightTab::Style);
             }
             PaletteCommand::Settings => {
                 self.settings_open = true;
@@ -17010,17 +17119,6 @@ blockquote {
         let mut restore: Option<(usize, usize)> = None;
         let mut snapshot_now = false;
         let mut clear = false;
-        let mut close = false;
-        let dim = self.theme.text_dim();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("History").size(12.5).color(dim));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Close history").clicked() {
-                    close = true;
-                }
-            });
-        });
-        ui.add_space(4.0);
         ui.label(
             RichText::new(title)
                 .strong()
@@ -17107,9 +17205,6 @@ blockquote {
             if self.restore_snapshot(idx, n) {
                 self.status = "Restored snapshot".to_string();
             }
-        }
-        if close {
-            self.history_open = false;
         }
     }
     /// Settings window: app theme plus the editor font family and size.
@@ -20993,6 +21088,32 @@ impl WritingApp {
         }
     }
 
+    /// Inspector toggle: a horizontally flipped sidebar glyph (pane on
+    /// the right). Phosphor only ships the left-pane `SIDEBAR`, so this
+    /// is drawn vectorially to match the header icon weight.
+    fn header_inspector_button(&self, ui: &mut egui::Ui) -> egui::Response {
+        let resp = ui.add_sized(
+            Vec2::new(28.0, 28.0),
+            egui::Button::new("").frame(false),
+        );
+        let r = resp.rect.shrink(7.0);
+        let fg = if resp.is_pointer_button_down_on() {
+            self.theme.accent()
+        } else if resp.hovered() {
+            self.theme.text_bright()
+        } else {
+            self.theme.text_main()
+        };
+        let stroke = egui::Stroke::new(1.5, fg);
+        ui.painter().rect_stroke(r, 2.5, stroke, egui::StrokeKind::Outside);
+        let x = r.max.x - r.width() * 0.38;
+        ui.painter().line_segment(
+            [egui::pos2(x, r.min.y + 1.0), egui::pos2(x, r.max.y - 1.0)],
+            stroke,
+        );
+        resp
+    }
+
     /// One headerbar icon slot. Every toolbar icon gets the same fixed
     /// box, so the bar keeps a constant height and icon positions never
     /// shift when sidebar zones appear or disappear.
@@ -21046,15 +21167,6 @@ impl WritingApp {
     /// a progress bar against the current selection, and counts.
     fn show_goals_sidebar(&mut self, ui: &mut egui::Ui) {
         let dim = self.theme.text_dim();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Writing goals").size(12.5).color(dim));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Close goals").clicked() {
-                    self.goals_visible = false;
-                }
-            });
-        });
-        ui.add_space(8.0);
         let words = self.selection_words();
         if self.word_goal == 0 {
             ui.label("Set a word target to track progress.");
@@ -21130,15 +21242,6 @@ impl WritingApp {
     /// spelling + grammar; this panel owns clarity and concision.
     fn show_style_sidebar(&mut self, ui: &mut egui::Ui) {
         let dim = self.theme.text_dim();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Style").size(12.5).color(dim));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Close style").clicked() {
-                    self.grammar.style_visible = false;
-                }
-            });
-        });
-        ui.add_space(8.0);
         if !self.grammar.enabled {
             ui.label("Turn on “Check spelling and grammar as I type” in Settings to see style suggestions.");
             return;
@@ -21465,7 +21568,8 @@ impl eframe::App for WritingApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     // Sidebar toggle stays visible so hidden sidebars can
-                    // always be brought back.
+                    // always be brought back. New sheet stays on the left
+                    // and never hides with the sidebars.
                     if Self::header_button(
                         ui,
                         RichText::new(icon::SIDEBAR).size(17.0),
@@ -21483,53 +21587,40 @@ impl eframe::App for WritingApp {
                         self.sheets_visible = show;
                         self.save_library();
                     }
-                    if self.sheets_visible {
-                        // Middle column — over the Sheets list (~290 wide)
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(282.0, 28.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if Self::header_button(
-                                    ui,
-                                    RichText::new(icon::MAGNIFYING_GLASS).size(17.0),
-                                )
-                                .on_hover_text(
-                                    hint(
-                                        ui.ctx(),
-                                        "Command palette",
-                                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                                        egui::Key::P,
-                                    ),
-                                )
-                                .clicked()
-                                    || key_search
-                                {
-                                    if self.search_open {
-                                        self.search_open = false;
-                                        self.search_query.clear();
-                                    } else {
-                                        self.search_open = true;
-                                        self.search_focus = true;
-                                    }
-                                }
-                                if Self::header_button(
-                                    ui,
-                                    RichText::new(icon::FILE_PLUS).size(17.0),
-                                )
-                                .on_hover_text(hint_cmd(ui.ctx(), "New sheet", egui::Key::N))
-                                .clicked()
-                                    || key_new
-                                {
-                                    self.create_sheet();
-                                }
-                            },
-                        );
-                        ui.separator();
+                    if Self::header_button(
+                        ui,
+                        RichText::new(icon::FILE_PLUS).size(17.0),
+                    )
+                    .on_hover_text(hint_cmd(ui.ctx(), "New sheet", egui::Key::N))
+                    .clicked()
+                        || key_new
+                    {
+                        self.create_sheet();
                     }
-                    // Right column — over the editor, right-aligned like the original
+                    // Right cluster — always visible, right-aligned.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // First in a right-to-left row renders at the far
-                        // right edge: Settings lives there, goals next to it.
+                        // right edge: the inspector toggle lives there.
+                        if self
+                            .header_inspector_button(ui)
+                            .on_hover_text(if self.right_visible {
+                                format!("Hide {}", self.right_tab.title())
+                            } else {
+                                format!("Show {}", self.right_tab.title())
+                            })
+                            .clicked()
+                        {
+                            self.right_visible = !self.right_visible;
+                        }
+                        if key_goals {
+                            self.open_right_tab(RightTab::Goals);
+                        }
+                        if key_style {
+                            self.open_right_tab(RightTab::Style);
+                        }
+                        if key_history {
+                            self.open_right_tab(RightTab::History);
+                        }
                         // A red dot marks an available app update.
                         let gear = Self::header_button(
                             ui,
@@ -21562,51 +21653,30 @@ impl eframe::App for WritingApp {
                                 self.show_conflicts = true;
                             }
                         }
+                        // Command palette lives here so it stays visible
+                        // even when the left sidebars hide.
                         if Self::header_button(
                             ui,
-                            RichText::new(icon::TARGET).size(17.0),
+                            RichText::new(icon::MAGNIFYING_GLASS).size(17.0),
                         )
-                        .on_hover_text(hint_cmd(ui.ctx(), "Writing goals", egui::Key::G))
+                        .on_hover_text(
+                            hint(
+                                ui.ctx(),
+                                "Command palette",
+                                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                                egui::Key::P,
+                            ),
+                        )
                         .clicked()
-                            || key_goals
+                            || key_search
                         {
-                            self.goals_visible = !self.goals_visible;
-                            if self.goals_visible {
-                                // One right panel at a time.
-                                self.grammar.style_visible = false;
-                                // Start editing from the current target (or
-                                // blank when none is set yet).
-                                self.goal_draft = if self.word_goal == 0 {
-                                    String::new()
-                                } else {
-                                    self.word_goal.to_string()
-                                };
+                            if self.search_open {
+                                self.search_open = false;
+                                self.search_query.clear();
+                            } else {
+                                self.search_open = true;
+                                self.search_focus = true;
                             }
-                        }
-                        if Self::header_button(
-                            ui,
-                            RichText::new(icon::BOOK_OPEN).size(17.0),
-                        )
-                        .on_hover_text(hint_cmd(ui.ctx(), "Style suggestions", egui::Key::Slash))
-                        .clicked()
-                            || key_style
-                        {
-                            self.grammar.style_visible = !self.grammar.style_visible;
-                            if self.grammar.style_visible {
-                                // One right panel at a time.
-                                self.goals_visible = false;
-                            }
-                            self.save_library();
-                        }
-                        if Self::header_button(
-                            ui,
-                            RichText::new(icon::CLOCK_COUNTER_CLOCKWISE).size(17.0),
-                        )
-                            .on_hover_text(hint_cmd(ui.ctx(), "History", egui::Key::Y))
-                            .clicked()
-                                || key_history
-                        {
-                            self.history_open = !self.history_open;
                         }
                         if Self::header_button(
                             ui,
@@ -22740,25 +22810,11 @@ impl eframe::App for WritingApp {
                 }
             });
 
-        let _ = egui::SidePanel::right("goals")
+        let _ = egui::SidePanel::right("inspector")
             .resizable(true)
-            .default_width(230.0)
-            .show_animated(ctx, self.goals_visible && !self.zen_mode, |ui| {
-                self.show_goals_sidebar(ui);
-            });
-
-        let _ = egui::SidePanel::right("style")
-            .resizable(true)
-            .default_width(260.0)
-            .show_animated(ctx, self.grammar.style_visible && !self.zen_mode, |ui| {
-                self.show_style_sidebar(ui);
-            });
-
-        let _ = egui::SidePanel::right("history")
-            .resizable(true)
-            .default_width(300.0)
-            .show_animated(ctx, self.history_open && !self.zen_mode, |ui| {
-                self.show_history_sidebar(ui);
+            .default_width(280.0)
+            .show_animated(ctx, self.right_visible && !self.zen_mode, |ui| {
+                self.show_inspector_sidebar(ui);
             });
 
         egui::TopBottomPanel::bottom("status").show_animated(ctx, !self.zen_mode, |ui| {
@@ -22909,7 +22965,7 @@ impl eframe::App for WritingApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PresentAspect, PresentTab, PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SlideLayout, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
+    use super::{AppTheme, AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, GdriveSync, GrammarState, Group, MergeReport, OutlineEntry, PaletteCommand, PdfFamily, PresentAspect, PresentTab, PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, RightTab, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection, SlideLayout, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, default_editor_font_size, grammar, new_group_id, new_sheet_id, pdf_family_for, PROFESSIONAL_STYLE};
     use std::time::{Duration, SystemTime};
 
     /// Keep unit tests away from the real on-disk library. Returns a guard
@@ -23128,7 +23184,8 @@ mod tests {
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
             settings_tab: SettingsTab::default(),
-            goals_visible: false,
+            right_visible: false,
+            right_tab: RightTab::default(),
             sheets_hover: None,
             goal_draft: String::new(),
             outline_open: false,
@@ -23149,7 +23206,6 @@ mod tests {
             find_matches: Vec::new(),
             find_scroll: false,
             search_focus: false,
-            history_open: false,
             group_rename: None,
             group_rename_draft: String::new(),
             group_rename_focus: false,
@@ -23816,6 +23872,7 @@ mod tests {
             typewriter: false,
             focus_mode: false,
             style_visible: false,
+            right_tab: RightTab::default(),
             dictionary_adds: Vec::new(),
             dictionary_removes: Vec::new(),
             dirty: false,
@@ -24293,7 +24350,8 @@ mod tests {
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
             settings_tab: SettingsTab::default(),
-            goals_visible: false,
+            right_visible: false,
+            right_tab: RightTab::default(),
             sheets_hover: None,
             goal_draft: String::new(),
             outline_open: false,
@@ -24314,7 +24372,6 @@ mod tests {
             find_matches: Vec::new(),
             find_scroll: false,
             search_focus: false,
-            history_open: false,
             group_rename: None,
             group_rename_draft: String::new(),
             group_rename_focus: false,
@@ -25970,14 +26027,17 @@ mod tests {
         app.word_goal = 8;
         assert_eq!(app.selection_words(), 4);
         assert_eq!(app.goal_progress(), Some(0.5));
-        // The target persists; panel visibility is session-only and never
-        // saved, so it always starts collapsed.
-        app.goals_visible = true;
+        // The target persists; inspector visibility is session-only and
+        // never saved, so it always starts collapsed, while the active
+        // tab is remembered.
+        app.open_right_tab(RightTab::Goals);
+        assert!(app.right_visible);
         app.save_library();
         let back = WritingApp::load_library().expect("reloads");
         assert_eq!(back.word_goal, 8);
+        assert_eq!(back.right_tab, RightTab::Goals);
         let fresh = sample_app();
-        assert!(!fresh.goals_visible);
+        assert!(!fresh.right_visible);
         assert_eq!(fresh.word_goal, 0);
     }
 
@@ -28573,6 +28633,7 @@ mod tests {
             typewriter: false,
             focus_mode: false,
             style_visible: false,
+            right_tab: RightTab::default(),
             dictionary_adds: Vec::new(),
             dictionary_removes: Vec::new(),
             dirty: false,
@@ -28817,6 +28878,7 @@ mod tests {
             typewriter: false,
             focus_mode: false,
             style_visible: false,
+            right_tab: RightTab::default(),
             dictionary_adds: vec!["bort".to_string()],
             dictionary_removes: vec![" Wort ".to_string()],
             dirty: false,
@@ -28949,6 +29011,7 @@ mod tests {
             typewriter: false,
             focus_mode: false,
             style_visible: false,
+            right_tab: RightTab::default(),
             dictionary_adds: Vec::new(),
             dictionary_removes: Vec::new(),
             dirty: false,
