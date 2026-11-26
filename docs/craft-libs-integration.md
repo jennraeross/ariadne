@@ -193,6 +193,8 @@ resetting, and settings survive upgrades through migrations.
 
 - 2026-11-26: plan written; item 1 import wired for docx/doc/odt/rtf/html/epub
   (drop + `Import manuscript…`), 11 unit tests, +45 crates in `Cargo.lock`.
+- 2026-11-26: `Clean imported line breaks` strips markers from sheets
+  imported before the fix (selected sheets, or the whole selected group).
 - 2026-11-26: Document hard-break markers stripped while lines stay; the window
   paints an opaque base under the panels so no desktop shows between them.
 - 2026-11-26: EPUB import splits chapters (spine items and, for whole-book

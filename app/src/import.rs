@@ -205,7 +205,7 @@ fn document_markdown(doc: &Document) -> (String, usize) {
 /// is nothing but the marker goes away, so a paragraph end does not leave
 /// a stranded blank line. The lines themselves stay as the author had
 /// them — verse and dialogue keep their shape.
-fn strip_hard_break_markers(input: &str) -> String {
+pub fn strip_hard_break_markers(input: &str) -> String {
     let mut out: Vec<&str> = Vec::with_capacity(input.lines().count());
     for line in input.lines() {
         if line.trim() == "\\" {

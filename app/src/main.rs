@@ -2525,6 +2525,7 @@ enum PaletteCommand {
     RecoverLibrary,
     ImportArchive,
     ImportManuscript,
+    StripHardBreaks,
     CleanAttachments,
 }
 
@@ -14429,6 +14430,53 @@ blockquote {
         true
     }
 
+    /// Remove the hard-break markers an earlier manuscript import wrote (a
+    /// trailing `\`, or a line that is only the marker) from the sheets in
+    /// view: the selected sheets, or every sheet of the selected group.
+    /// The line breaks stay; only the markers go.
+    fn strip_hard_breaks_from_selection(&mut self) {
+        let targets: Vec<usize> = match self.selection {
+            SidebarSelection::Group(group) => self
+                .sheets
+                .iter()
+                .enumerate()
+                .filter(|(_, sheet)| sheet.group == Some(group) && !sheet.trashed)
+                .map(|(idx, _)| idx)
+                .collect(),
+            _ => self.editor_targets(),
+        };
+        let now = SystemTime::now();
+        let mut markers = 0usize;
+        let mut changed = 0usize;
+        for idx in targets {
+            let Some(sheet) = self.sheets.get_mut(idx) else {
+                continue;
+            };
+            let found = sheet
+                .content
+                .lines()
+                .filter(|line| line.trim_end().ends_with('\\'))
+                .count();
+            if found == 0 {
+                continue;
+            }
+            sheet.content = import::strip_hard_break_markers(&sheet.content);
+            sheet.modified = now;
+            markers += found;
+            changed += 1;
+        }
+        if changed == 0 {
+            self.status = "No hard-break markers in the sheets in view".to_string();
+            return;
+        }
+        self.status = format!(
+            "Removed {markers} line-break marker{} from {changed} sheet{}",
+            if markers == 1 { "" } else { "s" },
+            if changed == 1 { "" } else { "s" },
+        );
+        self.save_library();
+    }
+
     /// Pick a manuscript file and import it as a sheet. The browser build
     /// has no native dialog: dropping the file on the window does the same.
     fn import_manuscript_dialog(&mut self) {
@@ -21520,6 +21568,11 @@ blockquote {
             ),
             ("Import manuscript…", None, PaletteCommand::ImportManuscript),
             (
+                "Clean imported line breaks",
+                None,
+                PaletteCommand::StripHardBreaks,
+            ),
+            (
                 "Clean up unused images",
                 None,
                 PaletteCommand::CleanAttachments,
@@ -21612,6 +21665,11 @@ blockquote {
                 self.search_open = false;
                 self.search_query.clear();
                 self.import_manuscript_dialog();
+            }
+            PaletteCommand::StripHardBreaks => {
+                self.search_open = false;
+                self.search_query.clear();
+                self.strip_hard_breaks_from_selection();
             }
             PaletteCommand::CleanAttachments => {
                 self.search_open = false;
@@ -24000,7 +24058,12 @@ blockquote {
                 let mut do_check_updates = false;
                 let mut do_open_download: Option<String> = None;
 
-                ui.label(format!("Ariadne {}", update::current_version()));
+                ui.label(match option_env!("ARIADNE_GIT_HASH") {
+                    Some(hash) if !hash.is_empty() => {
+                        format!("Ariadne {} · build {hash}", update::current_version())
+                    }
+                    _ => format!("Ariadne {}", update::current_version()),
+                });
                 match &self.update_state.status {
                     UpdateStatus::Idle => {
                         ui.label(
@@ -38567,6 +38630,19 @@ mod tests {
         assert_eq!(app.selection, SidebarSelection::Group(app.groups.len() - 1));
         assert_eq!(app.selected_sheet, before);
         assert!(app.status.contains("2 chapters"));
+    }
+
+    #[test]
+    fn clean_line_breaks_strips_markers_but_keeps_lines() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        app.sheets[0].content = "one\\\ntwo\\\n\\\n\nthree".to_string();
+        app.selection = SidebarSelection::Sheet(0);
+        app.selected_sheet = 0;
+        app.selected_sheets = vec![0];
+        app.strip_hard_breaks_from_selection();
+        assert_eq!(app.sheets[0].content, "one\ntwo\n\nthree");
+        assert!(app.status.contains("3 line-break markers"));
     }
 
     #[test]
