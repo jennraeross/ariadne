@@ -24,6 +24,8 @@ no runtime beyond the OS GUI layer.
 - **Editor:** Markdown source editing with muted syntax markers, `#` margin
   marks, lists (`Return` continues, `Tab`/`Shift-Tab` nests), checklists,
   quotes, code, and drag-and-drop image attachments (`![alt](attachment:…)`).
+  Dropping Markdown, plain-text, or project-archive (`.zip`) files imports
+  them instead; image files are attached.
   Selecting text opens a floating markup bar for bold, italic, heading, link,
   quote, and code. `Ctrl/Cmd+click` a link to open it; internal links
   (`#heading-slug`, or `ariadne://<sheet-id>#heading-slug` copied from the
@@ -166,7 +168,9 @@ own CSS:
   sheet's headings (linked in Markdown and HTML/ePub).
 - **Share project archive** exports the whole library — sheets, groups,
   attachments, history, and settings — as one `.zip` for backup or moving to
-  another machine.
+  another machine. **Import project archive…** (in the same panel or the
+  command palette, or by dropping the `.zip`) merges one back in; imports
+  never delete sheets that are newer than the archive.
 - The `Export Style Guide` starter sheet documents the stylesheet selectors;
   the `Write First, Present Later` starter sheet documents present mode.
 
@@ -230,7 +234,8 @@ available update. Checks can be turned off in the same tab.
 
 - Local library: OS app-data folder (`com.craft-anything.ariadne`),
   `library.json` plus `window.json` (geometry), custom themes, and the
-  `ariadne-styles` folder.
+  `ariadne-styles` folder. The status bar shows **Saving…**, **Saved**, or a
+  red **Not saved** with the reason and automatic retries.
 - `ARIADNE_LIBRARY_PATH`, `ARIADNE_WINDOW_PATH`, `ARIADNE_ICLOUD_DIR`, and
   `ARIADNE_GDRIVE_DIR` redirect storage (used by tests and screenshot runs).
 - Sync mirrors stay human-readable: folders plus `.md` files for iCloud
