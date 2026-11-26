@@ -39,7 +39,10 @@ arboard = "3"
 # Safe URL opening (ShellExecute/xdg-open/`open`), no shell on Windows.
 webbrowser = "1"
 # Local calendar dates for daily goals/streaks (native; wasm uses js_sys).
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# jiff, not chrono: chrono is unmaintained (RUSTSEC-2026-0543), and making it
+# a direct dependency fails the advisory audit even though oauth2 pulls it
+# transitively.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 # Google Drive sync (background thread, blocking I/O; no async runtime).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 oauth2 = { version = "5", features = ["reqwest-blocking"] }

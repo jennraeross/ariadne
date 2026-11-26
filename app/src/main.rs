@@ -27989,9 +27989,13 @@ impl WritingApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use chrono::Datelike as _;
-            let today = chrono::Local::now().date_naive();
-            (today.year() as i64, today.month(), today.day())
+            // jiff reads the operating system's local timezone.
+            let today = jiff::Zoned::now().date();
+            (
+                today.year() as i64,
+                today.month() as u32,
+                today.day() as u32,
+            )
         }
     }
 
