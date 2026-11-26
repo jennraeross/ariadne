@@ -18960,15 +18960,109 @@ blockquote {
     /// when the `dialogs` feature is on, otherwise into the Downloads folder
     /// (or temp dir) with the path reported in the status bar.
     fn do_export(&mut self, fmt: ExportFormat) {
+        self.start_document_export(fmt, false);
+    }
+
+    /// Build an export and deliver it. Page-heavy formats (PDF/DOCX/EPUB)
+    /// run on a worker thread so a long manuscript cannot freeze the UI;
+    /// text formats stay synchronous because they are effectively instant.
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
+    fn start_document_export(&mut self, fmt: ExportFormat, open_with_app: bool) {
         let targets = self.export_targets();
         if targets.is_empty() {
             self.status = "Nothing to export".to_string();
             return;
         }
+        if self.export_rx.is_some() {
+            self.status = "An export is already running".to_string();
+            return;
+        }
         let stem = Self::export_stem(&self.sheets, &targets);
         let filename = format!("{stem}.{}", fmt.extension());
-        let (bytes, warnings) = self.export_bytes_for(fmt, &targets);
-        self.write_export_file(&bytes, &filename, fmt, &warnings);
+        let heavy = !cfg!(target_arch = "wasm32")
+            && matches!(
+                fmt,
+                ExportFormat::Pdf | ExportFormat::Docx | ExportFormat::Epub
+            );
+        if !heavy {
+            let (bytes, warnings) = self.export_bytes_for(fmt, &targets);
+            if open_with_app {
+                self.finish_share_export(&bytes, &filename, &warnings);
+            } else {
+                self.write_export_file(&bytes, &filename, fmt, &warnings);
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut warnings = Vec::new();
+            if let Some(warning) = self.refresh_active_style() {
+                warnings.push(warning);
+            }
+            let sheets = self.sheets.clone();
+            let export_css = self.export_css.clone();
+            let attached_fonts = self.attached_fonts.clone();
+            let attached_images = self.attached_images.clone();
+            let idxs = targets.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut app =
+                    Self::export_worker_app(sheets, export_css, attached_fonts, attached_images);
+                let (bytes, mut worker_warnings) = match fmt {
+                    ExportFormat::Pdf => app.export_pdf_bytes(&idxs),
+                    ExportFormat::Docx => (app.export_docx_bytes(&idxs), Vec::new()),
+                    ExportFormat::Epub => (app.export_epub_bytes(&idxs), Vec::new()),
+                    _ => (Vec::new(), Vec::new()),
+                };
+                worker_warnings.extend(warnings);
+                let _ = tx.send(ExportWorkerResult {
+                    bytes,
+                    warnings: worker_warnings,
+                });
+            });
+            self.export_rx = Some(rx);
+            self.export_pending = Some(ExportPending {
+                filename,
+                fmt,
+                open_with_app,
+            });
+            self.status = "Exporting…".to_string();
+            self.show_export_popover = false;
+        }
+    }
+
+    /// Poll the export worker and deliver finished bytes on the UI thread
+    /// (dialogs and browser downloads must run here).
+    fn poll_export_job(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.export_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.export_rx = None;
+                let Some(pending) = self.export_pending.take() else {
+                    return;
+                };
+                if pending.open_with_app {
+                    self.finish_share_export(&result.bytes, &pending.filename, &result.warnings);
+                } else {
+                    self.write_export_file(
+                        &result.bytes,
+                        &pending.filename,
+                        pending.fmt,
+                        &result.warnings,
+                    );
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.export_rx = None;
+                self.export_pending = None;
+                self.status = "Export failed: the worker stopped unexpectedly".to_string();
+            }
+        }
     }
 
     /// Build export bytes for the given sheets, refreshing the active style
@@ -19687,40 +19781,45 @@ blockquote {
     /// Share the current export: build it, write it to a temp file, and hand
     /// it to the operating system to open with the default app. Browser
     /// build: no OS handoff exists, so the export downloads instead.
-    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn share_export(&mut self, fmt: ExportFormat) {
-        let targets = self.export_targets();
-        if targets.is_empty() {
-            self.status = "Nothing to export".to_string();
-            return;
-        }
-        let stem = Self::export_stem(&self.sheets, &targets);
-        let filename = format!("{stem}.{}", fmt.extension());
-        let (bytes, warnings) = self.export_bytes_for(fmt, &targets);
+        self.start_document_export(fmt, true);
+    }
+
+    /// Hand finished bytes to the OS (or download them in the browser).
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
+    fn finish_share_export(&mut self, bytes: &[u8], filename: &str, warnings: &[String]) {
         #[cfg(target_arch = "wasm32")]
         {
             if crate::web::download(
-                &filename,
-                &bytes,
-                crate::web::mime_for_ext(&fmt.extension()),
+                filename,
+                bytes,
+                crate::web::mime_for_ext(
+                    std::path::Path::new(filename)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or(""),
+                ),
             ) {
                 self.status = format!("Downloaded {filename}");
-                Self::append_warnings(&mut self.status, &warnings);
+                Self::append_warnings(&mut self.status, warnings);
             } else {
                 self.status = "Could not share: the browser blocked the download".to_string();
             }
             self.show_export_popover = false;
             return;
         }
-        match self.write_temp_export(&bytes, &filename) {
-            Some(path) => match Self::open_with_default_app(&path) {
-                Ok(()) => {
-                    self.status = format!("Shared {filename}");
-                    Self::append_warnings(&mut self.status, &warnings);
-                }
-                Err(e) => self.status = format!("Could not share: {e}"),
-            },
-            None => self.status = "Could not prepare the export for sharing".to_string(),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match self.write_temp_export(bytes, filename) {
+                Some(path) => match Self::open_with_default_app(&path) {
+                    Ok(()) => {
+                        self.status = format!("Shared {filename}");
+                        Self::append_warnings(&mut self.status, warnings);
+                    }
+                    Err(e) => self.status = format!("Could not share: {e}"),
+                },
+                None => self.status = "Could not prepare the export for sharing".to_string(),
+            }
         }
         self.show_export_popover = false;
     }
@@ -29797,6 +29896,7 @@ impl eframe::App for WritingApp {
         }
         self.poll_present_images(ctx);
         self.poll_present_export(ctx);
+        self.poll_export_job(ctx);
         // Fallback geometry for persistence. Wayland offers no window
         // position, so egui's inner_rect is empty there; the screen rect
         // always reflects the current inner area in points.
