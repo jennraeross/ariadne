@@ -16,6 +16,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(target_arch = "wasm32")]
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod archive;
+
 mod grammar;
 
 mod gdrive;
@@ -16648,7 +16650,7 @@ blockquote {
             .iter()
             .map(|(n, d)| (n.as_str(), d.as_slice()))
             .collect();
-        Self::build_zip(&refs)
+        crate::archive::build_zip(&refs)
     }
 
     /// Slide title for the PPTX core-properties title: the presented sheet's
@@ -17252,81 +17254,6 @@ blockquote {
         out
     }
 
-    fn crc32(data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &b in data {
-            crc ^= b as u32;
-            for _ in 0..8 {
-                crc = if crc & 1 == 1 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-
-    /// Minimal stored (uncompressed) ZIP writer — enough for DOCX/ePub.
-    fn build_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
-        fn w16(out: &mut Vec<u8>, v: u16) {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        fn w32(out: &mut Vec<u8>, v: u32) {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        let mut out = Vec::new();
-        let mut central = Vec::new();
-        for (name, data) in files {
-            let crc = Self::crc32(data);
-            let head = out.len() as u32;
-            let len = data.len() as u32;
-            w32(&mut out, 0x0403_4B50);
-            w16(&mut out, 20);
-            w16(&mut out, 0x0800);
-            w16(&mut out, 0);
-            w16(&mut out, 0);
-            w16(&mut out, 0);
-            w32(&mut out, crc);
-            w32(&mut out, len);
-            w32(&mut out, len);
-            w16(&mut out, name.len() as u16);
-            w16(&mut out, 0);
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(data);
-            w32(&mut central, 0x0201_4B50);
-            w16(&mut central, 20);
-            w16(&mut central, 20);
-            w16(&mut central, 0x0800);
-            w16(&mut central, 0);
-            w16(&mut central, 0);
-            w16(&mut central, 0);
-            w32(&mut central, crc);
-            w32(&mut central, len);
-            w32(&mut central, len);
-            w16(&mut central, name.len() as u16);
-            w16(&mut central, 0);
-            w16(&mut central, 0);
-            w16(&mut central, 0);
-            w16(&mut central, 0);
-            w32(&mut central, 0);
-            w32(&mut central, head);
-            central.extend_from_slice(name.as_bytes());
-        }
-        let cstart = out.len() as u32;
-        out.extend_from_slice(&central);
-        let cend = out.len() as u32;
-        w32(&mut out, 0x0605_4B50);
-        w16(&mut out, 0);
-        w16(&mut out, 0);
-        w16(&mut out, files.len() as u16);
-        w16(&mut out, files.len() as u16);
-        w32(&mut out, cend - cstart);
-        w32(&mut out, cstart);
-        w16(&mut out, 0);
-        out
-    }
-
     fn docx_align(align: ExportAlign) -> Option<&'static str> {
         match align {
             ExportAlign::Left => None,
@@ -17847,7 +17774,7 @@ blockquote {
             .iter()
             .map(|(n, d)| (n.as_str(), d.as_slice()))
             .collect();
-        Self::build_zip(&refs)
+        crate::archive::build_zip(&refs)
     }
 
     fn export_epub_bytes(&self, idxs: &[usize]) -> Vec<u8> {
@@ -17922,7 +17849,7 @@ blockquote {
             .iter()
             .map(|(n, d)| (n.as_str(), d.as_slice()))
             .collect();
-        Self::build_zip(&refs)
+        crate::archive::build_zip(&refs)
     }
 
     /// Load a `.css` file as the export stylesheet (style name + contents
@@ -18444,7 +18371,7 @@ blockquote {
             .iter()
             .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
             .collect();
-        Self::build_zip(&refs)
+        crate::archive::build_zip(&refs)
     }
 
     /// Save the project archive via the native dialog (or a browser download
@@ -36398,7 +36325,7 @@ mod tests {
             }
             let name = std::str::from_utf8(&bytes[name_start..name_start + name_len]).ok()?;
             let data = &bytes[data_start..data_start + comp];
-            if WritingApp::crc32(data) != crc {
+            if crate::archive::crc32(data) != crc {
                 return None;
             }
             entries.push((name.to_string(), data.to_vec()));
