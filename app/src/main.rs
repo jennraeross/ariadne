@@ -5455,8 +5455,20 @@ blockquote {
     }
 
     /// Widget id of the main editor for `sel` (matches `edit_sheet_body`).
-    fn editor_widget_id(sel: usize) -> egui::Id {
-        egui::Id::new(format!("central_markdown_editor_{sel}"))
+    /// Stable editor widget id for a sheet UUID. Keying by UUID (not the
+    /// list index) keeps egui's cursor, scroll and undo state attached to
+    /// the same sheet after a permanent delete or drag-reorder shifts the
+    /// indices; otherwise Ctrl+Z could restore another sheet's text.
+    fn editor_widget_id_for(sheet_id: &str) -> egui::Id {
+        egui::Id::new(("central_markdown_editor", sheet_id))
+    }
+
+    /// Editor widget id for the sheet at `sel`.
+    fn editor_widget_id(&self, sel: usize) -> egui::Id {
+        match self.sheets.get(sel) {
+            Some(sheet) => Self::editor_widget_id_for(&sheet.id),
+            None => egui::Id::new(("central_markdown_editor", format!("missing-{sel}"))),
+        }
     }
 
     /// Keep the editor on the first sheet the current context shows without
@@ -5546,13 +5558,13 @@ blockquote {
         {
             return;
         }
-        let primary_id = Self::editor_widget_id(self.selected_sheet);
+        let primary_id = self.editor_widget_id(self.selected_sheet);
         let secondary_id = self
             .split_open
             .then_some(self.split_sheet)
             .flatten()
             .filter(|i| *i < self.sheets.len())
-            .map(Self::editor_widget_id);
+            .map(|i| self.editor_widget_id(i));
         let focused_editor = if ctx.memory(|m| m.has_focus(primary_id)) {
             Some(primary_id)
         } else if secondary_id.is_some_and(|id| ctx.memory(|m| m.has_focus(id))) {
@@ -6840,9 +6852,9 @@ blockquote {
         }
         let primary_focus = ui
             .ctx()
-            .memory(|m| m.has_focus(Self::editor_widget_id(primary)));
+            .memory(|m| m.has_focus(self.editor_widget_id(primary)));
         let secondary_focus =
-            secondary.is_some_and(|s| ui.ctx().memory(|m| m.has_focus(Self::editor_widget_id(s))));
+            secondary.is_some_and(|s| ui.ctx().memory(|m| m.has_focus(self.editor_widget_id(s))));
         let any_focus = primary_focus || secondary_focus;
         let primary_active = if any_focus { primary_focus } else { true };
         let avail = ui.available_size();
@@ -7250,6 +7262,7 @@ blockquote {
         end: usize,
         suggestion: &grammar::AppliedSuggestion,
     ) -> bool {
+        let edit_id = self.editor_widget_id(sel);
         let Some(sheet) = self.sheets.get_mut(sel) else {
             return false;
         };
@@ -7263,7 +7276,6 @@ blockquote {
         };
         sheet.content = next;
         sheet.modified = SystemTime::now();
-        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
         if let Some(mut state) = egui::TextEdit::load_state(ctx, edit_id) {
             state
                 .cursor
@@ -11410,11 +11422,12 @@ blockquote {
         let editor = self.editor_font(ui.ctx(), base_size);
         // Image paste: Cmd+V with the editor focused tries the system
         // clipboard first; plain text falls through to egui untouched.
-        let paste_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        // Resolve the UUID-based id before borrowing the sheet mutably.
+        let edit_id = self.editor_widget_id(sel);
+        let paste_id = edit_id;
         let paste_pressed = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V))
             && ui.ctx().memory(|m| m.has_focus(paste_id));
         if let Some(sheet) = self.sheets.get_mut(sel) {
-            let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
             // List behaviour: Return continues the item, and
             // Return on an empty item ends the list.
             let enter_plain =
@@ -13083,7 +13096,7 @@ blockquote {
         let Some(content) = self.sheets.get(sel).map(|s| s.content.clone()) else {
             return;
         };
-        let caret = egui::TextEdit::load_state(ctx, Self::editor_widget_id(sel))
+        let caret = egui::TextEdit::load_state(ctx, self.editor_widget_id(sel))
             .and_then(|state| state.cursor.char_range())
             .map(|range| range.primary.index)
             .unwrap_or(0);
@@ -14085,16 +14098,16 @@ blockquote {
         let mut sel = self.selected_sheet;
         // Prefer whichever selected sheet's editor actually has focus.
         for idx in &targets {
-            let edit_id = egui::Id::new(format!("central_markdown_editor_{idx}"));
+            let edit_id = self.editor_widget_id(*idx);
             if ctx.memory(|m| m.has_focus(edit_id)) {
                 sel = *idx;
                 break;
             }
         }
+        let edit_id = self.editor_widget_id(sel);
         let Some(sheet) = self.sheets.get_mut(sel) else {
             return;
         };
-        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
         if let Some(mut state) = egui::TextEdit::load_state(ctx, edit_id) {
             if let Some(range) = state.cursor.char_range() {
                 let at: usize = range.primary.index.min(sheet.content.chars().count());
@@ -21128,7 +21141,7 @@ blockquote {
         let Some(&(s, e)) = self.find_matches.get(self.find_index) else {
             return;
         };
-        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        let edit_id = self.editor_widget_id(sel);
         let mut state = egui::TextEdit::load_state(ctx, edit_id).unwrap_or_default();
         state
             .cursor
@@ -21261,7 +21274,7 @@ blockquote {
         self.find_undo = None;
         self.find_index = 0;
         self.find_scroll = false;
-        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        let edit_id = self.editor_widget_id(sel);
         ctx.memory_mut(|m| m.request_focus(edit_id));
     }
 
@@ -21785,7 +21798,7 @@ blockquote {
             .get(sel)
             .map(|s| s.content.chars().count())
             .unwrap_or(0);
-        let edit_id = egui::Id::new(format!("central_markdown_editor_{sel}"));
+        let edit_id = self.editor_widget_id(sel);
         let mut state = egui::TextEdit::load_state(ctx, edit_id).unwrap_or_default();
         state
             .cursor
@@ -34453,7 +34466,7 @@ mod tests {
         let mut app = sample_app();
         app.sheets[0].content = "Hello world".to_string();
         // Place the cursor after "Hello".
-        let edit_id = egui::Id::new("central_markdown_editor_0");
+        let edit_id = app.editor_widget_id(0);
         let mut state = egui::TextEdit::load_state(&ctx, edit_id).unwrap_or_default();
         let mut cc = egui::text::CCursor::new(5);
         cc.index = 5;
@@ -35348,7 +35361,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         let target = entries[1].offset;
         app.jump_to_offset(&ctx, 0, target);
-        let edit_id = egui::Id::new("central_markdown_editor_0");
+        let edit_id = app.editor_widget_id(0);
         let state = egui::TextEdit::load_state(&ctx, edit_id).expect("cursor stored");
         let range = state.cursor.char_range().expect("cursor set");
         assert_eq!(range.primary.index, target);
@@ -38891,14 +38904,28 @@ mod tests {
     }
 
     #[test]
-    fn editor_widget_ids_are_stable_per_sheet() {
+    fn editor_widget_ids_follow_sheet_uuid_not_index() {
+        let mut app = sample_app();
+        let first = app.sheets[0].id.clone();
+        let second = app.sheets[1].id.clone();
         assert_eq!(
-            WritingApp::editor_widget_id(3),
-            WritingApp::editor_widget_id(3)
+            app.editor_widget_id(0),
+            WritingApp::editor_widget_id_for(&first)
         );
-        assert_ne!(
-            WritingApp::editor_widget_id(3),
-            WritingApp::editor_widget_id(4)
+        assert_eq!(
+            app.editor_widget_id(1),
+            WritingApp::editor_widget_id_for(&second)
+        );
+        // Moving a sheet to another list position must move its widget id
+        // with it (this is what keeps egui's undo stack on the right text).
+        app.sheets.swap(0, 1);
+        assert_eq!(
+            app.editor_widget_id(0),
+            WritingApp::editor_widget_id_for(&second)
+        );
+        assert_eq!(
+            app.editor_widget_id(1),
+            WritingApp::editor_widget_id_for(&first)
         );
     }
 
