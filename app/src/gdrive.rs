@@ -196,10 +196,7 @@ pub struct PushPlan {
     pub deletes: Vec<String>,
 }
 
-pub fn plan_push(
-    local: &BTreeMap<String, Vec<u8>>,
-    remote: &[DriveEntry],
-) -> PushPlan {
+pub fn plan_push(local: &BTreeMap<String, Vec<u8>>, remote: &[DriveEntry]) -> PushPlan {
     let mut plan = PushPlan::default();
     let mut remote_by_path: HashMap<&str, &DriveEntry> = HashMap::new();
     for e in remote {
@@ -208,7 +205,9 @@ pub fn plan_push(
     for (path, bytes) in local {
         match remote_by_path.get(path.as_str()) {
             Some(e) if e.md5.as_deref() == Some(md5_hex(bytes).as_str()) => {}
-            Some(e) => plan.upserts.push((path.clone(), bytes.clone(), Some(e.id.clone()))),
+            Some(e) => plan
+                .upserts
+                .push((path.clone(), bytes.clone(), Some(e.id.clone()))),
             None => plan.upserts.push((path.clone(), bytes.clone(), None)),
         }
     }
@@ -249,7 +248,9 @@ pub enum DriveJob {
 pub enum DriveEvent {
     /// Browser needs opening to continue the login flow.
     LoginUrl(String),
-    Authed { email: String },
+    Authed {
+        email: String,
+    },
     SignedOut,
     AuthFailed(String),
     Pulled {
@@ -348,11 +349,11 @@ impl Worker {
     }
 
     fn login(&mut self, tx: &std::sync::mpsc::Sender<DriveEvent>) -> DriveEvent {
-        use oauth2::{
-            AuthType, AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-            RedirectUrl, Scope, TokenUrl,
-        };
         use oauth2::basic::BasicClient;
+        use oauth2::{
+            AuthType, AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
+            Scope, TokenUrl,
+        };
 
         // Bind loopback first so the redirect URI carries the real port.
         let server = match tiny_http::Server::http("127.0.0.1:0") {
@@ -392,10 +393,7 @@ impl Worker {
             .add_extra_param("access_type", "offline")
             .add_extra_param("prompt", "consent")
             .url();
-        if tx
-            .send(DriveEvent::LoginUrl(url.to_string()))
-            .is_err()
-        {
+        if tx.send(DriveEvent::LoginUrl(url.to_string())).is_err() {
             return DriveEvent::AuthFailed("UI went away".to_string());
         }
         let (code, _state) = match wait_for_code(server, csrf.secret()) {
@@ -571,8 +569,7 @@ impl Worker {
         let v: serde_json::Value = resp
             .json()
             .map_err(|e| format!("Profile parse failed: {e}"))?;
-        Ok(v
-            .get("email")
+        Ok(v.get("email")
             .and_then(|e| e.as_str())
             .unwrap_or("")
             .to_string())
@@ -594,10 +591,7 @@ impl Worker {
 
 /// Download the remote mirror + attachments into the local staging dir
 /// (skip-if-identical), so other-device images resolve offline.
-fn stage_remote_files(
-    files: &mut impl DriveFiles,
-    listing: &[DriveEntry],
-) -> Result<(), String> {
+fn stage_remote_files(files: &mut impl DriveFiles, listing: &[DriveEntry]) -> Result<(), String> {
     let Some(stage) = staging_dir() else {
         return Ok(());
     };
@@ -614,14 +608,12 @@ fn stage_remote_files(
         }
         let bytes = files.download(&e.id)?;
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("Staging dir failed: {err}"))?;
+            std::fs::create_dir_all(parent).map_err(|err| format!("Staging dir failed: {err}"))?;
         }
         std::fs::write(&dest, &bytes).map_err(|err| format!("Staging write failed: {err}"))?;
     }
     // Prune staged files that no longer exist remotely.
-    let wanted: std::collections::HashSet<&str> =
-        listing.iter().map(|e| e.path.as_str()).collect();
+    let wanted: std::collections::HashSet<&str> = listing.iter().map(|e| e.path.as_str()).collect();
     prune_staging(&stage, &stage, &wanted);
     Ok(())
 }
@@ -656,7 +648,11 @@ fn ensure_dirs(
     Ok(current)
 }
 
-fn prune_staging(stage: &std::path::Path, dir: &std::path::Path, wanted: &std::collections::HashSet<&str>) {
+fn prune_staging(
+    stage: &std::path::Path,
+    dir: &std::path::Path,
+    wanted: &std::collections::HashSet<&str>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -684,7 +680,8 @@ fn prune_staging(stage: &std::path::Path, dir: &std::path::Path, wanted: &std::c
 /// Local staging dir for the Drive mirror (`<data-dir>/gdrive/`). Holds the
 /// generated `*.md`/attachments uploaded on push and the copies downloaded
 /// on pull for offline image resolution.
-pub fn staging_dir() -> Option<std::path::PathBuf> {    if let Ok(p) = std::env::var("ARIADNE_GDRIVE_DIR") {
+pub fn staging_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("ARIADNE_GDRIVE_DIR") {
         if !p.is_empty() {
             return Some(std::path::PathBuf::from(p));
         }
@@ -743,8 +740,7 @@ fn wait_for_code(
         match server.recv_timeout(deadline - now) {
             Ok(Some(request)) => {
                 let full = format!("http://localhost{}", request.url());
-                let parsed =
-                    url::Url::parse(&full).map_err(|e| format!("Bad redirect: {e}"))?;
+                let parsed = url::Url::parse(&full).map_err(|e| format!("Bad redirect: {e}"))?;
                 let mut code = None;
                 let mut state = None;
                 for (k, v) in parsed.query_pairs() {
@@ -780,10 +776,10 @@ fn refresh_tokens(
 ) -> Result<GoogleTokens, String> {
     use oauth2::basic::BasicClient;
     use oauth2::{AuthType, AuthUrl, ClientId, ClientSecret, RefreshToken, TokenUrl};
-    let auth_url = AuthUrl::new(AUTH_URL.to_string())
-        .map_err(|e| format!("Bad auth endpoint: {e}"))?;
-    let token_url = TokenUrl::new(TOKEN_URL.to_string())
-        .map_err(|e| format!("Bad token endpoint: {e}"))?;
+    let auth_url =
+        AuthUrl::new(AUTH_URL.to_string()).map_err(|e| format!("Bad auth endpoint: {e}"))?;
+    let token_url =
+        TokenUrl::new(TOKEN_URL.to_string()).map_err(|e| format!("Bad token endpoint: {e}"))?;
     let client = BasicClient::new(ClientId::new(client_id.to_string()))
         .set_client_secret(ClientSecret::new(client_secret.to_string()))
         .set_auth_type(AuthType::RequestBody)
@@ -870,11 +866,7 @@ impl<'a> DriveHttp<'a> {
             return Worker::check_status(resp);
         }
         // One refresh + retry, then give up.
-        let refresh = self
-            .worker
-            .tokens
-            .as_ref()
-            .map(|t| t.refresh_token.clone());
+        let refresh = self.worker.tokens.as_ref().map(|t| t.refresh_token.clone());
         let Some(refresh) = refresh else {
             return Err("unauthorized".to_string());
         };
@@ -957,11 +949,13 @@ impl DriveFiles for DriveHttp<'_> {
     }
 
     fn download(&mut self, file_id: &str) -> Result<Vec<u8>, String> {
-        let url = format!("{}?alt=media", Self::drive_url(&format!("/files/{file_id}")));
+        let url = format!(
+            "{}?alt=media",
+            Self::drive_url(&format!("/files/{file_id}"))
+        );
         let mut resp = self.get(&url)?;
         let mut bytes = Vec::new();
-        resp
-            .copy_to(&mut bytes)
+        resp.copy_to(&mut bytes)
             .map_err(|e| format!("Download failed: {e}"))?;
         Ok(bytes)
     }
@@ -1061,10 +1055,7 @@ impl DriveHttp<'_> {
     ) -> Result<(), String> {
         let mut page_token: Option<String> = None;
         loop {
-            let q = format!(
-                "'{}' in parents and trashed = false",
-                folder_id
-            );
+            let q = format!("'{}' in parents and trashed = false", folder_id);
             let mut url = format!(
                 "{}?q={}&fields=files(id,name,mimeType,md5Checksum,modifiedTime),nextPageToken&pageSize=200&spaces=drive",
                 Self::drive_url("/files"),
@@ -1072,12 +1063,12 @@ impl DriveHttp<'_> {
             );
             if let Some(t) = &page_token {
                 url.push_str("&pageToken=");
-                url.push_str(&url::form_urlencoded::byte_serialize(t.as_bytes()).collect::<String>());
+                url.push_str(
+                    &url::form_urlencoded::byte_serialize(t.as_bytes()).collect::<String>(),
+                );
             }
             let resp = self.get(&url)?;
-            let v: serde_json::Value = resp
-                .json()
-                .map_err(|e| format!("List failed: {e}"))?;
+            let v: serde_json::Value = resp.json().map_err(|e| format!("List failed: {e}"))?;
             let files = v
                 .get("files")
                 .and_then(|f| f.as_array())
@@ -1090,8 +1081,7 @@ impl DriveHttp<'_> {
                 ) else {
                     continue;
                 };
-                let is_folder =
-                    f.get("mimeType").and_then(|m| m.as_str()) == Some(FOLDER_MIME);
+                let is_folder = f.get("mimeType").and_then(|m| m.as_str()) == Some(FOLDER_MIME);
                 let path = if prefix.is_empty() {
                     name.to_string()
                 } else {
@@ -1160,18 +1150,17 @@ impl DriveHttp<'_> {
                     url,
                 )
                 .bearer_auth(token)
-                .header("Content-Type", format!("multipart/related; boundary={boundary}"))
+                .header(
+                    "Content-Type",
+                    format!("multipart/related; boundary={boundary}"),
+                )
                 .body(body.clone());
             req.send()
         };
         let resp = send(&self.worker.http, self.worker.bearer(), &url)
             .map_err(|e| format!("Upload failed: {e}"))?;
         let resp = if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            let refresh = self
-                .worker
-                .tokens
-                .as_ref()
-                .map(|t| t.refresh_token.clone());
+            let refresh = self.worker.tokens.as_ref().map(|t| t.refresh_token.clone());
             let Some(refresh) = refresh else {
                 return Err("unauthorized".to_string());
             };
@@ -1181,12 +1170,12 @@ impl DriveHttp<'_> {
                 &self.worker.client_secret,
                 &refresh,
             )
-                    .map_err(|e| format!("Re-auth needed: {e}"))?;
+            .map_err(|e| format!("Re-auth needed: {e}"))?;
             self.worker.token_store.save(&tokens);
             let token = tokens.access_token.clone();
             self.worker.tokens = Some(tokens);
-            let resp = send(&self.worker.http, token, &url)
-                .map_err(|e| format!("Upload failed: {e}"))?;
+            let resp =
+                send(&self.worker.http, token, &url).map_err(|e| format!("Upload failed: {e}"))?;
             Worker::check_status(resp)?
         } else {
             Worker::check_status(resp)?
@@ -1374,10 +1363,7 @@ mod tests {
         let plan = plan_push(&local, &remote);
         // library.json + New.md created, Kept.md untouched, Stale.md gone.
         assert_eq!(plan.upserts.len(), 2);
-        assert!(plan
-            .upserts
-            .iter()
-            .all(|(_, _, id)| id.is_none()));
+        assert!(plan.upserts.iter().all(|(_, _, id)| id.is_none()));
         assert_eq!(plan.deletes, vec!["s".to_string()]);
     }
 

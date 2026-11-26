@@ -1536,7 +1536,8 @@ struct SavedLibrary {
     /// Positive words added per day (`YYYY-MM-DD` UTC), for the history
     /// chart and the daily-session metric store.
     #[serde(default)]
-    daily_words: std::collections::HashMap<String, u64>,    /// Words removed from the custom dictionary. A word in both lists
+    daily_words: std::collections::HashMap<String, u64>,
+    /// Words removed from the custom dictionary. A word in both lists
     /// counts as removed, so un-learning propagates too.
     #[serde(default)]
     dictionary_removes: Vec<String>,
@@ -1611,8 +1612,7 @@ fn parse_created_date(input: &str) -> Option<SystemTime> {
         return None;
     }
     // Reject dates that normalize into another month (e.g. Feb 30).
-    let (_, check_month, check_day) =
-        civil_from_days(days_from_civil(year, month, day));
+    let (_, check_month, check_day) = civil_from_days(days_from_civil(year, month, day));
     if check_month != month || check_day != day {
         return None;
     }
@@ -3910,9 +3910,9 @@ impl WritingApp {
                     group: Some(0),
                     trashed: false,
                     modified: now.checked_sub(day).unwrap_or(now),
-                
+
                     material: false,
-                
+
                     favorite: false,
                     keywords: Vec::new(),},
                 Sheet {
@@ -3924,9 +3924,9 @@ impl WritingApp {
                     group: Some(0),
                     trashed: false,
                     modified: now.checked_sub(day * 3).unwrap_or(now),
-                
+
                     material: false,
-                
+
                     favorite: false,
                     keywords: Vec::new(),},
                 Sheet {
@@ -3937,9 +3937,9 @@ impl WritingApp {
                     group: Some(1),
                     trashed: false,
                     modified: now.checked_sub(day * 10).unwrap_or(now),
-                
+
                     material: false,
-                
+
                     favorite: false,
                     keywords: Vec::new(),},
                 Self::export_style_guide_sheet(Some(0)),
@@ -6167,7 +6167,8 @@ blockquote {
     }
 
     /// Create a sheet in the group implied by the current selection.
-    fn create_sheet(&mut self) {        let g = self.default_group();
+    fn create_sheet(&mut self) {
+        let g = self.default_group();
         let n = self.sheets.len() + 1;
         self.sheets.push(Sheet {
             section: self
@@ -6181,11 +6182,12 @@ blockquote {
             group: Some(g),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         self.selected_sheet = self.sheets.len() - 1;
         self.selected_sheets = vec![self.selected_sheet];
         if let Some(id) = self.sheets.get(self.selected_sheet).map(|s| s.id.clone()) {
@@ -6443,10 +6445,7 @@ blockquote {
                             .sheets
                             .iter()
                             .enumerate()
-                            .filter(|(i, s)| {
-                                !s.trashed
-                                    && Some(*i) != Some(self.selected_sheet)
-                            })
+                            .filter(|(i, s)| !s.trashed && Some(*i) != Some(self.selected_sheet))
                             .map(|(i, s)| (i, Self::inferred_title(&s.content)))
                             .collect();
                         egui::ComboBox::from_id_salt(("split-sheet-picker",))
@@ -6454,10 +6453,7 @@ blockquote {
                             .width(180.0)
                             .show_ui(ui, |ui| {
                                 for (idx, name) in &candidates {
-                                    if ui
-                                        .selectable_label(sel == Some(*idx), name)
-                                        .clicked()
-                                    {
+                                    if ui.selectable_label(sel == Some(*idx), name).clicked() {
                                         self.split_sheet = Some(*idx);
                                     }
                                 }
@@ -6475,57 +6471,54 @@ blockquote {
                                 .color(self.theme.text_faint()),
                         );
                     }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if secondary {
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(icon::X)
-                                                .size(12.0)
-                                                .color(self.theme.text_faint()),
-                                        )
-                                        .frame(false),
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if secondary {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(icon::X)
+                                            .size(12.0)
+                                            .color(self.theme.text_faint()),
                                     )
-                                    .on_hover_text("Close the split editor")
-                                    .clicked()
-                                {
-                                    self.split_open = false;
-                                    self.split_sheet = None;
-                                }
-                                let orient = if self.split_side_by_side {
-                                    icon::ROWS
-                                } else {
-                                    icon::COLUMNS
-                                };
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(orient)
-                                                .size(12.0)
-                                                .color(self.theme.text_faint()),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .on_hover_text(if self.split_side_by_side {
-                                        "Stack the editors"
-                                    } else {
-                                        "Place the editors side by side"
-                                    })
-                                    .clicked()
-                                {
-                                    self.split_side_by_side = !self.split_side_by_side;
-                                }
-                            } else {
-                                ui.label(
-                                    RichText::new(if active { "Active" } else { "" })
-                                        .size(9.0)
-                                        .color(self.theme.accent()),
-                                );
+                                    .frame(false),
+                                )
+                                .on_hover_text("Close the split editor")
+                                .clicked()
+                            {
+                                self.split_open = false;
+                                self.split_sheet = None;
                             }
-                        },
-                    );
+                            let orient = if self.split_side_by_side {
+                                icon::ROWS
+                            } else {
+                                icon::COLUMNS
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(orient)
+                                            .size(12.0)
+                                            .color(self.theme.text_faint()),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text(if self.split_side_by_side {
+                                    "Stack the editors"
+                                } else {
+                                    "Place the editors side by side"
+                                })
+                                .clicked()
+                            {
+                                self.split_side_by_side = !self.split_side_by_side;
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new(if active { "Active" } else { "" })
+                                    .size(9.0)
+                                    .color(self.theme.accent()),
+                            );
+                        }
+                    });
                 });
                 ui.separator();
                 if let Some(sel) = sel {
@@ -6578,16 +6571,10 @@ blockquote {
         let primary_focus = ui
             .ctx()
             .memory(|m| m.has_focus(Self::editor_widget_id(primary)));
-        let secondary_focus = secondary.is_some_and(|s| {
-            ui.ctx()
-                .memory(|m| m.has_focus(Self::editor_widget_id(s)))
-        });
+        let secondary_focus =
+            secondary.is_some_and(|s| ui.ctx().memory(|m| m.has_focus(Self::editor_widget_id(s))));
         let any_focus = primary_focus || secondary_focus;
-        let primary_active = if any_focus {
-            primary_focus
-        } else {
-            true
-        };
+        let primary_active = if any_focus { primary_focus } else { true };
         let avail = ui.available_size();
         if self.split_side_by_side {
             let gap = 10.0;
@@ -6633,7 +6620,8 @@ blockquote {
 
     /// Sheets exports, statistics, goals, and presentation operate on:
     /// the editor selection without material sheets.
-    fn export_targets(&self) -> Vec<usize> {        self.editor_targets()
+    fn export_targets(&self) -> Vec<usize> {
+        self.editor_targets()
             .into_iter()
             .filter(|i| self.sheets.get(*i).map(|s| !s.material).unwrap_or(false))
             .collect()
@@ -7068,16 +7056,9 @@ blockquote {
     }
 
     fn navigate_back(&mut self) {
-        let current = self
-            .sheets
-            .get(self.selected_sheet)
-            .map(|s| s.id.clone());
+        let current = self.sheets.get(self.selected_sheet).map(|s| s.id.clone());
         while let Some(id) = self.nav_back.pop() {
-            if let Some(idx) = self
-                .sheets
-                .iter()
-                .position(|s| s.id == id && !s.trashed)
-            {
+            if let Some(idx) = self.sheets.iter().position(|s| s.id == id && !s.trashed) {
                 if let Some(current) = current {
                     self.nav_forward.push(current);
                 }
@@ -7089,16 +7070,9 @@ blockquote {
     }
 
     fn navigate_forward(&mut self) {
-        let current = self
-            .sheets
-            .get(self.selected_sheet)
-            .map(|s| s.id.clone());
+        let current = self.sheets.get(self.selected_sheet).map(|s| s.id.clone());
         while let Some(id) = self.nav_forward.pop() {
-            if let Some(idx) = self
-                .sheets
-                .iter()
-                .position(|s| s.id == id && !s.trashed)
-            {
+            if let Some(idx) = self.sheets.iter().position(|s| s.id == id && !s.trashed) {
                 if let Some(current) = current {
                     self.nav_back.push(current);
                 }
@@ -7258,11 +7232,12 @@ blockquote {
                     group: None,
                     trashed: false,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
             ));
         }
         self.sheets = rebuilt.into_iter().map(|o| o.unwrap()).collect();
@@ -9258,10 +9233,10 @@ blockquote {
                     library_visible: None,
                     sheets_visible: None,
                     word_goal: 0,
-            daily_goal: 0,
-            deadline: None,
-            deadline_target: 0,
-            daily_words: std::collections::HashMap::new(),
+                    daily_goal: 0,
+                    deadline: None,
+                    deadline_target: 0,
+                    daily_words: std::collections::HashMap::new(),
                     app_theme: AppTheme::default(),
                     editor_font_family: None,
                     present_colors: Vec::new(),
@@ -9280,7 +9255,7 @@ blockquote {
                     style_visible: false,
                     created_dates: self.created_dates.clone(),
                     group_styles: self.group_styles.clone(),
-            keyword_styles: self.keyword_styles.clone(),
+                    keyword_styles: self.keyword_styles.clone(),
                     dictionary_adds: self.grammar.dict_adds.iter().cloned().collect(),
                     dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
                     dirty: false,
@@ -10233,14 +10208,8 @@ blockquote {
                     if let Some(end) = s[i + 1..].find('$') {
                         let inner = &s[i + 1..i + 1 + end];
                         if inner.is_empty()
-                            || inner
-                                .chars()
-                                .next()
-                                .is_some_and(|c| c.is_whitespace())
-                            || inner
-                                .chars()
-                                .last()
-                                .is_some_and(|c| c.is_whitespace())
+                            || inner.chars().next().is_some_and(|c| c.is_whitespace())
+                            || inner.chars().last().is_some_and(|c| c.is_whitespace())
                         {
                             // Currency or prose, not math.
                             buf.push('$');
@@ -10877,11 +10846,7 @@ blockquote {
                         b.saturating_sub(2),
                     )
                 } else {
-                    (
-                        format!("{before}**{selected}**{after}"),
-                        a + 2,
-                        b + 2,
-                    )
+                    (format!("{before}**{selected}**{after}"), a + 2, b + 2)
                 }
             }
             MarkupKind::Italic => {
@@ -10907,11 +10872,7 @@ blockquote {
                         b.saturating_sub(1),
                     )
                 } else if selected.contains('\n') {
-                    (
-                        format!("{before}```\n{selected}\n```{after}"),
-                        a + 4,
-                        b + 4,
-                    )
+                    (format!("{before}```\n{selected}\n```{after}"), a + 4, b + 4)
                 } else {
                     (format!("{before}`{selected}`{after}"), a + 1, b + 1)
                 }
@@ -10921,8 +10882,8 @@ blockquote {
                 let middle = "](";
                 let url = "https://";
                 let inserted = format!("{prefix}{selected}{middle}{url})");
-                let url_start = a + prefix.chars().count() + selected.chars().count()
-                    + middle.chars().count();
+                let url_start =
+                    a + prefix.chars().count() + selected.chars().count() + middle.chars().count();
                 (
                     format!("{before}{inserted}{after}"),
                     url_start,
@@ -10962,7 +10923,12 @@ blockquote {
                 let new_block = lines.join("\n");
                 let start_char = content[..line_start].chars().count();
                 (
-                    format!("{}{}{}", &content[..line_start], new_block, &content[line_end..]),
+                    format!(
+                        "{}{}{}",
+                        &content[..line_start],
+                        new_block,
+                        &content[line_end..]
+                    ),
                     start_char,
                     start_char + new_block.chars().count(),
                 )
@@ -11118,17 +11084,16 @@ blockquote {
             let sel_state_id = egui::Id::new(("markup-selection", sel));
             let bar_rect_id = egui::Id::new(("markup-bar-rect", sel));
             let stored_rect = ui.data_mut(|d| d.get_temp::<egui::Rect>(bar_rect_id));
-            let stored_selection =
-                ui.data_mut(|d| d.get_temp::<(usize, usize)>(sel_state_id));
-            let pointer_over_bar = ui.ctx().pointer_latest_pos().is_some_and(|p| {
-                stored_rect.is_some_and(|r| r.expand(4.0).contains(p))
-            });
+            let stored_selection = ui.data_mut(|d| d.get_temp::<(usize, usize)>(sel_state_id));
+            let pointer_over_bar = ui
+                .ctx()
+                .pointer_latest_pos()
+                .is_some_and(|p| stored_rect.is_some_and(|r| r.expand(4.0).contains(p)));
             let editor_focused =
                 ui.ctx().memory(|m| m.has_focus(edit_id)) && ui.ctx().input(|i| i.focused);
             let current_selection = output.cursor_range.and_then(|range| {
                 let selected = range.as_sorted_char_range();
-                (selected.start != selected.end)
-                    .then_some((selected.start, selected.end))
+                (selected.start != selected.end).then_some((selected.start, selected.end))
             });
             let show_selection = if editor_focused {
                 if let Some(range) = current_selection {
@@ -11556,20 +11521,19 @@ blockquote {
                 }
             }
             if let (Some(kind), Some((a, b))) = (markup_action, markup_selection) {
-                let (next, new_start, new_end) =
-                    Self::apply_markup(&sheet.content, a, b, kind);
+                let (next, new_start, new_end) = Self::apply_markup(&sheet.content, a, b, kind);
                 if next != sheet.content {
                     sheet.content = next;
                     sheet.modified = SystemTime::now();
                     edited = true;
                 }
                 let mut state = output.state.clone();
-                state.cursor.set_char_range(Some(
-                    egui::text::CCursorRange::two(
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
                         egui::text::CCursor::new(new_start),
                         egui::text::CCursor::new(new_end),
-                    ),
-                ));
+                    )));
                 egui::TextEdit::store_state(ui.ctx(), edit_id, state);
                 ui.ctx().memory_mut(|m| m.request_focus(edit_id));
             }
@@ -11640,12 +11604,7 @@ blockquote {
     fn sheet_created(&self, idx: usize) -> SystemTime {
         self.sheets
             .get(idx)
-            .map(|s| {
-                self.created_dates
-                    .get(&s.id)
-                    .copied()
-                    .unwrap_or(s.modified)
-            })
+            .map(|s| self.created_dates.get(&s.id).copied().unwrap_or(s.modified))
             .unwrap_or(UNIX_EPOCH)
     }
 
@@ -12227,18 +12186,11 @@ blockquote {
                                 let b = read_group(&chars, &mut i);
                                 let a = Self::latex_to_unicode(&a);
                                 let b = Self::latex_to_unicode(&b);
-                                out.push_str(&format!(
-                                    "{}/{}",
-                                    fraction_arg(&a),
-                                    fraction_arg(&b)
-                                ));
+                                out.push_str(&format!("{}/{}", fraction_arg(&a), fraction_arg(&b)));
                             }
                             "sqrt" => {
                                 let a = read_group(&chars, &mut i);
-                                out.push_str(&format!(
-                                    "√({})",
-                                    Self::latex_to_unicode(&a)
-                                ));
+                                out.push_str(&format!("√({})", Self::latex_to_unicode(&a)));
                             }
                             "text" | "mathrm" | "mathbf" | "mathit" | "mathcal"
                             | "operatorname" | "mathbb" => {
@@ -12265,8 +12217,8 @@ blockquote {
                             "qquad" => out.push_str("    "),
                             "space" | "," | ";" | ":" => out.push(' '),
                             "!" => {}
-                            "sin" | "cos" | "tan" | "cot" | "sec" | "csc" | "log"
-                            | "ln" | "exp" | "lim" | "max" | "min" | "det" | "gcd" => {
+                            "sin" | "cos" | "tan" | "cot" | "sec" | "csc" | "log" | "ln"
+                            | "exp" | "lim" | "max" | "min" | "det" | "gcd" => {
                                 out.push_str(&cmd);
                             }
                             "mod" => out.push_str("mod"),
@@ -12425,7 +12377,6 @@ blockquote {
         })
     }
 
-
     /// Convert runs of pipe-table `Para` blocks into `Table` blocks.
     /// Requires a header row followed by a separator row, so ordinary prose
     /// containing a `|` stays prose.
@@ -12443,12 +12394,10 @@ blockquote {
                     continue;
                 }
             };
-            let aligns = blocks
-                .get(i + 1)
-                .and_then(|b| match b {
-                    Block::Para(t) => Self::table_aligns(t),
-                    _ => None,
-                });
+            let aligns = blocks.get(i + 1).and_then(|b| match b {
+                Block::Para(t) => Self::table_aligns(t),
+                _ => None,
+            });
             let Some(aligns) = aligns else {
                 out.push(blocks[i].clone());
                 i += 1;
@@ -12482,10 +12431,7 @@ blockquote {
             return None;
         }
         let inner = &t[1..t.len() - 1];
-        let cells: Vec<String> = inner
-            .split('|')
-            .map(|c| c.trim().to_string())
-            .collect();
+        let cells: Vec<String> = inner.split('|').map(|c| c.trim().to_string()).collect();
         if cells.is_empty() {
             None
         } else {
@@ -12588,7 +12534,13 @@ blockquote {
     fn table_at(
         content: &str,
         caret: usize,
-    ) -> Option<(usize, usize, Vec<String>, Vec<Vec<String>>, Vec<ExportAlign>)> {
+    ) -> Option<(
+        usize,
+        usize,
+        Vec<String>,
+        Vec<Vec<String>>,
+        Vec<ExportAlign>,
+    )> {
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         let mut starts = Vec::with_capacity(lines.len() + 1);
         let mut chars = 0usize;
@@ -12622,9 +12574,7 @@ blockquote {
             }
             if caret_line >= i && caret_line < end {
                 let rows: Vec<Vec<String>> = (i + 2..end)
-                    .filter_map(|j| {
-                        Self::table_row_cells(lines[j].trim_end_matches('\n'))
-                    })
+                    .filter_map(|j| Self::table_row_cells(lines[j].trim_end_matches('\n')))
                     .collect();
                 return Some((starts[i], starts[end], headers, rows, aligns));
             }
@@ -12634,11 +12584,7 @@ blockquote {
     }
 
     /// Serialize a table back to GFM Markdown, escaping cell pipes.
-    fn table_markdown(
-        headers: &[String],
-        rows: &[Vec<String>],
-        aligns: &[ExportAlign],
-    ) -> String {
+    fn table_markdown(headers: &[String], rows: &[Vec<String>], aligns: &[ExportAlign]) -> String {
         let cell = |s: &str| s.trim().replace('|', "\\|");
         let cols = headers.len().max(1);
         let mut out = String::from("|");
@@ -12886,8 +12832,7 @@ blockquote {
                                     row.resize(cols, String::new());
                                     for cell in row.iter_mut() {
                                         ui.add(
-                                            egui::TextEdit::singleline(cell)
-                                                .desired_width(120.0),
+                                            egui::TextEdit::singleline(cell).desired_width(120.0),
                                         );
                                     }
                                     ui.end_row();
@@ -13210,14 +13155,8 @@ blockquote {
                 if let Some(end) = s[i + 1..].find('$') {
                     let inner = &s[i + 1..i + 1 + end];
                     if !inner.trim().is_empty()
-                        && inner
-                            .chars()
-                            .next()
-                            .is_some_and(|c| !c.is_whitespace())
-                        && inner
-                            .chars()
-                            .last()
-                            .is_some_and(|c| !c.is_whitespace())
+                        && inner.chars().next().is_some_and(|c| !c.is_whitespace())
+                        && inner.chars().last().is_some_and(|c| !c.is_whitespace())
                     {
                         flush(&mut buf, &mut spans, bold, italic, code);
                         spans.push(Span {
@@ -13874,12 +13813,11 @@ blockquote {
                     for row in rows {
                         out.push_str("<tr>");
                         for c in 0..headers.len() {
-                            let align =
-                                match aligns.get(c).copied().unwrap_or(ExportAlign::Left) {
-                                    ExportAlign::Center => "center",
-                                    ExportAlign::Right => "right",
-                                    _ => "left",
-                                };
+                            let align = match aligns.get(c).copied().unwrap_or(ExportAlign::Left) {
+                                ExportAlign::Center => "center",
+                                ExportAlign::Right => "right",
+                                _ => "left",
+                            };
                             let cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
                             out.push_str(&format!(
                                 "<td style=\"text-align:{align}\">{}</td>",
@@ -16746,11 +16684,12 @@ blockquote {
                 trashed: false,
                 modified: SystemTime::now(),
                 conflict_of: None,
-            
+
                 material: false,
-            
+
                 favorite: false,
-                keywords: Vec::new(),}],
+                keywords: Vec::new(),
+            }],
             selection: SidebarSelection::Sheet(0),
             selected_sheet: 0,
             selected_sheets: vec![0],
@@ -17596,9 +17535,8 @@ blockquote {
             )
         }
         let cols = headers.len().max(1);
-        let mut xml = String::from(
-            "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>",
-        );
+        let mut xml =
+            String::from("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
         for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
             xml.push_str(&format!(
                 "<w:{edge} w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>"
@@ -17642,7 +17580,8 @@ blockquote {
         xml
     }
 
-    fn export_docx_bytes(&self, idxs: &[usize]) -> Vec<u8> {        let theme = ExportTheme::from_css(&self.export_css);
+    fn export_docx_bytes(&self, idxs: &[usize]) -> Vec<u8> {
+        let theme = ExportTheme::from_css(&self.export_css);
         let link_color = theme.link_color;
         let mut paras = Vec::new();
         let mut pending_break = false;
@@ -17782,11 +17721,8 @@ blockquote {
                         rows,
                         aligns,
                     } => {
-                        let _ = Self::take_page_break(
-                            &theme.body,
-                            &mut pending_break,
-                            &mut first_para,
-                        );
+                        let _ =
+                            Self::take_page_break(&theme.body, &mut pending_break, &mut first_para);
                         paras.push(Self::docx_table_block(
                             &headers,
                             &rows,
@@ -18501,10 +18437,7 @@ blockquote {
         for img in &self.attached_images {
             let src = format!("attachment:{}", img.id);
             if let Some((bytes, ext)) = self.resolve_image_bytes(&src) {
-                files.push((
-                    format!("attachments/{}.{}", img.id, ext),
-                    bytes,
-                ));
+                files.push((format!("attachments/{}.{}", img.id, ext), bytes));
             }
         }
         let refs: Vec<(&str, &[u8])> = files
@@ -18528,9 +18461,7 @@ blockquote {
                 .save_file();
             match path {
                 Some(path) => match std::fs::write(&path, &bytes) {
-                    Ok(()) => {
-                        self.status = format!("Shared project archive to {}", path.display())
-                    }
+                    Ok(()) => self.status = format!("Shared project archive to {}", path.display()),
                     Err(e) => self.status = format!("Archive failed: {e}"),
                 },
                 None => self.status = "Archive cancelled".to_string(),
@@ -18553,9 +18484,7 @@ blockquote {
                     .unwrap_or_else(std::env::temp_dir);
                 let path = dir.join(&filename);
                 match std::fs::write(&path, &bytes) {
-                    Ok(()) => {
-                        self.status = format!("Shared project archive to {}", path.display())
-                    }
+                    Ok(()) => self.status = format!("Shared project archive to {}", path.display()),
                     Err(e) => self.status = format!("Archive failed: {e}"),
                 }
             }
@@ -20269,11 +20198,7 @@ blockquote {
                 Some((M::COMMAND, egui::Key::N)),
                 PaletteCommand::NewSheet,
             ),
-            (
-                "New from template…",
-                None,
-                PaletteCommand::NewFromTemplate,
-            ),
+            ("New from template…", None, PaletteCommand::NewFromTemplate),
             ("Table editor…", None, PaletteCommand::InsertTable),
             ("Insert equation", None, PaletteCommand::InsertEquation),
             (
@@ -20503,8 +20428,7 @@ blockquote {
             self.status = "Revision mode — review suggestions, then exit".to_string();
         } else if self.revision_mode {
             self.revision_mode = false;
-            if let Some((library, sheets, focus, goals, style, history)) =
-                self.revision_prev.take()
+            if let Some((library, sheets, focus, goals, style, history)) = self.revision_prev.take()
             {
                 self.library_visible = library;
                 self.sheets_visible = sheets;
@@ -21484,9 +21408,7 @@ blockquote {
                                 .on_hover_text("Copy an internal link to this heading")
                                 .clicked()
                                 .then(|| {
-                                    copy_link = Some(format!(
-                                        "ariadne://{sheet_id}#{slug}"
-                                    ));
+                                    copy_link = Some(format!("ariadne://{sheet_id}#{slug}"));
                                 });
                             });
                         }
@@ -21573,65 +21495,55 @@ blockquote {
                                 None => "Saved as you edit".to_string(),
                             }
                         };
-                        ui.label(
-                            RichText::new(sub)
-                                .size(9.5)
-                                .color(if flashed {
+                        ui.label(RichText::new(sub).size(9.5).color(if flashed {
+                            Color32::from_rgb(0x4f, 0x8b, 0x57)
+                        } else {
+                            theme.text_faint()
+                        }));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if flashed {
+                                        format!("{}  Saved", icon::CHECK)
+                                    } else {
+                                        "Snapshot now".to_string()
+                                    })
+                                    .size(9.5)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                                )
+                                .fill(if flashed {
                                     Color32::from_rgb(0x4f, 0x8b, 0x57)
                                 } else {
-                                    theme.text_faint()
-                                }),
-                        );
+                                    theme.accent()
+                                })
+                                .min_size(Vec2::new(124.0, 32.0)),
+                            )
+                            .clicked()
+                        {
+                            snapshot_now = true;
+                        }
                     });
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(if flashed {
-                                            format!("{}  Saved", icon::CHECK)
-                                        } else {
-                                            "Snapshot now".to_string()
-                                        })
-                                        .size(9.5)
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                    )
-                                    .fill(if flashed {
-                                        Color32::from_rgb(0x4f, 0x8b, 0x57)
-                                    } else {
-                                        theme.accent()
-                                    })
-                                    .min_size(Vec2::new(124.0, 32.0)),
-                                )
-                                .clicked()
-                            {
-                                snapshot_now = true;
-                            }
-                        },
-                    );
                 });
                 if count > 0 {
                     ui.horizontal(|ui| {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Clear history")
-                                                .size(9.0)
-                                                .color(theme.text_faint()),
-                                        )
-                                        .frame(false),
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Clear history")
+                                            .size(9.0)
+                                            .color(theme.text_faint()),
                                     )
-                                    .clicked()
-                                {
-                                    clear = true;
-                                }
-                            },
-                        );
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                clear = true;
+                            }
+                        });
                     });
                 }
             });
@@ -21739,11 +21651,9 @@ blockquote {
                                                     .color(theme.text_bright()),
                                             );
                                             ui.label(
-                                                RichText::new(format!(
-                                                    "{words} words"
-                                                ))
-                                                .size(9.5)
-                                                .color(theme.text_main()),
+                                                RichText::new(format!("{words} words"))
+                                                    .size(9.5)
+                                                    .color(theme.text_main()),
                                             );
                                             let label = if is_current && snap.manual {
                                                 "Current version · manual".to_string()
@@ -21757,29 +21667,23 @@ blockquote {
                                             } else {
                                                 Self::snapshot_age(now, snap.at)
                                             };
-                                            ui.label(
-                                                RichText::new(label)
-                                                    .size(9.0)
-                                                    .color(if is_current {
-                                                        theme.accent()
-                                                    } else {
-                                                        theme.text_faint()
-                                                    }),
-                                            );
+                                            ui.label(RichText::new(label).size(9.0).color(
+                                                if is_current {
+                                                    theme.accent()
+                                                } else {
+                                                    theme.text_faint()
+                                                },
+                                            ));
                                         });
                                         ui.with_layout(
-                                            egui::Layout::right_to_left(
-                                                egui::Align::Center,
-                                            ),
+                                            egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 if ui
                                                     .add(
                                                         egui::Button::new(
                                                             RichText::new("Restore")
                                                                 .size(8.5)
-                                                                .color(
-                                                                    theme.text_main(),
-                                                                ),
+                                                                .color(theme.text_main()),
                                                         )
                                                         .fill(theme.card_selected())
                                                         .stroke(egui::Stroke::new(
@@ -21841,10 +21745,9 @@ blockquote {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
                 for theme in themes {
-                    let selected =
-                        self.app_theme == *theme && self.active_custom.is_none();
-                    let (rect, resp) = ui
-                        .allocate_exact_size(Vec2::new(128.0, 52.0), egui::Sense::click());
+                    let selected = self.app_theme == *theme && self.active_custom.is_none();
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(128.0, 52.0), egui::Sense::click());
                     let palette = theme.palette();
                     ui.painter().rect(
                         rect,
@@ -21864,8 +21767,7 @@ blockquote {
                         rect.left_top() + Vec2::new(10.0, 8.0),
                         Vec2::new(108.0, 18.0),
                     );
-                    ui.painter()
-                        .rect_filled(preview, 5.0, palette.bg_panel);
+                    ui.painter().rect_filled(preview, 5.0, palette.bg_panel);
                     let line = egui::Rect::from_min_size(
                         preview.left_top() + Vec2::new(10.0, 8.0),
                         Vec2::new(54.0, 4.0),
@@ -21882,11 +21784,7 @@ blockquote {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     resp.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            theme.title(),
-                        )
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, theme.title())
                     });
                     if resp
                         .on_hover_text(format!("{} theme", theme.title()))
@@ -22503,7 +22401,7 @@ blockquote {
                 });
                                 }
                                 SettingsTab::Editor => {
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Font:");
                     let current = self
@@ -22678,7 +22576,7 @@ blockquote {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(420.0);
                 // iCloud sync for the iCloud section (Documents stays local).
-                
+
                 let using_drive = Self::icloud_drive_dir().is_some();
                 let on_drive = Self::icloud_store_dir(self.icloud_dir.as_deref())
                     .map(|d| Some(d) == Self::icloud_drive_dir().map(|dd| dd.join("Ariadne")))
@@ -22798,7 +22696,7 @@ blockquote {
                 );
                 let mut do_check_updates = false;
                 let mut do_open_download: Option<String> = None;
-                
+
                 ui.label(format!("Ariadne {}", update::current_version()));
                 match &self.update_state.status {
                     UpdateStatus::Idle => {
@@ -23101,10 +22999,8 @@ blockquote {
         } else if resp.hovered() {
             ui.painter().rect_filled(rect, 8.0, self.theme.card_hover());
         }
-        let icon = egui::Rect::from_min_size(
-            rect.left_top() + Vec2::new(8.0, 13.0),
-            Vec2::splat(8.0),
-        );
+        let icon =
+            egui::Rect::from_min_size(rect.left_top() + Vec2::new(8.0, 13.0), Vec2::splat(8.0));
         ui.painter().rect_filled(
             icon,
             2.0,
@@ -23164,24 +23060,21 @@ blockquote {
                             .strong()
                             .color(self.theme.text_bright()),
                     );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(icon::X)
-                                            .size(14.0)
-                                            .color(self.theme.text_faint()),
-                                    )
-                                    .frame(false),
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(icon::X)
+                                        .size(14.0)
+                                        .color(self.theme.text_faint()),
                                 )
-                                .clicked()
-                            {
-                                *close = true;
-                            }
-                        },
-                    );
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            *close = true;
+                        }
+                    });
                 });
             });
         let rect = ui.available_rect_before_wrap();
@@ -23234,14 +23127,8 @@ blockquote {
     }
 
     /// One format card in the export grid.
-    fn export_format_card(
-        &self,
-        ui: &mut egui::Ui,
-        fmt: ExportFormat,
-        selected: bool,
-    ) -> bool {
-        let (rect, resp) =
-            ui.allocate_exact_size(Vec2::new(168.0, 76.0), egui::Sense::click());
+    fn export_format_card(&self, ui: &mut egui::Ui, fmt: ExportFormat, selected: bool) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(168.0, 76.0), egui::Sense::click());
         let fill = if selected {
             self.theme.accent_soft()
         } else if resp.hovered() {
@@ -23263,10 +23150,8 @@ blockquote {
             ),
             egui::StrokeKind::Inside,
         );
-        let tile = egui::Rect::from_min_size(
-            rect.left_top() + Vec2::new(12.0, 12.0),
-            Vec2::splat(26.0),
-        );
+        let tile =
+            egui::Rect::from_min_size(rect.left_top() + Vec2::new(12.0, 12.0), Vec2::splat(26.0));
         ui.painter().rect_filled(
             tile,
             6.0,
@@ -23317,7 +23202,6 @@ blockquote {
         }
         resp.clicked()
     }
-
 
     fn show_export_popover(&mut self, ctx: &egui::Context) {
         if !self.show_export_popover {
@@ -23846,7 +23730,6 @@ blockquote {
             self.share_export(fmt);
         }
     }
-
 
     /// Live export preview in a separate OS window, refreshed every frame
     /// from the current sheets and stylesheet. Save / Open / Copy act on
@@ -25501,7 +25384,11 @@ impl WritingApp {
         ui.add_space(10.0);
         let body_h = (ui.available_height() - 210.0).max(300.0);
         if ui.available_width() > 620.0 {
-            let sidebar_w = if ui.available_width() < 900.0 { 320.0 } else { 380.0 };
+            let sidebar_w = if ui.available_width() < 900.0 {
+                320.0
+            } else {
+                380.0
+            };
             let stage_w = (ui.available_width() - sidebar_w - 14.0).max(300.0);
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(
@@ -25524,19 +25411,9 @@ impl WritingApp {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         if self.present_tab == PresentTab::Style {
-                            self.presenter_style_sidebar(
-                                ctx,
-                                ui,
-                                slides.as_slice(),
-                                body_h,
-                            );
+                            self.presenter_style_sidebar(ctx, ui, slides.as_slice(), body_h);
                         } else {
-                            self.presenter_console_sidebar(
-                                ctx,
-                                ui,
-                                slides.as_slice(),
-                                body_h,
-                            );
+                            self.presenter_console_sidebar(ctx, ui, slides.as_slice(), body_h);
                         }
                     },
                 );
@@ -25558,13 +25435,7 @@ impl WritingApp {
             }
         }
         ui.add_space(10.0);
-        self.presenter_filmstrip(
-            ctx,
-            ui,
-            slides.as_slice(),
-            layouts.as_slice(),
-            false,
-        );
+        self.presenter_filmstrip(ctx, ui, slides.as_slice(), layouts.as_slice(), false);
     }
 
     /// Presenter top bar: title, centered timer and slide count, audience
@@ -25595,60 +25466,50 @@ impl WritingApp {
                         .unwrap_or_default();
                     if !title.is_empty() {
                         ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(title)
-                                .size(10.0)
-                                .color(theme.text_dim()),
-                        );
+                        ui.label(RichText::new(title).size(10.0).color(theme.text_dim()));
                     }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("End")
+                                        .size(11.0)
+                                        .strong()
+                                        .color(theme.bg_app()),
+                                )
+                                .fill(theme.text_bright())
+                                .min_size(Vec2::new(76.0, 32.0)),
+                            )
+                            .clicked()
+                        {
+                            self.close_present();
+                        }
+                        ui.add_space(10.0);
+                        let (dot, label) = if self.present_window_open {
+                            (Color32::from_rgb(0x4f, 0xa8, 0x64), "Audience connected")
+                        } else {
+                            (theme.text_faint(), "Audience closed")
+                        };
+                        ui.label(RichText::new(label).size(10.0).color(theme.text_dim()));
+                        ui.label(RichText::new(icon::CIRCLE).size(9.0).color(dot));
+                        if self.present_tab == PresentTab::Slides {
+                            ui.add_space(10.0);
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("End")
-                                            .size(11.0)
-                                            .strong()
-                                            .color(theme.bg_app()),
-                                    )
-                                    .fill(theme.text_bright())
-                                    .min_size(Vec2::new(76.0, 32.0)),
-                                )
-                                .clicked()
-                            {
-                                self.close_present();
-                            }
-                            ui.add_space(10.0);
-                            let (dot, label) = if self.present_window_open {
-                                (Color32::from_rgb(0x4f, 0xa8, 0x64), "Audience connected")
-                            } else {
-                                (theme.text_faint(), "Audience closed")
-                            };
-                            ui.label(RichText::new(label).size(10.0).color(theme.text_dim()));
-                            ui.label(RichText::new(icon::CIRCLE).size(9.0).color(dot));
-                            if self.present_tab == PresentTab::Slides {
-                                ui.add_space(10.0);
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(format!(
-                                                "{}  Style",
-                                                icon::PALETTE
-                                            ))
+                                        RichText::new(format!("{}  Style", icon::PALETTE))
                                             .size(10.5)
                                             .color(theme.text_dim()),
-                                        )
-                                        .frame(false),
                                     )
-                                    .on_hover_text("Slide style and theme")
-                                    .clicked()
-                                {
-                                    self.present_tab = PresentTab::Style;
-                                }
+                                    .frame(false),
+                                )
+                                .on_hover_text("Slide style and theme")
+                                .clicked()
+                            {
+                                self.present_tab = PresentTab::Style;
                             }
-                        },
-                    );
+                        }
+                    });
                 });
             });
         let rect = frame.response.rect;
@@ -25676,9 +25537,7 @@ impl WritingApp {
         let index = self.present_index.min(slides.len().saturating_sub(1));
         let layout = layouts.get(index).copied().unwrap_or(SlideLayout::Stacked);
         let scheme = self.slide_scheme(index);
-        let slide_bg = scheme
-            .bg
-            .unwrap_or(theme.card_selected());
+        let slide_bg = scheme.bg.unwrap_or(theme.card_selected());
         egui::Frame::new()
             .fill(theme.bg_sidebar())
             .stroke(egui::Stroke::new(1.0, theme.bg_sheets_header()))
@@ -25706,8 +25565,7 @@ impl WritingApp {
                 ui.add_space(top);
                 ui.horizontal(|ui| {
                     ui.add_space(((avail.x - w) / 2.0).max(0.0));
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
                     ui.painter().rect_filled(rect, 8.0, slide_bg);
                     ui.painter().rect_stroke(
                         rect,
@@ -25771,33 +25629,30 @@ impl WritingApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     Self::dashboard_section(ui, theme, "SPEAKER NOTES");
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(if self.present_notes_visible {
-                                            icon::EYE
-                                        } else {
-                                            icon::EYE_SLASH
-                                        })
-                                        .size(13.0)
-                                        .color(theme.text_faint()),
-                                    )
-                                    .frame(false),
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if self.present_notes_visible {
+                                        icon::EYE
+                                    } else {
+                                        icon::EYE_SLASH
+                                    })
+                                    .size(13.0)
+                                    .color(theme.text_faint()),
                                 )
-                                .on_hover_text(if self.present_notes_visible {
-                                    "Hide notes"
-                                } else {
-                                    "Show notes"
-                                })
-                                .clicked()
-                            {
-                                self.present_notes_visible = !self.present_notes_visible;
-                            }
-                        },
-                    );
+                                .frame(false),
+                            )
+                            .on_hover_text(if self.present_notes_visible {
+                                "Hide notes"
+                            } else {
+                                "Show notes"
+                            })
+                            .clicked()
+                        {
+                            self.present_notes_visible = !self.present_notes_visible;
+                        }
+                    });
                 });
                 if self.present_notes_visible {
                     let notes = slides[index].notes_text();
@@ -25865,19 +25720,13 @@ impl WritingApp {
                             .strong()
                             .color(theme.text_bright()),
                     );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Slide {} of {total}",
-                                    index + 1
-                                ))
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("Slide {} of {total}", index + 1))
                                 .size(9.5)
                                 .color(theme.text_faint()),
-                            );
-                        },
-                    );
+                        );
+                    });
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -25909,15 +25758,13 @@ impl WritingApp {
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(icon::CIRCLE)
-                            .size(8.0)
-                            .color(if self.present_window_open {
-                                Color32::from_rgb(0x4f, 0xa8, 0x64)
-                            } else {
-                                theme.text_faint()
-                            }),
-                    );
+                    ui.label(RichText::new(icon::CIRCLE).size(8.0).color(
+                        if self.present_window_open {
+                            Color32::from_rgb(0x4f, 0xa8, 0x64)
+                        } else {
+                            theme.text_faint()
+                        },
+                    ));
                     ui.label(
                         RichText::new(if self.present_window_open {
                             "Audience window open"
@@ -25956,7 +25803,6 @@ impl WritingApp {
                     });
             });
     }
-
 
     /// Presenter console body: transport bar, current title, teleprompter
     /// notes, next-slide peek, and Prev/Next buttons. `notes_h` is the fixed
@@ -26098,8 +25944,7 @@ impl WritingApp {
         selected: bool,
     ) -> bool {
         let theme = self.theme;
-        let (rect, resp) =
-            ui.allocate_exact_size(Vec2::new(162.0, 52.0), egui::Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(162.0, 52.0), egui::Sense::click());
         let fill = if selected {
             theme.accent_soft()
         } else if resp.hovered() {
@@ -26224,12 +26069,7 @@ impl WritingApp {
                     .iter()
                     .filter_map(|h| Self::present_color_from_hex(h))
                     .collect();
-                if self.presenter_theme_card(
-                    ui,
-                    name,
-                    &swatches,
-                    matched == Some(*name),
-                ) {
+                if self.presenter_theme_card(ui, name, &swatches, matched == Some(*name)) {
                     apply_preset = Some(Some(*name));
                 }
             }
@@ -26247,16 +26087,11 @@ impl WritingApp {
                             .collect();
                         ui.horizontal(|ui| {
                             for color in &swatches {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    Vec2::splat(12.0),
-                                    egui::Sense::hover(),
-                                );
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
                                 ui.painter().rect_filled(rect, 3.0, *color);
                             }
-                            if ui
-                                .selectable_label(matched == Some(name), name)
-                                .clicked()
-                            {
+                            if ui.selectable_label(matched == Some(name), name).clicked() {
                                 apply_preset = Some(Some(name));
                                 ui.close_menu();
                             }
@@ -26983,7 +26818,10 @@ impl WritingApp {
 
     /// Words written today (positive deltas only).
     fn today_daily_words(&self) -> u64 {
-        self.daily_words.get(&Self::today_key()).copied().unwrap_or(0)
+        self.daily_words
+            .get(&Self::today_key())
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Turn library-word growth into a daily words-written delta. Runs at
@@ -27035,7 +26873,8 @@ impl WritingApp {
 
     /// True while the right-hand sheet dashboard is showing, regardless of
     /// which tab (overview, review, or history) is active.
-    fn dashboard_open(&self) -> bool {        self.goals_visible || self.grammar.style_visible || self.history_open
+    fn dashboard_open(&self) -> bool {
+        self.goals_visible || self.grammar.style_visible || self.history_open
     }
 
     /// Close every dashboard tab.
@@ -27152,11 +26991,7 @@ impl WritingApp {
         }
         ui.add_space(7.0);
         ui.horizontal(|ui| {
-            let tabs = [
-                (0u8, "Overview"),
-                (1u8, "Review"),
-                (2u8, "History"),
-            ];
+            let tabs = [(0u8, "Overview"), (1u8, "Review"), (2u8, "History")];
             let width = ((ui.available_width() - 8.0) / 3.0).max(70.0);
             for (id, label) in tabs {
                 let active = (id == 0 && self.goals_visible)
@@ -27164,13 +26999,11 @@ impl WritingApp {
                     || (id == 2 && self.history_open);
                 let response = ui.add_sized(
                     [width, 30.0],
-                    egui::Button::new(
-                        RichText::new(label).size(10.5).color(if active {
-                            theme.accent()
-                        } else {
-                            theme.text_dim()
-                        }),
-                    )
+                    egui::Button::new(RichText::new(label).size(10.5).color(if active {
+                        theme.accent()
+                    } else {
+                        theme.text_dim()
+                    }))
                     .frame(active)
                     .fill(if active {
                         theme.accent_soft()
@@ -27348,14 +27181,13 @@ impl WritingApp {
         let daily_goal = self.daily_goal;
         let daily_draft_id = egui::Id::new("dashboard-daily-goal-draft");
         let mut daily_draft = ui.data(|d| {
-            d.get_temp::<String>(daily_draft_id)
-                .unwrap_or_else(|| {
-                    if daily_goal == 0 {
-                        String::new()
-                    } else {
-                        daily_goal.to_string()
-                    }
-                })
+            d.get_temp::<String>(daily_draft_id).unwrap_or_else(|| {
+                if daily_goal == 0 {
+                    String::new()
+                } else {
+                    daily_goal.to_string()
+                }
+            })
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Daily").size(10.0).color(theme.text_faint()));
@@ -27459,11 +27291,8 @@ impl WritingApp {
         let date_draft_id = egui::Id::new("dashboard-deadline-date-draft");
         let target_draft_id = egui::Id::new("dashboard-deadline-target-draft");
         let mut date_draft = ui.data(|d| {
-            d.get_temp::<String>(date_draft_id).unwrap_or_else(|| {
-                self.deadline
-                    .map(format_created_date)
-                    .unwrap_or_default()
-            })
+            d.get_temp::<String>(date_draft_id)
+                .unwrap_or_else(|| self.deadline.map(format_created_date).unwrap_or_default())
         });
         let mut target_draft = ui.data(|d| {
             d.get_temp::<String>(target_draft_id).unwrap_or_else(|| {
@@ -27491,8 +27320,7 @@ impl WritingApp {
                 match parse_created_date(&date_draft) {
                     Some(at) => {
                         self.deadline = Some(at);
-                        self.deadline_target =
-                            target_draft.trim().parse::<u32>().unwrap_or(0);
+                        self.deadline_target = target_draft.trim().parse::<u32>().unwrap_or(0);
                         self.save_library();
                         self.status = format!(
                             "Deadline set: {} ({} words)",
@@ -27500,9 +27328,7 @@ impl WritingApp {
                             Self::thousands(self.deadline_target as usize)
                         );
                     }
-                    None => {
-                        self.status = "Enter a due date as YYYY-MM-DD".to_string()
-                    }
+                    None => self.status = "Enter a due date as YYYY-MM-DD".to_string(),
                 }
             }
             if self.deadline.is_some() && ui.small_button("Clear").clicked() {
@@ -27714,16 +27540,14 @@ impl WritingApp {
                 }
             }
             if editing {
-                let mut draft =
-                    ui.data(|d| d.get_temp::<String>(draft_id).unwrap_or_default());
+                let mut draft = ui.data(|d| d.get_temp::<String>(draft_id).unwrap_or_default());
                 ui.horizontal(|ui| {
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut draft)
                             .hint_text("YYYY-MM-DD")
                             .desired_width(105.0),
                     );
-                    let enter =
-                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.small_button("Save").clicked() || enter {
                         if let Some(at) = parse_created_date(&draft) {
                             corrected_created = Some(at);
@@ -27831,8 +27655,7 @@ impl WritingApp {
                         .desired_width(130.0),
                 );
                 let submit = ui.small_button("Add").clicked()
-                    || (response.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if submit && !draft.trim().is_empty() {
                     add_keyword = Some(draft.trim().to_string());
                 }
@@ -27847,11 +27670,7 @@ impl WritingApp {
             let deduped = self
                 .sheets
                 .get(sel)
-                .map(|s| {
-                    s.keywords
-                        .iter()
-                        .any(|k| k.eq_ignore_ascii_case(&keyword))
-                })
+                .map(|s| s.keywords.iter().any(|k| k.eq_ignore_ascii_case(&keyword)))
                 .unwrap_or(false);
             if !deduped {
                 if let Some(sheet) = self.sheets.get_mut(sel) {
@@ -27905,17 +27724,12 @@ impl WritingApp {
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for ((alt, _src), texture) in media.iter().zip(thumbs.iter()) {
-                        let (rect, resp) = ui.allocate_exact_size(
-                            Vec2::new(58.0, 58.0),
-                            egui::Sense::hover(),
-                        );
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(58.0, 58.0), egui::Sense::hover());
                         match texture {
                             Some(texture) => {
                                 let size = Vec2::splat(52.0);
-                                let image_rect = egui::Rect::from_center_size(
-                                    rect.center(),
-                                    size,
-                                );
+                                let image_rect = egui::Rect::from_center_size(rect.center(), size);
                                 ui.painter().image(
                                     texture.id(),
                                     image_rect,
@@ -27986,9 +27800,7 @@ impl WritingApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new(text)
-                                        .size(10.5)
-                                        .color(theme.accent()),
+                                    RichText::new(text).size(10.5).color(theme.accent()),
                                 )
                                 .frame(false),
                             )
@@ -28076,13 +27888,11 @@ impl WritingApp {
                 } else {
                     format!("{count} snapshots")
                 };
-                ui.label(
-                    RichText::new(label).size(10.5).color(if flashed {
-                        Color32::from_rgb(0x4f, 0x8b, 0x57)
-                    } else {
-                        theme.text_main()
-                    }),
-                );
+                ui.label(RichText::new(label).size(10.5).color(if flashed {
+                    Color32::from_rgb(0x4f, 0x8b, 0x57)
+                } else {
+                    theme.text_main()
+                }));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Open").clicked() {
                         self.history_open = true;
@@ -28102,8 +27912,7 @@ impl WritingApp {
                         self.status = if added {
                             "Snapshot saved".to_string()
                         } else {
-                            "No changes since the last snapshot; timestamp refreshed"
-                                .to_string()
+                            "No changes since the last snapshot; timestamp refreshed".to_string()
                         };
                     }
                 });
@@ -28204,10 +28013,7 @@ impl WritingApp {
 
     fn set_keyword_color(&mut self, keyword: &str, color: Option<String>) {
         let keyword = keyword.trim().to_lowercase();
-        self.keyword_styles
-            .entry(keyword)
-            .or_default()
-            .color = color;
+        self.keyword_styles.entry(keyword).or_default().color = color;
         self.save_library();
     }
 
@@ -28248,24 +28054,20 @@ impl WritingApp {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_min_width(520.0);
-                let mut filter = ui
-                    .data(|d| d.get_temp::<String>(filter_id).unwrap_or_default());
+                let mut filter = ui.data(|d| d.get_temp::<String>(filter_id).unwrap_or_default());
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("All keywords in this library")
                             .small()
                             .color(self.theme.text_dim()),
                     );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut filter)
-                                    .hint_text("Filter")
-                                    .desired_width(140.0),
-                            );
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut filter)
+                                .hint_text("Filter")
+                                .desired_width(140.0),
+                        );
+                    });
                 });
                 ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
                 ui.separator();
@@ -28304,7 +28106,10 @@ impl WritingApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (keyword, count) in rows {
-                            let style = self.keyword_styles.get(&keyword).cloned()
+                            let style = self
+                                .keyword_styles
+                                .get(&keyword)
+                                .cloned()
                                 .unwrap_or_default();
                             let color = style
                                 .color
@@ -28312,15 +28117,11 @@ impl WritingApp {
                                 .and_then(Self::present_color_from_hex)
                                 .unwrap_or(self.theme.accent());
                             let editing = ui.data(|d| {
-                                d.get_temp::<Option<String>>(edit_id)
-                                    .flatten()
-                                    .as_deref()
+                                d.get_temp::<Option<String>>(edit_id).flatten().as_deref()
                                     == Some(keyword.as_str())
                             });
                             let merging = ui.data(|d| {
-                                d.get_temp::<Option<String>>(merge_id)
-                                    .flatten()
-                                    .as_deref()
+                                d.get_temp::<Option<String>>(merge_id).flatten().as_deref()
                                     == Some(keyword.as_str())
                             });
                             egui::Frame::new()
@@ -28349,21 +28150,17 @@ impl WritingApp {
                                                                 "{}  {label}",
                                                                 icon::CIRCLE
                                                             ))
-                                                                .color(
-                                                                    readable_group_color(
-                                                                        c,
-                                                                        self.theme.bg_sheets(),
-                                                                    ),
-                                                                ),
+                                                            .color(readable_group_color(
+                                                                c,
+                                                                self.theme.bg_sheets(),
+                                                            )),
                                                         )
                                                         .clicked()
                                                     {
-                                                        action = Some(
-                                                            KeywordAction::Color(
-                                                                keyword.clone(),
-                                                                Some(hex.to_string()),
-                                                            ),
-                                                        );
+                                                        action = Some(KeywordAction::Color(
+                                                            keyword.clone(),
+                                                            Some(hex.to_string()),
+                                                        ));
                                                         ui.close_menu();
                                                     }
                                                 }
@@ -28372,13 +28169,13 @@ impl WritingApp {
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    RichText::new(icon::STAR)
-                                                        .size(13.0)
-                                                        .color(if style.favorite {
+                                                    RichText::new(icon::STAR).size(13.0).color(
+                                                        if style.favorite {
                                                             self.theme.accent()
                                                         } else {
                                                             self.theme.text_faint()
-                                                        }),
+                                                        },
+                                                    ),
                                                 )
                                                 .frame(false),
                                             )
@@ -28389,28 +28186,22 @@ impl WritingApp {
                                             })
                                             .clicked()
                                         {
-                                            action = Some(KeywordAction::Favorite(
-                                                keyword.clone(),
-                                            ));
+                                            action = Some(KeywordAction::Favorite(keyword.clone()));
                                         }
-                                        ui.label(
-                                            RichText::new(&keyword)
-                                                .size(12.5)
-                                                .color(if style.favorite {
-                                                    self.theme.text_bright()
-                                                } else {
-                                                    self.theme.text_main()
-                                                }),
-                                        );
+                                        ui.label(RichText::new(&keyword).size(12.5).color(
+                                            if style.favorite {
+                                                self.theme.text_bright()
+                                            } else {
+                                                self.theme.text_main()
+                                            },
+                                        ));
                                         ui.label(
                                             RichText::new(format!("{count}"))
                                                 .size(9.5)
                                                 .color(self.theme.text_faint()),
                                         );
                                         ui.with_layout(
-                                            egui::Layout::right_to_left(
-                                                egui::Align::Center,
-                                            ),
+                                            egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 if ui.small_button("Delete").clicked() {
                                                     action = Some(KeywordAction::Delete(
@@ -28446,8 +28237,7 @@ impl WritingApp {
                                     });
                                     if editing {
                                         let mut draft = ui.data(|d| {
-                                            d.get_temp::<String>(edit_draft_id)
-                                                .unwrap_or_default()
+                                            d.get_temp::<String>(edit_draft_id).unwrap_or_default()
                                         });
                                         ui.horizontal(|ui| {
                                             let resp = ui.add(
@@ -28456,9 +28246,7 @@ impl WritingApp {
                                                     .desired_width(160.0),
                                             );
                                             let enter = resp.lost_focus()
-                                                && ui.input(|i| {
-                                                    i.key_pressed(egui::Key::Enter)
-                                                });
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                             if ui.small_button("Save").clicked() || enter {
                                                 action = Some(KeywordAction::Rename(
                                                     keyword.clone(),
@@ -28478,8 +28266,7 @@ impl WritingApp {
                                     }
                                     if merging {
                                         let mut draft = ui.data(|d| {
-                                            d.get_temp::<String>(merge_draft_id)
-                                                .unwrap_or_default()
+                                            d.get_temp::<String>(merge_draft_id).unwrap_or_default()
                                         });
                                         ui.horizontal(|ui| {
                                             let resp = ui.add(
@@ -28488,33 +28275,23 @@ impl WritingApp {
                                                     .desired_width(160.0),
                                             );
                                             let enter = resp.lost_focus()
-                                                && ui.input(|i| {
-                                                    i.key_pressed(egui::Key::Enter)
-                                                });
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                             if ui.small_button("Merge").clicked() || enter {
                                                 action = Some(KeywordAction::Merge(
                                                     keyword.clone(),
                                                     draft.clone(),
                                                 ));
                                                 ui.data_mut(|d| {
-                                                    d.insert_temp(
-                                                        merge_id,
-                                                        Option::<String>::None,
-                                                    )
+                                                    d.insert_temp(merge_id, Option::<String>::None)
                                                 });
                                             }
                                             if ui.small_button("Cancel").clicked() {
                                                 ui.data_mut(|d| {
-                                                    d.insert_temp(
-                                                        merge_id,
-                                                        Option::<String>::None,
-                                                    )
+                                                    d.insert_temp(merge_id, Option::<String>::None)
                                                 });
                                             }
                                         });
-                                        ui.data_mut(|d| {
-                                            d.insert_temp(merge_draft_id, draft)
-                                        });
+                                        ui.data_mut(|d| d.insert_temp(merge_draft_id, draft));
                                     }
                                 });
                         }
@@ -28522,12 +28299,8 @@ impl WritingApp {
             });
         if let Some(action) = action {
             match action {
-                KeywordAction::Color(keyword, color) => {
-                    self.set_keyword_color(&keyword, color)
-                }
-                KeywordAction::Favorite(keyword) => {
-                    self.toggle_keyword_favorite(&keyword)
-                }
+                KeywordAction::Color(keyword, color) => self.set_keyword_color(&keyword, color),
+                KeywordAction::Favorite(keyword) => self.toggle_keyword_favorite(&keyword),
                 KeywordAction::Rename(from, to) => self.rename_keyword(&from, &to),
                 KeywordAction::Merge(from, into) => self.merge_keyword(&from, &into),
                 KeywordAction::Delete(keyword) => self.delete_keyword(&keyword),
@@ -28652,32 +28425,24 @@ impl WritingApp {
                                 .color(theme.text_faint()),
                         );
                     });
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            let (rect, _) = ui.allocate_exact_size(
-                                Vec2::splat(46.0),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter().circle_filled(
-                                rect.center(),
-                                23.0,
-                                theme.bg_sidebar(),
-                            );
-                            ui.painter().circle_stroke(
-                                rect.center(),
-                                23.0,
-                                egui::Stroke::new(1.0, theme.bg_sheets_header()),
-                            );
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                style_count.to_string(),
-                                FontId::proportional(14.0),
-                                theme.accent(),
-                            );
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(46.0), egui::Sense::hover());
+                        ui.painter()
+                            .circle_filled(rect.center(), 23.0, theme.bg_sidebar());
+                        ui.painter().circle_stroke(
+                            rect.center(),
+                            23.0,
+                            egui::Stroke::new(1.0, theme.bg_sheets_header()),
+                        );
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            style_count.to_string(),
+                            FontId::proportional(14.0),
+                            theme.accent(),
+                        );
+                    });
                 });
             });
         // Filter chips.
@@ -28812,16 +28577,10 @@ impl WritingApp {
                                 if let Some(first) = issue.suggestions.first() {
                                     let label = match first {
                                         grammar::AppliedSuggestion::Replace(t) => {
-                                            format!(
-                                                "Apply: {}",
-                                                Self::truncate_suggestion(t)
-                                            )
+                                            format!("Apply: {}", Self::truncate_suggestion(t))
                                         }
                                         grammar::AppliedSuggestion::InsertAfter(t) => {
-                                            format!(
-                                                "Apply: +{}",
-                                                Self::truncate_suggestion(t)
-                                            )
+                                            format!("Apply: +{}", Self::truncate_suggestion(t))
                                         }
                                         grammar::AppliedSuggestion::Remove => {
                                             "Apply: remove".to_string()
@@ -28834,9 +28593,7 @@ impl WritingApp {
                                                 RichText::new(label)
                                                     .size(9.5)
                                                     .strong()
-                                                    .color(contrasting_text(
-                                                        theme.accent(),
-                                                    )),
+                                                    .color(contrasting_text(theme.accent())),
                                             )
                                             .fill(theme.accent()),
                                         )
@@ -28864,35 +28621,23 @@ impl WritingApp {
                                     for s in issue.suggestions.iter().skip(1).take(2) {
                                         let label = match s {
                                             grammar::AppliedSuggestion::Replace(t) => {
-                                                format!(
-                                                    "→ {}",
-                                                    Self::truncate_suggestion(t)
-                                                )
+                                                format!("→ {}", Self::truncate_suggestion(t))
                                             }
                                             grammar::AppliedSuggestion::InsertAfter(t) => {
-                                                format!(
-                                                    "+ {}",
-                                                    Self::truncate_suggestion(t)
-                                                )
+                                                format!("+ {}", Self::truncate_suggestion(t))
                                             }
                                             grammar::AppliedSuggestion::Remove => {
                                                 "Remove".to_string()
                                             }
                                         };
                                         if ui.small_button(label).clicked() {
-                                            apply = Some((
-                                                sel,
-                                                issue.start,
-                                                issue.end,
-                                                s.clone(),
-                                            ));
+                                            apply = Some((sel, issue.start, issue.end, s.clone()));
                                         }
                                     }
                                 });
                             }
                             if let Some(first) = primary {
-                                apply =
-                                    Some((sel, issue.start, issue.end, first.clone()));
+                                apply = Some((sel, issue.start, issue.end, first.clone()));
                             }
                         });
                 }
@@ -28928,7 +28673,6 @@ impl WritingApp {
             self.apply_grammar_suggestion(ui.ctx(), s, start, end, &suggestion);
         }
     }
-
 }
 
 impl eframe::App for WritingApp {
@@ -29113,8 +28857,12 @@ impl eframe::App for WritingApp {
                 }),
             )
         };
-        let key_split =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::S));
+        let key_split = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                egui::Key::S,
+            )
+        });
         if key_split {
             self.toggle_split();
         }
@@ -29297,11 +29045,13 @@ impl eframe::App for WritingApp {
                     // Split editor toggle.
                     if Self::header_button(
                         ui,
-                        RichText::new(icon::COLUMNS).size(16.0).color(if self.split_open {
-                            self.theme.accent()
-                        } else {
-                            self.theme.text_dim()
-                        }),
+                        RichText::new(icon::COLUMNS)
+                            .size(16.0)
+                            .color(if self.split_open {
+                                self.theme.accent()
+                            } else {
+                                self.theme.text_dim()
+                            }),
                     )
                     .on_hover_text(hint_cmd_alt(
                         ui.ctx(),
@@ -29321,15 +29071,13 @@ impl eframe::App for WritingApp {
                     if ui
                         .add_enabled(
                             back_enabled,
-                            egui::Button::new(
-                                RichText::new(icon::ARROW_LEFT).size(16.0).color(
-                                    if back_enabled {
-                                        self.theme.text_main()
-                                    } else {
-                                        self.theme.text_faint()
-                                    },
-                                ),
-                            )
+                            egui::Button::new(RichText::new(icon::ARROW_LEFT).size(16.0).color(
+                                if back_enabled {
+                                    self.theme.text_main()
+                                } else {
+                                    self.theme.text_faint()
+                                },
+                            ))
                             .frame(false)
                             .min_size(egui::vec2(28.0, 28.0)),
                         )
@@ -29342,15 +29090,13 @@ impl eframe::App for WritingApp {
                     if ui
                         .add_enabled(
                             forward_enabled,
-                            egui::Button::new(
-                                RichText::new(icon::ARROW_RIGHT).size(16.0).color(
-                                    if forward_enabled {
-                                        self.theme.text_main()
-                                    } else {
-                                        self.theme.text_faint()
-                                    },
-                                ),
-                            )
+                            egui::Button::new(RichText::new(icon::ARROW_RIGHT).size(16.0).color(
+                                if forward_enabled {
+                                    self.theme.text_main()
+                                } else {
+                                    self.theme.text_faint()
+                                },
+                            ))
                             .frame(false)
                             .min_size(egui::vec2(28.0, 28.0)),
                         )
@@ -29485,12 +29231,10 @@ impl eframe::App for WritingApp {
             self.sheets_visible = show;
             self.save_library();
         }
-        let nav_back_key = ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND, egui::Key::OpenBracket)
-        });
-        let nav_forward_key = ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND, egui::Key::CloseBracket)
-        });
+        let nav_back_key =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::OpenBracket));
+        let nav_forward_key =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::CloseBracket));
         if nav_back_key {
             self.navigate_back();
         }
@@ -29554,10 +29298,7 @@ impl eframe::App for WritingApp {
             )
             .show_animated(
                 ctx,
-                self.library_visible
-                    && chrome_visible
-                    && !self.zen_mode
-                    && !narrow_dashboard,
+                self.library_visible && chrome_visible && !self.zen_mode && !narrow_dashboard,
                 |ui| {
                     #[derive(Clone)]
                     enum TreeAction {
@@ -29588,12 +29329,7 @@ impl eframe::App for WritingApp {
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 // Section: smart filters.
-                                ui.label(
-                                    RichText::new("LIBRARY")
-                                        .size(9.5)
-                                        .strong()
-                                        .color(dim),
-                                );
+                                ui.label(RichText::new("LIBRARY").size(9.5).strong().color(dim));
                                 for (fi, f) in [
                                     SmartFilter::All,
                                     SmartFilter::Last7Days,
@@ -29767,18 +29503,14 @@ impl eframe::App for WritingApp {
                                             .color
                                             .as_deref()
                                             .and_then(Self::present_color_from_hex);
-                                        let selected_fill = if selected { style_color } else { None };
+                                        let selected_fill =
+                                            if selected { style_color } else { None };
                                         let row_fg = if selected {
-                                            style_color
-                                                .map(contrasting_text)
-                                                .unwrap_or(bright)
+                                            style_color.map(contrasting_text).unwrap_or(bright)
                                         } else {
                                             style_color
                                                 .map(|c| {
-                                                    readable_group_color(
-                                                        c,
-                                                        self.theme.bg_sidebar(),
-                                                    )
+                                                    readable_group_color(c, self.theme.bg_sidebar())
                                                 })
                                                 .unwrap_or(row_text)
                                         };
@@ -29854,7 +29586,9 @@ impl eframe::App for WritingApp {
                                                     };
                                                     full_width_row_label(
                                                         child,
-                                                        RichText::new(caret).size(14.0).color(row_fg),
+                                                        RichText::new(caret)
+                                                            .size(14.0)
+                                                            .color(row_fg),
                                                     );
                                                 } else {
                                                     child.add_space(14.0);
@@ -29947,14 +29681,13 @@ impl eframe::App for WritingApp {
                                                     ))
                                                     .clicked()
                                                 {
-                                                    action = Some(TreeAction::SetGroupIcon(
-                                                        gi, None,
-                                                    ));
+                                                    action =
+                                                        Some(TreeAction::SetGroupIcon(gi, None));
                                                     ui.close_menu();
                                                 }
                                                 for (key, glyph, label) in GROUP_ICONS {
-                                                    let current = style.icon.as_deref()
-                                                        == Some(key);
+                                                    let current =
+                                                        style.icon.as_deref() == Some(key);
                                                     if ui
                                                         .button(format!(
                                                             "{glyph}  {label}{}",
@@ -29966,21 +29699,18 @@ impl eframe::App for WritingApp {
                                                         ))
                                                         .clicked()
                                                     {
-                                                        action = Some(
-                                                            TreeAction::SetGroupIcon(
-                                                                gi,
-                                                                Some(key.to_string()),
-                                                            ),
-                                                        );
+                                                        action = Some(TreeAction::SetGroupIcon(
+                                                            gi,
+                                                            Some(key.to_string()),
+                                                        ));
                                                         ui.close_menu();
                                                     }
                                                 }
                                             });
                                             ui.menu_button("Color", |ui| {
                                                 if ui.button("No color").clicked() {
-                                                    action = Some(TreeAction::SetGroupColor(
-                                                        gi, None,
-                                                    ));
+                                                    action =
+                                                        Some(TreeAction::SetGroupColor(gi, None));
                                                     ui.close_menu();
                                                 }
                                                 for (hex, label) in GROUP_COLORS {
@@ -30006,12 +29736,10 @@ impl eframe::App for WritingApp {
                                                         )
                                                         .clicked()
                                                     {
-                                                        action = Some(
-                                                            TreeAction::SetGroupColor(
-                                                                gi,
-                                                                Some(hex.to_string()),
-                                                            ),
-                                                        );
+                                                        action = Some(TreeAction::SetGroupColor(
+                                                            gi,
+                                                            Some(hex.to_string()),
+                                                        ));
                                                         ui.close_menu();
                                                     }
                                                 }
@@ -31053,55 +30781,52 @@ impl eframe::App for WritingApp {
                     .inner_margin(egui::Margin::symmetric(12, 5)),
             )
             .show_animated(ctx, !self.zen_mode && !self.present_window_open, |ui| {
-            // Count what is open, including material sheets; unlike goals
-            // and export, the status line is about the text in front of you.
-            let targets = self.editor_targets();
-            let mut words = 0usize;
-            let mut chars = 0usize;
-            for i in &targets {
-                if let Some(s) = self.sheets.get(*i) {
-                    let (w, c) = Self::counts(&s.content);
-                    words += w;
-                    chars += c;
+                // Count what is open, including material sheets; unlike goals
+                // and export, the status line is about the text in front of you.
+                let targets = self.editor_targets();
+                let mut words = 0usize;
+                let mut chars = 0usize;
+                for i in &targets {
+                    if let Some(s) = self.sheets.get(*i) {
+                        let (w, c) = Self::counts(&s.content);
+                        words += w;
+                        chars += c;
+                    }
                 }
-            }
-            ui.horizontal(|ui| {
-                let green = Color32::from_rgb(0x4f, 0xa8, 0x64);
-                ui.label(RichText::new(icon::CIRCLE).size(9.0).color(green));
-                ui.label(
-                    RichText::new("Saved")
-                        .size(10.5)
-                        .color(self.theme.text_dim()),
-                )
-                .on_hover_text(if self.status.is_empty() {
-                    "Changes are saved".to_string()
-                } else {
-                    self.status.clone()
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.horizontal(|ui| {
+                    let green = Color32::from_rgb(0x4f, 0xa8, 0x64);
+                    ui.label(RichText::new(icon::CIRCLE).size(9.0).color(green));
                     ui.label(
-                        RichText::new(format!(
-                            "{} min read",
-                            Self::reading_minutes(words)
-                        ))
-                        .size(10.5)
-                        .color(self.theme.text_faint()),
-                    );
-                    ui.add_space(14.0);
-                    ui.label(
-                        RichText::new(format!("{chars} characters"))
+                        RichText::new("Saved")
                             .size(10.5)
                             .color(self.theme.text_dim()),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(format!("{words} words"))
-                            .size(10.5)
-                            .color(self.theme.text_dim()),
-                    );
+                    )
+                    .on_hover_text(if self.status.is_empty() {
+                        "Changes are saved".to_string()
+                    } else {
+                        self.status.clone()
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{} min read", Self::reading_minutes(words)))
+                                .size(10.5)
+                                .color(self.theme.text_faint()),
+                        );
+                        ui.add_space(14.0);
+                        ui.label(
+                            RichText::new(format!("{chars} characters"))
+                                .size(10.5)
+                                .color(self.theme.text_dim()),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("{words} words"))
+                                .size(10.5)
+                                .color(self.theme.text_dim()),
+                        );
+                    });
                 });
             });
-        });
 
         egui::CentralPanel::default()
             .frame(
@@ -31110,31 +30835,30 @@ impl eframe::App for WritingApp {
                     .inner_margin(0.0),
             )
             .show(ctx, |ui| {
-                let frame =
-                    egui::Frame::new()
-                        .fill(self.theme.bg_app())
-                        .inner_margin(if self.present_window_open {
-                            egui::Margin {
-                                left: 18,
-                                right: 18,
-                                top: 14,
-                                bottom: 14,
-                            }
-                        } else if self.split_open {
-                            egui::Margin {
-                                left: 10,
-                                right: 10,
-                                top: 8,
-                                bottom: 8,
-                            }
-                        } else {
-                            egui::Margin {
-                                left: 54,
-                                right: 54,
-                                top: 54,
-                                bottom: 54,
-                            }
-                        });
+                let frame = egui::Frame::new().fill(self.theme.bg_app()).inner_margin(
+                    if self.present_window_open {
+                        egui::Margin {
+                            left: 18,
+                            right: 18,
+                            top: 14,
+                            bottom: 14,
+                        }
+                    } else if self.split_open {
+                        egui::Margin {
+                            left: 10,
+                            right: 10,
+                            top: 8,
+                            bottom: 8,
+                        }
+                    } else {
+                        egui::Margin {
+                            left: 54,
+                            right: 54,
+                            top: 54,
+                            bottom: 54,
+                        }
+                    },
+                );
                 frame.show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     if self.present_window_open {
@@ -31163,15 +30887,13 @@ impl eframe::App for WritingApp {
                                     .duration_since(UNIX_EPOCH)
                                     .map(|d| d.as_secs())
                                     .unwrap_or(0);
-                                let edited = Self::snapshot_age(Self::now_secs(), at)
-                                    .to_uppercase();
+                                let edited =
+                                    Self::snapshot_age(Self::now_secs(), at).to_uppercase();
                                 Self::centered_measure(ui, 720.0, |ui| {
                                     ui.label(
-                                        RichText::new(format!(
-                                            "{group}  /  EDITED {edited}"
-                                        ))
-                                        .size(9.5)
-                                        .color(self.theme.text_faint()),
+                                        RichText::new(format!("{group}  /  EDITED {edited}"))
+                                            .size(9.5)
+                                            .color(self.theme.text_faint()),
                                     );
                                 });
                                 ui.add_space(12.0);
@@ -31283,12 +31005,11 @@ mod tests {
         contrast_ratio, default_editor_font_size, default_scroll_speed, flatten_over, grammar,
         new_group_id, new_sheet_id, pdf_family_for, review_chip_colors, tinted_badge, AppTheme,
         AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, FocusScope,
-        GdriveSync,
-        GrammarState, Group, GroupSort, MarkupKind, MergeReport, OutlineEntry, PaletteCommand,
-        PdfFamily, PaneFocus, PresentAspect,
-        PresentTab, PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, SavedLibrary, Section,
-        SettingsTab, Sheet, SidebarSelection, SlideLayout, SmartFilter, Snapshot, StyleEditState,
-        Tombstone, UpdateState, UpdateStatus, WindowState, WritingApp, PROFESSIONAL_STYLE,
+        GdriveSync, GrammarState, Group, GroupSort, MarkupKind, MergeReport, OutlineEntry,
+        PaletteCommand, PaneFocus, PdfFamily, PresentAspect, PresentTab, PreviewCache, PreviewDoc,
+        PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection,
+        SlideLayout, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus,
+        WindowState, WritingApp, PROFESSIONAL_STYLE,
     };
     use std::time::{Duration, SystemTime};
 
@@ -31463,11 +31184,12 @@ mod tests {
                     group: Some(0),
                     trashed: false,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
                 Sheet {
                     id: new_sheet_id(),
                     conflict_of: None,
@@ -31478,11 +31200,12 @@ mod tests {
                     modified: SystemTime::now()
                         .checked_sub(Duration::from_secs(10 * 24 * 60 * 60))
                         .unwrap_or_else(SystemTime::now),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
             ],
             selection: SidebarSelection::Group(0),
             selected_sheet: 0,
@@ -31715,11 +31438,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: now,
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         app.sheets.push(Sheet {
             id: new_sheet_id(),
             conflict_of: None,
@@ -31728,11 +31452,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: now,
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         app.delete_sheet_forever(0);
         assert_eq!(app.sheets.len(), 1);
         assert_eq!(app.selected_sheet, 0);
@@ -32153,11 +31878,12 @@ mod tests {
                 group: Some(0),
                 trashed: false,
                 modified: now,
-            
+
                 material: false,
-            
+
                 favorite: false,
-                keywords: Vec::new(),})
+                keywords: Vec::new(),
+            })
             .collect();
         app.history.clear();
         app.selection = SidebarSelection::Group(0);
@@ -32441,7 +32167,10 @@ mod tests {
                 panic!("unexpected event: {event:?}");
             };
             assert_eq!(*unit, egui::MouseWheelUnit::Point);
-            assert!(delta.length() < 8.0, "chunk would still be smoothed: {delta:?}");
+            assert!(
+                delta.length() < 8.0,
+                "chunk would still be smoothed: {delta:?}"
+            );
             total += delta.y;
         }
         assert!(
@@ -32525,7 +32254,10 @@ mod tests {
             });
         };
         run_frame(0.0);
-        assert!(WritingApp::load_window_state().is_none(), "no write in grace");
+        assert!(
+            WritingApp::load_window_state().is_none(),
+            "no write in grace"
+        );
         run_frame(2.0);
         let saved = WritingApp::load_window_state().expect("geometry saved");
         assert_eq!((saved.width, saved.height), (1000.0, 700.0));
@@ -32601,7 +32333,8 @@ mod tests {
     }
 
     #[test]
-    fn window_state_rejects_bad_sizes_and_drops_bad_positions() {        let _storage = isolate_storage();
+    fn window_state_rejects_bad_sizes_and_drops_bad_positions() {
+        let _storage = isolate_storage();
         // Non-finite sizes are unusable: ignored entirely.
         let bad = WindowState {
             width: f32::NAN,
@@ -32715,11 +32448,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         std::fs::write(&ipath, serde_json::to_string_pretty(&istore).unwrap()).unwrap();
         let lpath = std::path::PathBuf::from(std::env::var("ARIADNE_LIBRARY_PATH").unwrap());
         let mut lstore = read_store(&lpath);
@@ -32865,11 +32599,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         std::fs::write(&ipath, serde_json::to_string_pretty(&istore).unwrap()).unwrap();
         // Our next save must merge, not overwrite.
         app.sheets[0].content = "# A\n\nLocal tweak.\n".to_string();
@@ -32924,11 +32659,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         let sib = ipath.with_file_name("library (MacBook conflict).json");
         std::fs::write(&sib, serde_json::to_string_pretty(&cstore).unwrap()).unwrap();
         let back = WritingApp::load_library().expect("reloads");
@@ -33004,11 +32740,12 @@ mod tests {
                     group: Some(0),
                     trashed: false,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
                 Sheet {
                     id: "s-top".to_string(),
                     conflict_of: None,
@@ -33017,11 +32754,12 @@ mod tests {
                     group: Some(1),
                     trashed: false,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
                 Sheet {
                     id: "s-nested".to_string(),
                     conflict_of: None,
@@ -33030,11 +32768,12 @@ mod tests {
                     group: Some(2),
                     trashed: false,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
                 Sheet {
                     id: "s-loose".to_string(),
                     conflict_of: None,
@@ -33043,11 +32782,12 @@ mod tests {
                     group: None,
                     trashed: false,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
                 Sheet {
                     id: "s-trashed".to_string(),
                     conflict_of: None,
@@ -33056,11 +32796,12 @@ mod tests {
                     group: Some(3),
                     trashed: true,
                     modified: SystemTime::now(),
-                
+
                     material: false,
-                
+
                     favorite: false,
-                    keywords: Vec::new(),},
+                    keywords: Vec::new(),
+                },
             ],
             selection: SidebarSelection::Group(1),
             selected_sheet: 1,
@@ -33323,11 +33064,12 @@ mod tests {
             group: Some(1),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         app
     }
 
@@ -33458,11 +33200,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v2());
         assert_eq!(app.style_guide_version, 2);
         let guide = &app.sheets[2].content;
@@ -33554,9 +33297,9 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
             keywords: Vec::new(),});
         assert!(app.ensure_style_guide_v3());
@@ -34025,9 +33768,9 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
             keywords: Vec::new(),});
         assert!(app.ensure_style_guide_v6());
@@ -34053,9 +33796,9 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
             keywords: Vec::new(),});
         assert!(app.ensure_style_guide_v5());
@@ -34081,9 +33824,9 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
             keywords: Vec::new(),});
         assert!(app.ensure_style_guide_v4());
@@ -34409,11 +34152,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v9());
         assert_eq!(app.style_guide_version, 9);
         let guide = &app.sheets[2].content;
@@ -34443,11 +34187,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v12());
         assert_eq!(app.style_guide_version, 12);
         let guide = &app.sheets[2].content;
@@ -34474,11 +34219,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v13());
         assert_eq!(app.style_guide_version, 13);
         let guide = &app.sheets[2].content;
@@ -34508,11 +34254,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v11());
         assert_eq!(app.style_guide_version, 11);
         let guide = &app.sheets[2].content;
@@ -34536,11 +34283,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v10());
         assert_eq!(app.style_guide_version, 10);
         let guide = &app.sheets[2].content;
@@ -34566,11 +34314,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v8());
         assert_eq!(app.style_guide_version, 8);
         let guide = &app.sheets[2].content;
@@ -34596,11 +34345,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v7());
         assert_eq!(app.style_guide_version, 7);
         let guide = &app.sheets[2].content;
@@ -34792,11 +34542,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v14());
         assert_eq!(app.style_guide_version, 14);
         let guide = &app.sheets[2].content;
@@ -34826,11 +34577,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_style_guide_v15());
         assert_eq!(app.style_guide_version, 15);
         let guide = &app.sheets[2].content;
@@ -34978,7 +34730,8 @@ mod tests {
         assert_eq!(b - a, 8);
         let (quote, _, _) = WritingApp::apply_markup("one\ntwo", 0, 7, MarkupKind::Quote);
         assert_eq!(quote, "> one\n> two");
-        let (plain, _, _) = WritingApp::apply_markup(&quote, 0, quote.chars().count(), MarkupKind::Quote);
+        let (plain, _, _) =
+            WritingApp::apply_markup(&quote, 0, quote.chars().count(), MarkupKind::Quote);
         assert_eq!(plain, "one\ntwo");
         let (heading, _, _) = WritingApp::apply_markup("Title", 0, 5, MarkupKind::Heading);
         assert_eq!(heading, "# Title");
@@ -35959,11 +35712,12 @@ mod tests {
             group: Some(0),
             trashed: false,
             modified: SystemTime::now(),
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         assert!(app.ensure_present_demo());
         let count = app
             .sheets
@@ -37662,11 +37416,12 @@ mod tests {
             group: Some(gi),
             trashed: false,
             modified: now,
-        
+
             material: false,
-        
+
             favorite: false,
-            keywords: Vec::new(),});
+            keywords: Vec::new(),
+        });
         app
     }
 
@@ -38175,11 +37930,12 @@ mod tests {
                 group: Some(0),
                 trashed: false,
                 modified: SystemTime::now(),
-            
+
                 material: false,
-            
+
                 favorite: false,
-                keywords: Vec::new(),}],
+                keywords: Vec::new(),
+            }],
             selection: SidebarSelection::Filter(SmartFilter::All),
             selected_sheet: 0,
             selected_sheets: Vec::new(),
@@ -38611,7 +38367,10 @@ mod tests {
 
         // Down moves through the smart filters before groups.
         app.move_library_selection(1);
-        assert_eq!(app.selection, SidebarSelection::Filter(SmartFilter::Last7Days));
+        assert_eq!(
+            app.selection,
+            SidebarSelection::Filter(SmartFilter::Last7Days)
+        );
         app.move_library_selection(3);
         assert_eq!(app.selection, SidebarSelection::Filter(SmartFilter::Trash));
         // A filter with no sheets keeps the editor selection sane.
@@ -38623,7 +38382,10 @@ mod tests {
         let entries = app.library_nav_entries();
         assert!(entries.contains(&SidebarSelection::Group(0)));
         assert_eq!(
-            entries.iter().filter(|e| matches!(e, SidebarSelection::Filter(_))).count(),
+            entries
+                .iter()
+                .filter(|e| matches!(e, SidebarSelection::Filter(_)))
+                .count(),
             5
         );
 
@@ -38696,9 +38458,7 @@ mod tests {
         assert!(super::parse_created_date("2020-13-01").is_none());
         assert!(super::parse_created_date("2020-01-01 24:00").is_none());
         assert_eq!(
-            super::format_created_date(
-                super::parse_created_date("2019-12-31 23:59").unwrap()
-            ),
+            super::format_created_date(super::parse_created_date("2019-12-31 23:59").unwrap()),
             "2019-12-31"
         );
     }
@@ -38855,7 +38615,9 @@ mod tests {
         // The first child is selected and its sheet is reachable immediately.
         assert_eq!(app.selection, SidebarSelection::Group(groups + 1));
         assert!(app.selected_sheet >= sheets);
-        assert!(app.created_dates.contains_key(&app.sheets[app.selected_sheet].id));
+        assert!(app
+            .created_dates
+            .contains_key(&app.sheets[app.selected_sheet].id));
         assert!(app.visible_sheets().contains(&app.selected_sheet));
         // Running it twice appends rather than replacing, and the duplicate
         // root gets a distinct name.
@@ -38942,7 +38704,10 @@ mod tests {
         assert_eq!(aligns, vec![ExportAlign::Left, ExportAlign::Right]);
         let md = WritingApp::table_markdown(&headers, &rows, &aligns);
         assert!(md.contains("| --- | ---: |"));
-        assert_eq!(&content[start..end], "| A | B |\n| :--- | ---: |\n| 1 | 2 |\n");
+        assert_eq!(
+            &content[start..end],
+            "| A | B |\n| :--- | ---: |\n| 1 | 2 |\n"
+        );
     }
 
     #[test]
@@ -38973,9 +38738,7 @@ mod tests {
         let rtf = app.export_rtf(&[0]);
         assert!(rtf.contains("| Name | Qty |"));
         let docx = app.export_docx_bytes(&[0]);
-        assert!(docx
-            .windows(7)
-            .any(|w| w == b"<w:tbl>"));
+        assert!(docx.windows(7).any(|w| w == b"<w:tbl>"));
         let rows = WritingApp::table_text_rows(
             &["Name".to_string(), "Qty".to_string()],
             &[vec!["A".to_string(), "2".to_string()]],
@@ -39008,11 +38771,11 @@ mod tests {
     #[test]
     fn latex_to_unicode_converts_common_notation() {
         assert_eq!(WritingApp::latex_to_unicode("\\frac{1}{2}"), "1/2");
+        assert_eq!(WritingApp::latex_to_unicode("\\sqrt{x^2+y^2}"), "√(x²+y²)");
         assert_eq!(
-            WritingApp::latex_to_unicode("\\sqrt{x^2+y^2}"),
-            "√(x²+y²)"
+            WritingApp::latex_to_unicode("\\alpha \\leq \\beta"),
+            "α ≤ β"
         );
-        assert_eq!(WritingApp::latex_to_unicode("\\alpha \\leq \\beta"), "α ≤ β");
         assert_eq!(WritingApp::latex_to_unicode("\\sum_{i=1}^{n} i"), "∑ᵢ₌₁ⁿ i");
         assert_eq!(WritingApp::latex_to_unicode("\\infty"), "∞");
     }
@@ -39046,11 +38809,11 @@ mod tests {
         assert!(md.contains("$\\alpha^2 + \\beta$"));
         // The display equation also reaches the other exporters.
         assert!(app.export_rtf(&[0]).contains("a/b"));
-        assert!(app.export_docx_bytes(&[0])
+        assert!(app
+            .export_docx_bytes(&[0])
             .windows("a/b ≤ ∞".len())
             .any(|w| w == "a/b ≤ ∞".as_bytes()));
     }
-
 
     // ---- Revision mode (H7) -------------------------------------------
 
@@ -39150,10 +38913,7 @@ mod tests {
         let loaded = WritingApp::load_library().expect("library roundtrip");
         assert_eq!(loaded.daily_goal, 500);
         assert_eq!(loaded.deadline_target, target as u32);
-        assert_eq!(
-            loaded.daily_words.get(&today).copied().unwrap_or(0),
-            250
-        );
+        assert_eq!(loaded.daily_words.get(&today).copied().unwrap_or(0), 250);
         assert!(loaded.deadline.is_some());
     }
 
@@ -39172,8 +38932,7 @@ mod tests {
         let line: String = chars[ls..le].iter().collect();
         assert_eq!(line, "Second line here.");
 
-        let line_range =
-            WritingApp::focus_scope_range(content, second_char + 3, FocusScope::Line);
+        let line_range = WritingApp::focus_scope_range(content, second_char + 3, FocusScope::Line);
         let sentence_range =
             WritingApp::focus_scope_range(content, second_char + 3, FocusScope::Sentence);
         assert_eq!(line_range, (0, content.find('\n').unwrap()));
@@ -39198,9 +38957,8 @@ mod tests {
         let _storage = isolate_storage();
         let mut app = sample_app();
         let target = app.sheets[1].id.clone();
-        app.sheets[0].content = format!(
-            "# A\n\n## Details\n\n[go deeper](ariadne://{target}#details)\n"
-        );
+        app.sheets[0].content =
+            format!("# A\n\n## Details\n\n[go deeper](ariadne://{target}#details)\n");
         let links = WritingApp::internal_links_in(&app.sheets[0].content);
         assert_eq!(
             links,
@@ -39214,10 +38972,7 @@ mod tests {
             .expect("heading slug resolves");
         assert!(offset > 0);
         assert!(app.heading_offset_in(0, "missing").is_none());
-        assert_eq!(
-            app.backlinks_for(1),
-            vec![(0, "go deeper".to_string())]
-        );
+        assert_eq!(app.backlinks_for(1), vec![(0, "go deeper".to_string())]);
         assert!(app.backlinks_for(0).is_empty());
         // Short form links also count.
         app.sheets[1].content = format!("# B\n\n[back](sheet:{})\n", app.sheets[0].id);
@@ -39244,24 +38999,46 @@ mod tests {
         // captures the current text automatically.
         harness.state_mut().history.remove(&0);
         harness.step();
-        let base = harness.state().history.get(&0).map(|l| l.len()).unwrap_or(0);
+        let base = harness
+            .state()
+            .history
+            .get(&0)
+            .map(|l| l.len())
+            .unwrap_or(0);
         assert_eq!(base, 1, "automatic capture should have run");
         // Edit, then press the button before the five-minute capture.
         harness.state_mut().sheets[0].content = "# Changed\n\nNew text.\n".to_string();
         harness.step();
-        let before = harness.state().history.get(&0).map(|l| l.len()).unwrap_or(0);
+        let before = harness
+            .state()
+            .history
+            .get(&0)
+            .map(|l| l.len())
+            .unwrap_or(0);
         assert_eq!(before, base, "automatic capture should not have run yet");
         wait_for_label(&mut harness, "Snapshot now");
         harness.get_by_label("Snapshot now").click();
         harness.step();
-        let after = harness.state().history.get(&0).map(|l| l.len()).unwrap_or(0);
+        let after = harness
+            .state()
+            .history
+            .get(&0)
+            .map(|l| l.len())
+            .unwrap_or(0);
         assert_eq!(after, before + 1, "manual snapshot was not recorded");
         let newest = harness.state().history.get(&0).unwrap().last().unwrap();
         assert!(newest.manual, "manual snapshot should be flagged");
         assert_eq!(newest.content, "# Changed\n\nNew text.\n");
         // Clicking again with no edits still takes effect: the newest
         // snapshot's time is refreshed instead of stacking a duplicate.
-        harness.state_mut().history.get_mut(&0).unwrap().last_mut().unwrap().at = 1;
+        harness
+            .state_mut()
+            .history
+            .get_mut(&0)
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .at = 1;
         harness.step();
         // The button shows its confirmation, so click it by that label.
         let saved = format!("{}  Saved", egui_phosphor::regular::CHECK);

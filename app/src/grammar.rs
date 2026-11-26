@@ -59,9 +59,7 @@ pub enum AppliedSuggestion {
 impl AppliedSuggestion {
     fn from_suggestion(s: &Suggestion) -> Self {
         match s {
-            Suggestion::ReplaceWith(chars) => {
-                AppliedSuggestion::Replace(chars.iter().collect())
-            }
+            Suggestion::ReplaceWith(chars) => AppliedSuggestion::Replace(chars.iter().collect()),
             Suggestion::InsertAfter(chars) => {
                 AppliedSuggestion::InsertAfter(chars.iter().collect())
             }
@@ -82,10 +80,7 @@ pub fn apply_at(
         if char_idx == content.chars().count() {
             return Some(content.len());
         }
-        content
-            .char_indices()
-            .nth(char_idx)
-            .map(|(byte, _)| byte)
+        content.char_indices().nth(char_idx).map(|(byte, _)| byte)
     }
     let (bs, be) = (byte_of(content, start)?, byte_of(content, end)?);
     if bs > be {
@@ -167,10 +162,7 @@ impl Checker {
         merged.add_dictionary(Arc::new(custom));
         let dictionary = Arc::new(merged);
         let linter = LintGroup::new_curated(dictionary.clone(), Dialect::American);
-        Self {
-            dictionary,
-            linter,
-        }
+        Self { dictionary, linter }
     }
 
     /// Lint `text`, skipping ignored `(message, covered)` pairs.
@@ -269,7 +261,10 @@ mod tests {
             first.suggestions
         );
         // Span points at the word in the source text.
-        assert_eq!(span_text("Teh quick brown fox.\n", first.start, first.end), "Teh");
+        assert_eq!(
+            span_text("Teh quick brown fox.\n", first.start, first.end),
+            "Teh"
+        );
     }
 
     #[test]
@@ -294,33 +289,15 @@ mod tests {
     #[test]
     fn apply_replace_insert_remove() {
         let text = "Teh cat sat.";
-        let out = apply_at(
-            text,
-            0,
-            3,
-            &AppliedSuggestion::Replace("The".to_string()),
-        )
-        .unwrap();
+        let out = apply_at(text, 0, 3, &AppliedSuggestion::Replace("The".to_string())).unwrap();
         assert_eq!(out, "The cat sat.");
         let out = apply_at(text, 0, 3, &AppliedSuggestion::Remove).unwrap();
         assert_eq!(out, " cat sat.");
-        let out = apply_at(
-            text,
-            3,
-            3,
-            &AppliedSuggestion::InsertAfter("!".to_string()),
-        )
-        .unwrap();
+        let out = apply_at(text, 3, 3, &AppliedSuggestion::InsertAfter("!".to_string())).unwrap();
         assert_eq!(out, "Teh! cat sat.");
         // Unicode-safe: char offsets, not bytes.
         let uni = "Héllo wörld";
-        let out = apply_at(
-            uni,
-            6,
-            11,
-            &AppliedSuggestion::Replace("world".to_string()),
-        )
-        .unwrap();
+        let out = apply_at(uni, 6, 11, &AppliedSuggestion::Replace("world".to_string())).unwrap();
         assert_eq!(out, "Héllo world");
         assert!(apply_at(text, 0, 99, &AppliedSuggestion::Remove).is_none());
         assert!(apply_at(text, 5, 2, &AppliedSuggestion::Remove).is_none());
@@ -328,7 +305,11 @@ mod tests {
 
     #[test]
     fn effective_words_subtracts_removals() {
-        let adds = vec!["Ariadne".to_string(), "  ".to_string(), "two words".to_string()];
+        let adds = vec![
+            "Ariadne".to_string(),
+            "  ".to_string(),
+            "two words".to_string(),
+        ];
         let removes = vec!["Ariadne".to_string()];
         let eff = effective_words(&adds, &removes);
         assert!(eff.is_empty());
@@ -340,11 +321,21 @@ mod tests {
     fn merge_word_sets_unions_both_sides() {
         let mut adds = BTreeSet::from(["a".to_string()]);
         let mut removes = BTreeSet::from(["x".to_string()]);
-        merge_word_sets(&mut adds, &mut removes, &["b".to_string()], &["y".to_string()]);
+        merge_word_sets(
+            &mut adds,
+            &mut removes,
+            &["b".to_string()],
+            &["y".to_string()],
+        );
         assert!(adds.contains("a") && adds.contains("b") && adds.len() == 2);
         assert!(removes.contains("x") && removes.contains("y") && removes.len() == 2);
         // Idempotent.
-        merge_word_sets(&mut adds, &mut removes, &["b".to_string()], &["y".to_string()]);
+        merge_word_sets(
+            &mut adds,
+            &mut removes,
+            &["b".to_string()],
+            &["y".to_string()],
+        );
         assert_eq!(adds.len(), 2);
     }
 
@@ -357,7 +348,8 @@ mod tests {
         ignored.insert((first.message.clone(), first.covered.clone()));
         let mut checker = Checker::new(&BTreeSet::new());
         let again = checker.lint("Teh quick brown fox.\n", &ignored);
-        assert!(!again.iter().any(|i| i.covered == first.covered
-            && i.message == first.message));
+        assert!(!again
+            .iter()
+            .any(|i| i.covered == first.covered && i.message == first.message));
     }
 }

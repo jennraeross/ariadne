@@ -280,7 +280,11 @@ pub fn import_json(text: &str) -> Result<CustomTheme, String> {
             parse_hex(hex).ok_or_else(|| format!("Bad color for “{key}”: {hex}"))?,
         );
     }
-    let mut get = |key: &str| values.remove(key).ok_or_else(|| format!("Missing color: {key}"));
+    let mut get = |key: &str| {
+        values
+            .remove(key)
+            .ok_or_else(|| format!("Missing color: {key}"))
+    };
     let keys = CustomKeys {
         background: get("background")?,
         panel: get("panel")?,
@@ -367,8 +371,7 @@ mod tests {
         assert!(import_json(r#"{"name":"","version":1,"colors":{}}"#).is_err());
         // Missing one color.
         let mut theme = CustomTheme::new("Mine".to_string(), sample_dark());
-        let mut json: serde_json::Value =
-            serde_json::from_str(&export_json(&theme)).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&export_json(&theme)).unwrap();
         json["colors"].as_object_mut().unwrap().remove("red");
         assert!(import_json(&serde_json::to_string(&json).unwrap()).is_err());
         // Bad hex.

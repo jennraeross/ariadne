@@ -83,13 +83,9 @@ pub fn mime_for_ext(ext: &str) -> &'static str {
         "md" | "markdown" => "text/markdown",
         "rtf" => "application/rtf",
         "pdf" => "application/pdf",
-        "docx" => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        }
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "epub" => "application/epub+zip",
-        "pptx" => {
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        }
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "json" => "application/json",
         "css" => "text/css",
         "zip" => "application/zip",
@@ -165,7 +161,9 @@ fn encode_b64(bytes: &[u8]) -> String {
 fn decode_b64(text: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD.decode(compact).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(compact)
+        .ok()
 }
 
 /// Hydrate the in-memory image store from `localStorage` (once, at startup).
@@ -173,9 +171,7 @@ pub fn images_hydrate() {
     let Some(text) = load_text(IMAGES_KEY) else {
         return;
     };
-    let Ok(raw): Result<HashMap<String, serde_json::Value>, _> =
-        serde_json::from_str(&text)
-    else {
+    let Ok(raw): Result<HashMap<String, serde_json::Value>, _> = serde_json::from_str(&text) else {
         return;
     };
     IMAGES.with(|cell| {
@@ -266,7 +262,10 @@ pub fn styles_hydrate() {
 fn styles_persist() {
     STYLES.with(|cell| {
         let map = cell.borrow();
-        store_text(STYLES_KEY, &serde_json::to_string(&*map).unwrap_or_default());
+        store_text(
+            STYLES_KEY,
+            &serde_json::to_string(&*map).unwrap_or_default(),
+        );
     });
 }
 

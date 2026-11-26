@@ -171,8 +171,8 @@ pub fn fetch_latest() -> Result<ReleaseInfo, String> {
         .map_err(|e| format!("Update check failed ({e})"))?
         .text()
         .map_err(|e| format!("Could not read the update reply ({e})"))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("Could not read the update reply ({e})"))?;
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Could not read the update reply ({e})"))?;
     parse_release(&v)
 }
 
@@ -214,7 +214,9 @@ pub fn prefs_path(dir: &Path) -> PathBuf {
 }
 
 pub fn load_prefs(dir: Option<PathBuf>) -> UpdatePrefs {
-    let Some(dir) = dir else { return UpdatePrefs::default() };
+    let Some(dir) = dir else {
+        return UpdatePrefs::default();
+    };
     let Ok(text) = std::fs::read_to_string(prefs_path(&dir)) else {
         return UpdatePrefs::default();
     };
