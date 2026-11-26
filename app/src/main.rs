@@ -6948,7 +6948,7 @@ blockquote {
                                 // Gutter for the heading `#` margin markers,
                                 // which draw left of the text origin.
                                 ui.add_space(34.0);
-                                Self::centered_measure(ui, 720.0, |ui| {
+                                Self::measure_column(ui, 720.0, |ui| {
                                     if self.typewriter {
                                         Self::typewriter_pad(ui);
                                     }
@@ -11410,18 +11410,19 @@ blockquote {
         ui.add_space((ui.clip_rect().height() / 2.0).max(0.0));
     }
 
-    /// Center content in a readable-measure column. Must be used where
-    /// vertical space is already bounded (e.g. inside a scroll area);
-    /// wrapping a bare panel collapses the content height.
-    fn centered_measure(ui: &mut egui::Ui, max_w: f32, content: impl FnOnce(&mut egui::Ui)) {
+    /// Content in a readable-measure column at the left of the pane. Must be
+    /// used where vertical space is already bounded (e.g. inside a scroll
+    /// area); wrapping a bare panel collapses the content height.
+    ///
+    /// The column used to be centred, which on a wide window left a broad
+    /// empty band between the sheet list and the sheet itself. The text now
+    /// starts at the pane's edge, at a readable measure.
+    fn measure_column(ui: &mut egui::Ui, max_w: f32, content: impl FnOnce(&mut egui::Ui)) {
         let w = ui.available_width().min(max_w);
-        ui.horizontal(|ui| {
-            ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-            ui.vertical(|ui| {
-                ui.set_min_width(w);
-                ui.set_max_width(w);
-                content(ui);
-            });
+        ui.vertical(|ui| {
+            ui.set_min_width(w);
+            ui.set_max_width(w);
+            content(ui);
         });
     }
 
@@ -32292,7 +32293,7 @@ impl eframe::App for WritingApp {
                                     .unwrap_or(0);
                                 let edited =
                                     Self::snapshot_age(Self::now_secs(), at).to_uppercase();
-                                Self::centered_measure(ui, 720.0, |ui| {
+                                Self::measure_column(ui, 720.0, |ui| {
                                     ui.label(
                                         RichText::new(format!("{group}  /  EDITED {edited}"))
                                             .size(9.5)
@@ -32317,7 +32318,7 @@ impl eframe::App for WritingApp {
                             ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
-                                    Self::centered_measure(ui, 720.0, |ui| {
+                                    Self::measure_column(ui, 720.0, |ui| {
                                         if self.typewriter {
                                             Self::typewriter_pad(ui);
                                         }
@@ -32340,7 +32341,7 @@ impl eframe::App for WritingApp {
                                             ui.separator();
                                             ui.add_space(8.0);
                                         }
-                                        Self::centered_measure(ui, 720.0, |ui| {
+                                        Self::measure_column(ui, 720.0, |ui| {
                                             let title = self
                                                 .sheets
                                                 .get(*idx)
