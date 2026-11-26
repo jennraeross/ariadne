@@ -31266,6 +31266,25 @@ impl eframe::App for WritingApp {
                                 {
                                     self.templates_open = true;
                                 }
+                                if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(format!(
+                                            "{}  Import manuscript…",
+                                            icon::FILE_DOC
+                                        ))
+                                        .small()
+                                        .color(self.theme.text_dim()),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text(
+                                    "Open a Word, OpenDocument, RTF, HTML or EPUB file as a sheet",
+                                )
+                                .clicked()
+                            {
+                                self.import_manuscript_dialog();
+                            }
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         RichText::new(icon::CIRCLE)
@@ -38402,6 +38421,17 @@ mod tests {
         assert!(app.settings_open);
         assert!(app.settings_tab == SettingsTab::Updates);
         assert!(matches!(app.update_state.status, UpdateStatus::Idle));
+    }
+
+    #[test]
+    fn palette_offers_manuscript_import() {
+        // The palette is the manual path when drag and drop is unavailable
+        // (some Wayland compositors never deliver dropped files).
+        let cmds = WritingApp::palette_commands();
+        assert!(cmds
+            .iter()
+            .any(|(t, _, cmd)| *t == "Import manuscript…"
+                && *cmd == PaletteCommand::ImportManuscript));
     }
 
     #[test]

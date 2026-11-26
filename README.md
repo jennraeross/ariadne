@@ -27,7 +27,8 @@ no runtime beyond the OS GUI layer.
   Dropping Markdown, plain text, or project-archive (`.zip`) files imports
   them; a Word (`.docx`, `.doc`), OpenDocument (`.odt`), Rich Text (`.rtf`),
   HTML, or EPUB manuscript becomes a sheet; image files are attached.
-  `Import manuscript…` in the command palette picks one from disk.
+  `Import manuscript…` in the command palette (or under the library's
+  `New from template…` link) picks one from disk.
   Selecting text opens a floating markup bar for bold, italic, heading, link,
   quote, and code. `Ctrl/Cmd+click` a link to open it; internal links
   (`#heading-slug`, or `ariadne://<sheet-id>#heading-slug` copied from the
