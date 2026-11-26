@@ -19,6 +19,8 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 url = "2"
 md5 = "0.7"
+# Reading project-archive ZIPs (stored by Ariadne, deflate tolerated).
+flate2 = "1"
 # PDF font embedding (subsetted OpenType) + system font discovery. Both are
 # pure Rust; pinned exact while krilla is pre-1.0.
 krilla = { version = "=0.8.2", default-features = false, features = ["simple-text", "raster-images"] }
@@ -34,6 +36,10 @@ web-time = { version = "1", features = ["serde"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { version = "0.15", optional = true }
 arboard = "3"
+# Safe URL opening (ShellExecute/xdg-open/`open`), no shell on Windows.
+webbrowser = "1"
+# Local calendar dates for daily goals/streaks (native; wasm uses js_sys).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Google Drive sync (background thread, blocking I/O; no async runtime).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 oauth2 = { version = "5", features = ["reqwest-blocking"] }

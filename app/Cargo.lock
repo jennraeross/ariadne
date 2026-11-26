@@ -282,11 +282,13 @@ version = "0.8.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "chrono",
  "directories",
  "eframe",
  "egui",
  "egui-phosphor",
  "egui_kittest",
+ "flate2",
  "fontdb",
  "getrandom 0.3.4",
  "harper-core",
@@ -308,6 +310,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+ "webbrowser",
  "winres",
 ]
 
