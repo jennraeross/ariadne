@@ -23,6 +23,8 @@ pub const IMAGES_KEY: &str = "ariadne-images-v1";
 pub const STYLES_KEY: &str = "ariadne-styles-v1";
 pub const THEMES_KEY: &str = "ariadne-themes-v1";
 pub const HISTORY_KEY: &str = "ariadne-history-v1";
+pub const UI_SCALE_KEY: &str = "ariadne-ui-scale-v1";
+pub const SCROLL_SPEED_KEY: &str = "ariadne-scroll-speed-v1";
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
@@ -90,6 +92,7 @@ pub fn mime_for_ext(ext: &str) -> &'static str {
         }
         "json" => "application/json",
         "css" => "text/css",
+        "zip" => "application/zip",
         _ => "application/octet-stream",
     }
 }

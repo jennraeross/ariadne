@@ -11,14 +11,41 @@ no runtime beyond the OS GUI layer.
 
 ## Library, sheets, and editor
 
-- **Library sidebar:** `All`, `Last 7 Days`, `Open Files`, and `Trash` smart
-  filters, plus `Documents`, `iCloud`, and `Google Drive` sections containing
-  groups of sheets.
-- **Sheets list:** per-group sheet cards with title and preview text,
-  multi-select, and a sheets header `+` for new sheets.
-- **Editor:** Markdown source editing with syntax tinting, `#` margin marks,
-  lists (`Return` continues, `Tab`/`Shift-Tab` nests), checklists, quotes, code,
-  and drag-and-drop image attachments (`![alt](attachment:…)`).
+- **Library sidebar:** `All`, `Last 7 Days`, `Favorites`, `Open Files`, and
+  `Trash` smart filters, plus `Documents`, `iCloud`, and `Google Drive`
+  sections containing groups of sheets. Back/forward buttons and
+  `Cmd/Ctrl+[` / `]` return to recently visited sheets.
+- **Sheets list:** per-group sheet cards with title, preview, word/reading
+  count, edited age, keywords in search, multi-select, and a sheets header
+  `+` for new sheets. Right-click a sheet to mark it as **material**:
+  material sheets are grouped under `MATERIAL` at the bottom, stay editable
+  and searchable, and are excluded from export, statistics, goals, and
+  presentation.
+- **Editor:** Markdown source editing with muted syntax markers, `#` margin
+  marks, lists (`Return` continues, `Tab`/`Shift-Tab` nests), checklists,
+  quotes, code, and drag-and-drop image attachments (`![alt](attachment:…)`).
+  Selecting text opens a floating markup bar for bold, italic, heading, link,
+  quote, and code. `Ctrl/Cmd+click` a link to open it; internal links
+  (`#heading-slug`, or `ariadne://<sheet-id>#heading-slug` copied from the
+  outline) jump within the project, and incoming links appear in Overview.
+- **Split editor:** `Cmd/Ctrl+Alt+S` or the column icon opens a second editor.
+  Choose its sheet from the pane header, place the panes side by side or
+  stacked, and scroll each one independently. The accent border marks
+  the editor with keyboard focus.
+- **Tables and equations:** Markdown pipe tables render in the preview and
+  exports (native HTML/ePub and Word tables; aligned text in PDF and RTF).
+  `Table editor…` in the command palette (or the table icon in the selection
+  bar) opens a grid for adding/removing rows and columns and setting
+  per-column alignment; `Insert equation` adds display math. Inline math (`$...$`) and display math (`$$...$$`) accept
+  common LaTeX (Greek, fractions, roots, sums, operators, sub/superscripts)
+  and export as readable Unicode.
+- **Toolbar:** a three-segment pane switcher, back/forward history, and a
+  single Sheet details button; export, present, and settings stay on the
+  right.
+- **Keyboard-first navigation:** arrow keys move through the library, the
+  sheets list, and the editor; `Return` drills in and `Cmd/Ctrl+Return`
+  goes back up. Focus mode can keep the paragraph, line, or sentence under
+  the caret bright.
 - **Status bar:** live word and character counts plus a status line.
 
 ## Command palette and shortcuts
@@ -32,16 +59,22 @@ run commands:
 | --- | --- |
 | `Cmd/Ctrl+N` | New sheet |
 | `Cmd/Ctrl+B` | Toggle sidebars |
+| `Cmd/Ctrl+[` / `]` | Back / forward through sheet history |
+| `Cmd/Ctrl+1` | Show library, sheets, and editor |
+| `Cmd/Ctrl+2` | Sheets and editor (hide library) |
+| `Cmd/Ctrl+3` | Editor only |
 | `Cmd/Ctrl+Shift+P` | Command palette / search |
 | `Cmd/Ctrl+F` | Find in sheet |
 | `Cmd/Ctrl+E` | Share / export |
 | `Cmd/Ctrl+P` | Present |
-| `Cmd/Ctrl+G` | Writing goals |
-| `Cmd/Ctrl+/` | Style suggestions |
-| `Cmd/Ctrl+Y` | History |
+| `Cmd/Ctrl+G` | Sheet details (overview) |
+| `Cmd/Ctrl+/` | Review tab |
+| `Cmd/Ctrl+Y` | History tab |
 | `Cmd/Ctrl+,` | Settings |
 | `Cmd/Ctrl+Alt+T` / `F` / `Z` | Typewriter / Focus / Zen mode |
-| `Esc` | Leave Zen mode, close find/palette |
+| `Cmd/Ctrl+Alt+R` | Revision mode |
+| `Cmd/Ctrl+Alt+S` | Split editor |
+| `Esc` | Leave Zen or revision mode, close find/palette |
 
 ## Appearance and editor settings
 
@@ -53,31 +86,53 @@ Checking, Sync, and Updates.
 - **Appearance:** 9 dark and 8 light built-in themes (Dark, Light, Gruvbox,
   Dracula, Nord, Catppuccin, Rosé Pine, Everforest, Solarized, Tokyo Night,
   and their light variants), plus custom themes (`New theme…`, `Import…`,
-  Edit/Save/Copy/Delete).
+  Edit/Save/Copy/Delete). An **Interface scale** slider and presets
+  (75%–200%) — also driven by Ctrl +/- — scale the whole app for the current
+  display and are saved the moment they change, along with the window
+  geometry; editor text size stays a separate setting. A **Scroll speed**
+  slider (0.25×–4×) tunes wheel/trackpad scrolling for the machine.
 - **Editor:** system font family picker, 8–32 pt size slider, and reading
   modes:
 
 ![Editor settings](app/assets/screenshots/settings-editor.png)
 
   - Typewriter scrolling (caret line centered),
-  - Focus mode (dims paragraphs outside the caret's),
-  - Zen mode (editor only; `Esc` leaves).
+  - Focus mode (dims text outside the caret's; keep the paragraph, line, or
+    sentence bright),
+  - Zen mode (editor only; `Esc` leaves),
+  - Revision mode (`Cmd/Ctrl+Alt+R`): dims the text, hides the library pane,
+    and opens the Review tab for a focused pass over style suggestions.
 
-## Goals, history, and style sidebar
+## Sheet details dashboard
 
-The header bar's target, clock, and book icons open three right sidebars:
+The header bar's target icon opens the right-hand dashboard; its tabs switch
+between Overview, Review (`Cmd/Ctrl+/`), and History (`Cmd/Ctrl+Y`):
 
-![Writing goals sidebar](app/assets/screenshots/goals.png)
+![Sheet details dashboard](app/assets/screenshots/dashboard.png)
 
-- **Writing goals:** per-library word target with progress (`Set a word
-  target to track progress`).
+- **Overview:** writing goal with a progress ring, daily word target, optional
+  deadline with required words/day, a 14-day writing-history chart, outline,
+  sheet details (words, characters, reading time, media, created and edited
+  dates), image thumbnails, editable keywords, incoming links (backlinks),
+  review summary, and history summary.
+- **Review:** concision and clarity notes with click-to-jump and one-click
+  fixes; its open/closed state is remembered across runs.
 - **History:** per-sheet snapshots with age/character counts, `Snapshot now`,
   `Clear`, and per-snapshot `Restore`.
-- **Style sidebar:** concision and clarity notes with click-to-jump and
-  one-click fixes; its open/closed state is remembered across runs.
 
-![Style suggestions sidebar](app/assets/screenshots/style-sidebar.png)
-![Sheet history sidebar](app/assets/screenshots/history.png)
+Create a starter project from **New from template…** in the command palette or
+the library footer: Novel, Blog, Notes, Research, or a blank project. Each
+template lands as one new top-level group with its starter groups nested
+inside. Groups can be given an icon, a color, and their own sheet ordering
+(manual, title, last edited, or date created) from the group context menu; a
+group's color also becomes its highlight color when selected, with
+contrasting text. The keyword manager (command palette, or **Manage…** in
+Overview) renames, merges, deletes, colors, and favorites keywords
+library-wide.
+
+On narrow windows and tiling-WM tiles, opening the dashboard gives it the
+library/sheet-list space so the editor keeps a readable measure; closing it
+restores the sidebars.
 
 ## Present mode
 
@@ -107,6 +162,11 @@ own CSS:
   active style (built-ins open as a copy), imports a `.css` file, deletes the
   style, or attaches a font file (`.ttf`/`.otf`/`.ttc`) for export-only fonts.
 - `Preview`, `Save to file`, and `Open with default app` are the outputs.
+- Write `(toc)` on its own line to expand a table of contents from the
+  sheet's headings (linked in Markdown and HTML/ePub).
+- **Share project archive** exports the whole library — sheets, groups,
+  attachments, history, and settings — as one `.zip` for backup or moving to
+  another machine.
 - The `Export Style Guide` starter sheet documents the stylesheet selectors;
   the `Write First, Present Later` starter sheet documents present mode.
 
@@ -148,7 +208,7 @@ Checking runs fully on-device with [Harper](https://github.com/automerge/harper)
 - **Inline:** spelling and grammar mistakes get red/blue squiggles as you
   type. Put the caret in one for a fix popup (apply, ignore, or add the
   word to your dictionary).
-- **Style sidebar** (book icon in the header): concision and clarity notes —
+- **Review tab** (in the sheet dashboard): concision and clarity notes —
   wordy phrases, passive voice, redundancies — with click-to-jump and
   one-click fixes. Its open/closed state is remembered across runs.
 - **Custom dictionary:** words you add sync across devices with the rest of
@@ -209,7 +269,9 @@ The same app runs in the browser at `/app/` on the GitHub Pages site:
 full editor, library, themes, history, export, and present mode. The
 library persists in the browser's `localStorage` (no account, no server);
 sync (iCloud / Google Drive), update checks, and OS integrations
-(clipboard image paste, file dialogs, "open with") are desktop-only.
+(clipboard image paste, file dialogs, "open with") are desktop-only. A
+browser save that cannot be read is preserved and offered as **Download
+recovered library…** in the command palette instead of being overwritten.
 
 ```sh
 cd app
