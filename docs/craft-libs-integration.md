@@ -22,7 +22,7 @@ Everything below is egui-free.
 | # | Improvement | Crates | Status |
 |---|---|---|---|
 | 1 | **Manuscript import** — drop a `.docx`, `.doc`, `.odt`, `.rtf`, `.html`, `.epub` and get a sheet | `craft-docx`, `craft-doc-binary`, `craft-odf[text]`, `craft-rtf[doc]`, `craft-html[flow]`, `craft-epub`, `craft-markdown`, `craft-flow`, `craft-wordmodel` | **in progress** |
-| 2 | **DOCX export that Word understands** — real Heading styles, numbered lists, clickable links, OMML equations, document properties | `craft-docx`, `craft-flow`, `craft-wordmodel`, `craft-math` | todo |
+| 2 | **DOCX export that Word understands** — real Heading styles, numbered lists, clickable links, OMML equations, document properties | `craft-docx`, `craft-flow`, `craft-wordmodel`, `craft-math` | todo (approach below) |
 | 3 | **EPUB 3 export** — nav document, metadata, cover, per-chapter XHTML | `craft-epub` | todo |
 | 4 | **Proofing beyond US English** — dialect choice first, then Hunspell languages and hyphenation | `craft-proof` (Harper dialect is app-side) | todo |
 | 5 | **Real RTF tables** instead of space-aligned columns | `craft-rtf[doc]` | todo |
@@ -85,9 +85,26 @@ properties. Today `export_docx_bytes` writes only `word/document.xml`: no
 `styles.xml`, no `numbering.xml`, bullets as `•` text, links as `text (url)`,
 maths flattened to Unicode.
 
-**Work:** map the export theme's fixed element set (title, h1–h3, body, quote,
-code) onto named `craft-wordmodel` styles, build the document through
-`craft-flow` → `craft_docx::write`, and OMML for equations via `craft-math`.
+**Work (revised after reading the exporter):** replace the internals of
+`export_docx_bytes` in place rather than swapping in `craft_docx::write` — the
+current writer already handles page size/margins, page breaks, images with
+drawing relationships and tables, and those are exactly what a rewrite would
+regress. The missing pieces are package parts and paragraph structure:
+
+1. `word/styles.xml`: `docDefaults` from the body style, plus named
+   `Title`/`Heading1`–`Heading3` (with `w:outlineLvl`) / `Quote` / `Code`
+   styles built from the export theme; reference them with `w:pStyle`.
+2. `word/numbering.xml`: one bullet list and one decimal list, with a fresh
+   `w:num` per contiguous list run so numbering restarts; drop the literal
+   `•` and `1.` prefixes.
+3. Real `w:hyperlink` runs (`document.xml.rels` per unique URL,
+   `TargetMode="External"`) instead of `text (url)`.
+4. `docProps/core.xml`: title, creator from settings, created/modified.
+5. `$$…$$` through `craft-math` to OMML instead of Unicode flattening.
+
+`craft-docx`/`craft-flow` stay for import and are the reference for the XML
+shapes; adopting `craft_docx::write` wholesale is deferred until there is a
+theme-to-styles mapping proven against existing exports.
 
 **Acceptance:** Word shows headings in the navigation pane, list numbering
 restarts correctly, links open, `$$…$$` stays editable; LibreOffice opens the
