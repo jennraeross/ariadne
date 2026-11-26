@@ -24,8 +24,10 @@ no runtime beyond the OS GUI layer.
 - **Editor:** Markdown source editing with muted syntax markers, `#` margin
   marks, lists (`Return` continues, `Tab`/`Shift-Tab` nests), checklists,
   quotes, code, and drag-and-drop image attachments (`![alt](attachment:…)`).
-  Dropping Markdown, plain-text, or project-archive (`.zip`) files imports
-  them instead; image files are attached.
+  Dropping Markdown, plain text, or project-archive (`.zip`) files imports
+  them; a Word (`.docx`, `.doc`), OpenDocument (`.odt`), Rich Text (`.rtf`),
+  HTML, or EPUB manuscript becomes a sheet; image files are attached.
+  `Import manuscript…` in the command palette picks one from disk.
   Selecting text opens a floating markup bar for bold, italic, heading, link,
   quote, and code. `Ctrl/Cmd+click` a link to open it; internal links
   (`#heading-slug`, or `ariadne://<sheet-id>#heading-slug` copied from the

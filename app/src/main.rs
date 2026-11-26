@@ -27,6 +27,8 @@ mod grammar;
 
 mod gdrive;
 
+mod import;
+
 mod update;
 
 mod custom_theme;
@@ -2522,6 +2524,7 @@ enum PaletteCommand {
     CheckUpdates,
     RecoverLibrary,
     ImportArchive,
+    ImportManuscript,
     CleanAttachments,
 }
 
@@ -14147,6 +14150,7 @@ blockquote {
         let mut archives = 0usize;
         let mut skipped = 0usize;
         let mut last_archive_status: Option<String> = None;
+        let mut last_import_status: Option<String> = None;
         for file in &dropped {
             let (name, bytes) = if let Some(bytes) = &file.bytes {
                 let name = if file.name.is_empty() {
@@ -14190,9 +14194,13 @@ blockquote {
                 }
                 continue;
             }
-            if matches!(ext.as_str(), "md" | "markdown" | "txt") {
-                self.import_text_sheet(&name, String::from_utf8_lossy(&bytes).into_owned());
-                text_sheets += 1;
+            if let Some(format) = import::sniff(&name, &bytes) {
+                if self.import_manuscript(&name, &bytes, format) {
+                    last_import_status = Some(self.status.clone());
+                    text_sheets += 1;
+                } else {
+                    skipped += 1;
+                }
                 continue;
             }
             // Everything else is tried as an image attachment. That needs
@@ -14235,12 +14243,21 @@ blockquote {
         if parts.is_empty() {
             if skipped > 0 {
                 self.status =
-                    "Skipped: drop images, Markdown/plain text, or a project archive".to_string();
+                    "Skipped: drop an image, a manuscript (Word, OpenDocument, RTF, HTML, EPUB, Markdown or plain text), or a project archive".to_string();
             }
             return;
         }
         if let (1, true) = (archives, images == 0 && text_sheets == 0 && skipped == 0) {
             if let Some(message) = last_archive_status {
+                self.status = message;
+                self.save_library();
+                return;
+            }
+        }
+        // One manuscript on its own keeps the importer's detailed status
+        // (which names anything left out); "imported 1 sheet" would hide it.
+        if images == 0 && archives == 0 && text_sheets == 1 && skipped == 0 {
+            if let Some(message) = last_import_status {
                 self.status = message;
                 self.save_library();
                 return;
@@ -14303,6 +14320,86 @@ blockquote {
         self.ensure_visible_selection();
         self.reset_word_baseline();
         self.status = format!("Imported {stem}");
+    }
+
+    /// Read one dropped or picked manuscript into a new sheet. Returns
+    /// false when the file could not be read, with the reason on the
+    /// status line. Pictures and equations are reported as left out until
+    /// the importer carries them (see `docs/craft-libs-integration.md`).
+    fn import_manuscript(&mut self, filename: &str, bytes: &[u8], format: import::Format) -> bool {
+        match import::to_markdown(format, bytes) {
+            Ok(imported) => {
+                let stem = std::path::Path::new(filename)
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "Imported".to_string());
+                self.import_text_sheet(filename, imported.markdown);
+                let mut status = format!("Imported {stem} ({})", format.label());
+                if imported.pictures_dropped > 0 {
+                    status.push_str(&format!(
+                        "; {} image{} not imported yet",
+                        imported.pictures_dropped,
+                        if imported.pictures_dropped == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
+                self.status = status;
+                true
+            }
+            Err(e) => {
+                self.status = format!("Could not import {filename}: {e}");
+                false
+            }
+        }
+    }
+
+    /// Pick a manuscript file and import it as a sheet. The browser build
+    /// has no native dialog: dropping the file on the window does the same.
+    fn import_manuscript_dialog(&mut self) {
+        #[cfg(feature = "dialogs")]
+        {
+            let all: Vec<&str> = [
+                import::Format::Docx,
+                import::Format::Doc,
+                import::Format::Odt,
+                import::Format::Rtf,
+                import::Format::Html,
+                import::Format::Epub,
+                import::Format::Markdown,
+                import::Format::Text,
+            ]
+            .into_iter()
+            .flat_map(|format| format.extensions().iter().copied())
+            .collect();
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Manuscripts", all.as_slice())
+                .pick_file()
+            else {
+                self.status = "Import cancelled".to_string();
+                return;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Imported".to_string());
+            match std::fs::read(&path) {
+                Ok(bytes) => match import::sniff(&name, &bytes) {
+                    Some(format) => {
+                        self.import_manuscript(&name, &bytes, format);
+                    }
+                    None => self.status = format!("Unsupported file: {name}"),
+                },
+                Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+            }
+        }
+        #[cfg(not(feature = "dialogs"))]
+        {
+            self.status = "Drop the manuscript onto the window to import it".to_string();
+        }
     }
 
     /// Encode raw RGBA pixels as PNG bytes for `attach_one_image`. None
@@ -21349,6 +21446,7 @@ blockquote {
                 None,
                 PaletteCommand::ImportArchive,
             ),
+            ("Import manuscript…", None, PaletteCommand::ImportManuscript),
             (
                 "Clean up unused images",
                 None,
@@ -21437,6 +21535,11 @@ blockquote {
                 self.search_open = false;
                 self.search_query.clear();
                 self.import_project_archive();
+            }
+            PaletteCommand::ImportManuscript => {
+                self.search_open = false;
+                self.search_query.clear();
+                self.import_manuscript_dialog();
             }
             PaletteCommand::CleanAttachments => {
                 self.search_open = false;

@@ -27,6 +27,19 @@ krilla = { version = "=0.8.2", default-features = false, features = ["simple-tex
 fontdb = "=0.24.0"
 harper-core = "3.0.0"
 log = "0.4"
+# Manuscript import (Word, OpenDocument, RTF, HTML, EPUB), from craft-libs.
+# Headless crates only: its UI layer is built on a fork of egui 0.37 and
+# cannot be mixed with this app's egui 0.31. Pinned by rev because the
+# repository has no release tag yet. See docs/craft-libs-integration.md.
+craft-doc-binary = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc" }
+craft-docx = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc" }
+craft-epub = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc" }
+craft-flow = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc" }
+craft-html = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc", features = ["flow"] }
+craft-markdown = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc" }
+craft-odf = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc", features = ["text"] }
+craft-rtf = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc", features = ["doc"] }
+craft-wordmodel = { git = "https://github.com/storytold/craft-libs", rev = "39c7c75c52aca67716e5b4bb46dd1196ae1943cc" }
 # Working clocks on wasm (std::time::now panics there); same API as std.
 web-time = { version = "1", features = ["serde"] }
 
