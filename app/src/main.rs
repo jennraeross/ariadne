@@ -32197,12 +32197,12 @@ mod tests {
     use super::{
         contrast_ratio, default_editor_font_size, default_scroll_speed, flatten_over, grammar,
         new_group_id, new_sheet_id, pdf_family_for, review_chip_colors, tinted_badge, AppTheme,
-        AttachedImage, Block, DropZone, ExportAlign, ExportFormat, ExportTheme, FocusScope,
-        GdriveSync, GrammarState, Group, GroupSort, MarkupKind, MergeReport, OutlineEntry,
-        PaletteCommand, PaneFocus, PdfFamily, PresentAspect, PresentTab, PreviewCache, PreviewDoc,
-        PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab, Sheet, SidebarSelection,
-        SlideLayout, SmartFilter, Snapshot, StyleEditState, Tombstone, UpdateState, UpdateStatus,
-        WindowState, WritingApp, PROFESSIONAL_STYLE,
+        AttachedImage, Block, ConfirmDelete, DropZone, ExportAlign, ExportFormat, ExportTheme,
+        FocusScope, GdriveSync, GrammarState, Group, GroupSort, GroupStyle, MarkupKind,
+        MergeReport, OutlineEntry, PaletteCommand, PaneFocus, PdfFamily, PresentAspect, PresentTab,
+        PreviewCache, PreviewDoc, PreviewItem, ResolvedTheme, SavedLibrary, Section, SettingsTab,
+        Sheet, SidebarSelection, SlideLayout, SmartFilter, Snapshot, StyleEditState, Tombstone,
+        UpdateState, UpdateStatus, WindowState, WritingApp, PROFESSIONAL_STYLE,
     };
     use std::time::{Duration, SystemTime};
 
@@ -32501,6 +32501,8 @@ mod tests {
             font_db_rx: None,
             present_export_rx: None,
             present_export_pending: None,
+            export_rx: None,
+            export_pending: None,
             image_decodes_this_frame: 0,
             present_image_tx: None,
             present_image_rx: None,
@@ -32509,6 +32511,18 @@ mod tests {
             present_open_ticks: 0,
             image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            save_error: None,
+            save_pending: false,
+            save_due: None,
+            save_retry_at: None,
+            mirror_files: std::collections::HashMap::new(),
+            mirror_assets: std::collections::HashMap::new(),
+            confirm_delete: None,
+            metrics_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            card_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            lower_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            links_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            backlinks_cache: std::cell::RefCell::new(None),
             status: String::new(),
             screenshot_path: None,
             frame_count: 0,
@@ -34095,6 +34109,8 @@ mod tests {
             font_db_rx: None,
             present_export_rx: None,
             present_export_pending: None,
+            export_rx: None,
+            export_pending: None,
             image_decodes_this_frame: 0,
             present_image_tx: None,
             present_image_rx: None,
@@ -34103,6 +34119,18 @@ mod tests {
             present_open_ticks: 0,
             image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            save_error: None,
+            save_pending: false,
+            save_due: None,
+            save_retry_at: None,
+            mirror_files: std::collections::HashMap::new(),
+            mirror_assets: std::collections::HashMap::new(),
+            confirm_delete: None,
+            metrics_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            card_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            lower_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            links_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            backlinks_cache: std::cell::RefCell::new(None),
             status: String::new(),
             screenshot_path: None,
             frame_count: 0,
@@ -37923,12 +37951,9 @@ mod tests {
             modifiers: Default::default(),
         });
         harness.run();
-        for (f, focused, cur, sel) in &harness.state().trace {
-            eprintln!("DEBUG frame={f} focused={focused} cursor={cur:?} sel={sel}");
-        }
-        eprintln!("DEBUG selected_len: {}", harness.state().selected_len);
-        // TEMPORARY: parked while the harness event path is validated.
-        assert!(harness.state().selected_len >= 0);
+        // The drag must actually select text in the real editor stack
+        // (ScrollArea + custom layouter + frame), not just move the pointer.
+        assert!(harness.state().selected_len > 0);
     }
 
     /// TEMPORARY repro: drag-select with the FULL app editor stack
@@ -40267,5 +40292,330 @@ mod tests {
                 .is_some(),
             "no visible confirmation after snapshot"
         );
+    }
+
+    #[test]
+    fn save_failure_sets_state_and_recovers() {
+        let _g = isolate_storage();
+        let mut app = sample_app();
+        let path = WritingApp::library_path().unwrap();
+        let _ = std::fs::remove_file(&path);
+        // A directory at the file path makes the atomic rename fail.
+        std::fs::create_dir_all(&path).unwrap();
+        app.save_library();
+        assert!(app.save_error.is_some(), "failed save must be reported");
+        assert!(app.save_retry_at.is_some(), "a retry must be scheduled");
+        std::fs::remove_dir(&path).unwrap();
+        app.save_library();
+        assert!(
+            app.save_error.is_none(),
+            "successful retry must clear the error"
+        );
+        assert!(app.save_retry_at.is_none());
+    }
+
+    #[test]
+    fn autosave_is_debounced_until_due() {
+        let _g = isolate_storage();
+        let mut app = sample_app();
+        app.save_library();
+        let path = WritingApp::library_path().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        app.sheets[0].content.push_str("\nnew words");
+        app.sheets[0].modified = SystemTime::now();
+        app.schedule_save();
+        assert!(app.save_pending);
+        let wait = app.poll_pending_save();
+        assert!(wait.is_some(), "not due yet");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "nothing written early"
+        );
+        app.save_due = Some(std::time::Instant::now() - Duration::from_millis(1));
+        assert!(app.poll_pending_save().is_none());
+        assert!(!app.save_pending);
+        assert_ne!(std::fs::read(&path).unwrap(), before, "due save wrote");
+    }
+
+    #[test]
+    fn sync_merges_metadata_and_newest_group_style() {
+        let _g = isolate_storage();
+        let mut app = sync_app();
+        // Write a newer version where s-b is favorited, tagged, and its
+        // group has a star icon.
+        if let Some(sheet) = app.sheets.iter_mut().find(|s| s.id == "s-b") {
+            sheet.favorite = true;
+            sheet.keywords = vec!["idea".to_string()];
+            sheet.modified = SystemTime::now();
+        }
+        app.group_styles.insert(
+            "g-inbox".to_string(),
+            GroupStyle {
+                icon: Some("star".to_string()),
+                color: None,
+                sort: GroupSort::Manual,
+                modified: SystemTime::now(),
+            },
+        );
+        app.save_library();
+
+        // The local side "misses" those edits and has an older timestamp.
+        let older = SystemTime::now() - Duration::from_secs(30);
+        if let Some(sheet) = app.sheets.iter_mut().find(|s| s.id == "s-b") {
+            sheet.favorite = false;
+            sheet.keywords.clear();
+            sheet.modified = older;
+        }
+        app.group_styles.insert(
+            "g-inbox".to_string(),
+            GroupStyle {
+                icon: None,
+                color: None,
+                sort: GroupSort::Manual,
+                modified: older,
+            },
+        );
+        app.sync_hashes.remove("icloud");
+        let changed = WritingApp::merge_store_file(
+            &mut app.groups,
+            &mut app.sheets,
+            &mut app.tombstones,
+            &mut app.grammar.dict_adds,
+            &mut app.grammar.dict_removes,
+            &mut app.created_dates,
+            &mut app.group_styles,
+            &mut app.keyword_styles,
+            &mut app.daily_words,
+            &icloud_store_file(),
+            &mut app.sync_hashes,
+            "icloud",
+        );
+        assert!(changed, "metadata merge should report a change");
+        let sheet = app.sheets.iter().find(|s| s.id == "s-b").expect("sheet");
+        assert!(sheet.favorite, "favorite flag syncs");
+        assert_eq!(sheet.keywords, vec!["idea".to_string()]);
+        assert_eq!(
+            app.group_styles["g-inbox"].icon.as_deref(),
+            Some("star"),
+            "newest group presentation wins"
+        );
+    }
+
+    #[test]
+    fn stored_zip_roundtrips_entries() {
+        let files: [(&str, &[u8]); 2] = [
+            ("library.json", b"{\"x\":1}"),
+            ("attachments/img-1.png", b"png-bytes"),
+        ];
+        let zip = crate::archive::build_zip(&files);
+        let read = crate::archive::read_entries(&zip).expect("reads own archive");
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].0, "library.json");
+        assert_eq!(read[0].1, b"{\"x\":1}");
+        assert_eq!(read[1].0, "attachments/img-1.png");
+        assert_eq!(read[1].1, b"png-bytes");
+    }
+
+    #[test]
+    fn project_archive_import_restores_sheets() {
+        let _g = isolate_storage();
+        let mut app = sync_app();
+        app.sheets[0].content = "# Restored\n\nBody".to_string();
+        app.save_library();
+        let archive = app.project_archive_bytes();
+        // Simulate a later library that lost the sheet.
+        app.sheets.remove(0);
+        app.selected_sheet = 0;
+        app.selected_sheets = vec![0];
+        let message = app
+            .import_project_archive_bytes(&archive)
+            .expect("imports own archive");
+        assert!(app.sheets.iter().any(|s| s.id == "s-a"), "sheet restored");
+        assert!(message.contains("new sheet"), "message: {message}");
+        assert!(
+            app.last_counted_words.is_some(),
+            "import rebaselines daily words"
+        );
+    }
+
+    #[test]
+    fn dropped_text_import_creates_sheet_in_current_group() {
+        let _g = isolate_storage();
+        let mut app = sync_app();
+        app.selection = SidebarSelection::Group(0);
+        app.import_text_sheet("Chapter One.md", "# Chapter One\n\nHello".to_string());
+        assert_eq!(app.sheets.len(), 3);
+        let sheet = app.sheets.last().expect("new sheet");
+        assert_eq!(sheet.content, "# Chapter One\n\nHello");
+        assert_eq!(sheet.group, Some(0));
+        assert_eq!(app.selected_sheet, 2);
+        assert_eq!(app.selection, SidebarSelection::Sheet(2));
+    }
+
+    #[test]
+    fn trash_and_restore_rebaseline_daily_words() {
+        let _g = isolate_storage();
+        let mut app = sample_app();
+        app.trash_sheet(0);
+        assert_eq!(
+            app.last_counted_words,
+            Some(app.total_library_words()),
+            "trashing must not look like deleting words"
+        );
+        app.restore_sheet(0);
+        assert_eq!(
+            app.last_counted_words,
+            Some(app.total_library_words()),
+            "restoring must not count as writing those words today"
+        );
+    }
+
+    #[test]
+    fn word_count_ignores_markdown_markers() {
+        let text = "# Heading\n\n- item\n\n---\n| a | b |\n|---|---|\n";
+        assert_eq!(
+            WritingApp::counts(text).0,
+            4,
+            "heading/list/table text only, no markers"
+        );
+        assert_eq!(WritingApp::count_line_words("##"), 0);
+        assert_eq!(WritingApp::count_line_words("- [ ] task"), 1);
+        assert_eq!(WritingApp::count_line_words("1. ordered"), 1);
+    }
+
+    #[test]
+    fn sheet_stats_cache_tracks_modified() {
+        let mut app = sample_app();
+        assert_eq!(app.sheet_metrics(0).0, 1, "# A");
+        app.sheets[0].content.push_str("\n\ntwo words");
+        app.sheets[0].modified = SystemTime::now();
+        assert_eq!(app.sheet_metrics(0).0, 3);
+        app.sheets[0].content = "# New title\n\nBody".to_string();
+        app.sheets[0].modified = SystemTime::now();
+        assert_eq!(app.sheet_title(0), "New title");
+    }
+
+    #[test]
+    fn local_store_merges_external_edits_on_save() {
+        let _g = isolate_storage();
+        let mut app = sync_app();
+        app.save_library();
+        let path = WritingApp::library_path().expect("library path");
+        let mut store = read_store(&path);
+        store.sheets.push(Sheet {
+            id: "s-ext".to_string(),
+            conflict_of: None,
+            section: Section::Documents,
+            content: "# Extra".to_string(),
+            group: None,
+            trashed: false,
+            modified: SystemTime::now(),
+            material: false,
+            favorite: false,
+            keywords: Vec::new(),
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+        app.save_library();
+        assert!(
+            app.sheets.iter().any(|s| s.id == "s-ext"),
+            "external local edit must be merged, not clobbered"
+        );
+        let reread = read_store(&path);
+        assert!(reread.sheets.iter().any(|s| s.id == "s-ext"));
+    }
+
+    #[test]
+    fn prune_mirror_keeps_user_files() {
+        let root = std::env::temp_dir().join(format!("ariadne-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(
+            root.join("managed.md"),
+            "<!-- Managed by Ariadne — test -->\n\nbody",
+        )
+        .unwrap();
+        std::fs::write(root.join("user.md"), "my own notes").unwrap();
+        WritingApp::prune_mirror(&root, &[]);
+        assert!(!root.join("managed.md").exists());
+        assert!(root.join("user.md").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unused_attachment_cleanup_keeps_referenced() {
+        let _g = isolate_storage();
+        let mut app = sample_app();
+        app.attached_images = vec![
+            AttachedImage {
+                id: "img-1".to_string(),
+                name: "one".to_string(),
+                ext: "png".to_string(),
+            },
+            AttachedImage {
+                id: "img-2".to_string(),
+                name: "two".to_string(),
+                ext: "png".to_string(),
+            },
+        ];
+        app.sheets[0].content = "# A\n\n![one](attachment:img-1)".to_string();
+        app.sheets[0].modified = SystemTime::now();
+        assert_eq!(app.remove_unused_attachments(), 1);
+        assert_eq!(app.attached_images.len(), 1);
+        assert_eq!(app.attached_images[0].id, "img-1");
+        assert_eq!(app.remove_unused_attachments(), 0);
+    }
+
+    #[test]
+    fn export_worker_app_matches_ui_bytes() {
+        let app = sample_app();
+        let idxs = vec![0];
+        let mut ui_app = sample_app();
+        let ui_docx = ui_app.export_docx_bytes(&idxs);
+        let ui_epub = ui_app.export_epub_bytes(&idxs);
+        let mut worker = WritingApp::export_worker_app(
+            app.sheets.clone(),
+            app.export_css.clone(),
+            app.attached_fonts.clone(),
+            app.attached_images.clone(),
+        );
+        assert_eq!(worker.export_docx_bytes(&idxs), ui_docx);
+        assert_eq!(worker.export_epub_bytes(&idxs), ui_epub);
+    }
+
+    #[test]
+    fn delete_forever_modal_cancels_and_confirms() {
+        use egui_kittest::kittest::Queryable as _;
+        use egui_kittest::Harness;
+
+        let _storage = isolate_storage();
+        let mut harness = Harness::new_eframe(|cc| WritingApp::new(cc, None));
+        harness.set_size(egui::vec2(1100.0, 720.0));
+        harness.run();
+        let (id, title) = {
+            let sheet = &harness.state().sheets[0];
+            (sheet.id.clone(), "Welcome")
+        };
+        harness.state_mut().confirm_delete = Some(ConfirmDelete::SheetForever(id.clone()));
+        harness.run();
+        // The modal appears with both choices; cancel leaves the sheet.
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert!(harness.state().confirm_delete.is_none());
+        assert!(harness.state().sheets.iter().any(|s| s.id == id));
+        // Confirming removes it permanently (it must be in the trash, as
+        // the UI only offers Delete forever there).
+        if let Some(sheet) = harness.state_mut().sheets.iter_mut().find(|s| s.id == id) {
+            sheet.trashed = true;
+        }
+        harness.state_mut().confirm_delete = Some(ConfirmDelete::SheetForever(id.clone()));
+        harness.run();
+        harness.get_by_label("Delete forever").click();
+        harness.run();
+        assert!(
+            !harness.state().sheets.iter().any(|s| s.id == id),
+            "confirmed delete removes {title}"
+        );
+        assert!(harness.state().confirm_delete.is_none());
     }
 }
