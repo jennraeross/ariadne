@@ -1,3 +1,8 @@
+// Release builds on Windows are GUI-subsystem apps: no console window opens
+// alongside Ariadne, and closing the app never depends on a terminal. Debug
+// builds keep the console so `cargo run` and test output stay visible.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use eframe::egui;
 use egui::{Color32, FontId, RichText, ScrollArea, Vec2};
 use egui_phosphor::regular as icon;
