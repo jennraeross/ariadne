@@ -58,6 +58,12 @@ jobs:
             --public-url /ariadne/app/ \
             --no-default-features
         working-directory: app
+      - name: Stamp the service-worker cache for this deploy
+        run: |
+          set -euo pipefail
+          STAMP="${GITHUB_SHA::12}"
+          sed -i "s/ariadne-app-v1/ariadne-app-${STAMP}/" app/dist-web/sw.js
+          grep -q "ariadne-app-${STAMP}" app/dist-web/sw.js
       - name: Verify the PWA shell
         working-directory: app
         run: |

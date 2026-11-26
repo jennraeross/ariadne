@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app -> target
@@ -19,6 +21,12 @@ jobs:
           sudo apt-get install -y \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev xvfb
+      - name: Check formatting
+        run: cargo fmt --check
+        working-directory: app
+      - name: Clippy (deny-by-default lints must pass)
+        run: cargo clippy --locked --all-targets
+        working-directory: app
       - name: Run tests
         run: cargo test --locked --verbose
         working-directory: app
