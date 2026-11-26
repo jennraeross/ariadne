@@ -2011,6 +2011,33 @@ impl WindowState {
     }
 }
 
+/// Last-written state of one iCloud/Drive mirror file, so unchanged saves
+/// can skip re-reading it. Keyed by the destination path.
+struct MirrorFileState {
+    // File metadata uses std's clock even on wasm (our `SystemTime` alias
+    // is web_time there, which is a different type).
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+    hash: u64,
+}
+
+/// Last-copied state of one mirrored attachment. Both source and
+/// destination metadata are compared, so a changed file is re-copied.
+struct MirrorAssetState {
+    src_mtime: Option<std::time::SystemTime>,
+    src_len: u64,
+    dst_mtime: Option<std::time::SystemTime>,
+    dst_len: u64,
+}
+
+/// Irreversible action waiting for the confirmation modal.
+enum ConfirmDelete {
+    /// Permanently delete one sheet, identified by UUID so list shifts
+    /// while the modal is open cannot target the wrong sheet.
+    SheetForever(String),
+    EmptyTrash,
+}
+
 struct WritingApp {
     groups: Vec<Group>,
     sheets: Vec<Sheet>,
@@ -2275,6 +2302,10 @@ struct WritingApp {
     present_export_rx: Option<std::sync::mpsc::Receiver<PresentExportResult>>,
     /// Save metadata while the worker thread renders. Session-only.
     present_export_pending: Option<PresentExportPending>,
+    /// Finished document-export bytes from the worker thread. Session-only.
+    export_rx: Option<std::sync::mpsc::Receiver<ExportWorkerResult>>,
+    /// Where the finished document export should go. Session-only.
+    export_pending: Option<ExportPending>,
     /// Image decodes allowed this frame (budget spreads work). Session-only.
     image_decodes_this_frame: usize,
     /// Background presenter-image decode worker. Session-only.
@@ -2296,6 +2327,38 @@ struct WritingApp {
         std::cell::RefCell<std::collections::HashMap<String, Option<(Vec<u8>, String)>>>,
     /// Decoded image dimensions cache (`src` -> w/h). Session-only.
     image_dims_cache: std::cell::RefCell<std::collections::HashMap<String, Option<(u32, u32)>>>,
+    /// Last local-save failure, if any. Drives the status bar and retry.
+    /// Session-only: cleared by the next successful write.
+    save_error: Option<String>,
+    /// An autosave is scheduled but not written yet. Session-only.
+    save_pending: bool,
+    /// When the deferred autosave becomes due. Session-only.
+    save_due: Option<Instant>,
+    /// Earliest time to retry after a failed save. Session-only.
+    save_retry_at: Option<Instant>,
+    /// Mirror files last written, so an unchanged save only stats them
+    /// instead of re-reading every `.md`. Session-only.
+    mirror_files: std::collections::HashMap<PathBuf, MirrorFileState>,
+    /// Mirror attachments last copied, keyed by destination path.
+    mirror_assets: std::collections::HashMap<PathBuf, MirrorAssetState>,
+    /// Pending irreversible action awaiting confirmation. Session-only.
+    confirm_delete: Option<ConfirmDelete>,
+    /// Per-sheet metrics (words, chars) keyed by UUID. Session-only.
+    metrics_cache:
+        std::cell::RefCell<std::collections::HashMap<String, (SystemTime, usize, usize)>>,
+    /// Per-sheet card title + preview keyed by UUID. Session-only.
+    card_cache:
+        std::cell::RefCell<std::collections::HashMap<String, (SystemTime, Arc<(String, String)>)>>,
+    /// Per-sheet lowercased body, for search without re-lowercasing every
+    /// frame. Session-only.
+    lower_cache: std::cell::RefCell<std::collections::HashMap<String, (SystemTime, Arc<String>)>>,
+    /// Per-sheet parsed internal links keyed by UUID. Session-only.
+    links_cache: std::cell::RefCell<
+        std::collections::HashMap<String, (SystemTime, Arc<Vec<(String, String)>>)>,
+    >,
+    /// Dashboard backlink scan for one target sheet, keyed by a library
+    /// stamp and target UUID. Session-only.
+    backlinks_cache: std::cell::RefCell<Option<(u64, String, Arc<Vec<(String, String)>>)>>,
     status: String,
     screenshot_path: Option<PathBuf>,
     frame_count: u32,
@@ -2745,6 +2808,20 @@ struct PresentExportResult {
     bytes: Vec<u8>,
     warnings: Vec<String>,
     filename: String,
+}
+
+/// Finished document-export bytes from the worker thread.
+struct ExportWorkerResult {
+    bytes: Vec<u8>,
+    warnings: Vec<String>,
+}
+
+/// What to do with a finished document export.
+struct ExportPending {
+    filename: String,
+    fmt: ExportFormat,
+    /// Open with the default app instead of asking where to save.
+    open_with_app: bool,
 }
 
 /// Pending save metadata while the worker thread renders.
@@ -4050,6 +4127,8 @@ impl WritingApp {
             font_db_rx: None,
             present_export_rx: None,
             present_export_pending: None,
+            export_rx: None,
+            export_pending: None,
             image_decodes_this_frame: 0,
             present_image_tx: None,
             present_image_rx: None,
@@ -4058,6 +4137,18 @@ impl WritingApp {
             present_open_ticks: 0,
             image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            save_error: None,
+            save_pending: false,
+            save_due: None,
+            save_retry_at: None,
+            mirror_files: std::collections::HashMap::new(),
+            mirror_assets: std::collections::HashMap::new(),
+            confirm_delete: None,
+            metrics_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            card_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            lower_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            links_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            backlinks_cache: std::cell::RefCell::new(None),
             status: "Ready".to_string(),
             screenshot_path,
             frame_count: 0,
@@ -16670,38 +16761,23 @@ blockquote {
     /// presenter renderers read are populated; everything else is empty.
     /// Bytes are byte-identical to the in-app renderers because they call
     /// the same methods.
-    fn present_export_worker_app(snap: &PresentExportSnapshot) -> WritingApp {
-        let mut theme = ResolvedTheme::default();
-        theme.palette.bg_app = snap.theme_bg;
-        theme.palette.text_bright = snap.theme_bright;
-        theme.palette.text_main = snap.theme_main;
-        theme.palette.text_dim = snap.theme_dim;
+    /// Minimal app for worker threads that only need export/present data.
+    /// Every UI/session field is empty or at its default; callers fill in
+    /// the sheets/assets they need.
+    fn worker_app_base() -> WritingApp {
         WritingApp {
             groups: Vec::new(),
-            sheets: vec![Sheet {
-                id: "export".to_string(),
-                content: snap.content.clone(),
-                group: None,
-                section: Section::Documents,
-                trashed: false,
-                modified: SystemTime::now(),
-                conflict_of: None,
-
-                material: false,
-
-                favorite: false,
-                keywords: Vec::new(),
-            }],
-            selection: SidebarSelection::Sheet(0),
+            sheets: Vec::new(),
+            selection: SidebarSelection::Filter(SmartFilter::All),
             selected_sheet: 0,
-            selected_sheets: vec![0],
+            selected_sheets: Vec::new(),
             export_css: String::new(),
             export_css_name: "Built-in".to_string(),
             style_guide_added: false,
             present_demo_added: false,
             style_guide_version: 0,
-            attached_fonts: snap.attached_fonts.clone(),
-            attached_images: snap.attached_images.clone(),
+            attached_fonts: Vec::new(),
+            attached_images: Vec::new(),
             font_db: None,
             image_textures: std::collections::HashMap::new(),
             style_editor: None,
@@ -16740,13 +16816,13 @@ blockquote {
             keyword_styles: std::collections::HashMap::new(),
             keywords_open: false,
             app_theme: AppTheme::default(),
-            theme,
+            theme: ResolvedTheme::default(),
             custom_themes: Vec::new(),
             active_custom: None,
             theme_draft: None,
             theme_editor: None,
             editor_font_family: None,
-            icloud_dir: snap.icloud_dir.clone(),
+            icloud_dir: None,
             loaded_editor_font: None,
             preview_fonts_queued: std::collections::HashSet::new(),
             settings_open: false,
@@ -16779,16 +16855,16 @@ blockquote {
             preview_window_placed: false,
             present_window_open: false,
             present_window_placed: false,
-            present_sheet: Some(0),
+            present_sheet: None,
             present_index: 0,
             present_notes_visible: true,
             present_started_at: None,
             handout_notes: false,
-            present_colors: snap.present_colors.clone(),
+            present_colors: Vec::new(),
             present_font_family: None,
-            present_header_font: snap.header_family.clone(),
-            present_body_font: snap.body_family.clone(),
-            present_aspect: snap.aspect,
+            present_header_font: None,
+            present_body_font: None,
+            present_aspect: PresentAspect::default(),
             present_tab: PresentTab::default(),
             coolors_draft: String::new(),
             preview_cache: PreviewCache::default(),
@@ -16797,6 +16873,8 @@ blockquote {
             font_db_rx: None,
             present_export_rx: None,
             present_export_pending: None,
+            export_rx: None,
+            export_pending: None,
             image_decodes_this_frame: 0,
             present_image_tx: None,
             present_image_rx: None,
@@ -16805,6 +16883,18 @@ blockquote {
             present_open_ticks: 0,
             image_bytes_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             image_dims_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            save_error: None,
+            save_pending: false,
+            save_due: None,
+            save_retry_at: None,
+            mirror_files: std::collections::HashMap::new(),
+            mirror_assets: std::collections::HashMap::new(),
+            confirm_delete: None,
+            metrics_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            card_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            lower_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            links_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            backlinks_cache: std::cell::RefCell::new(None),
             status: String::new(),
             screenshot_path: None,
             frame_count: 0,
@@ -16824,6 +16914,61 @@ blockquote {
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
         }
+    }
+
+    /// Minimal app for the presenter export worker.
+    fn present_export_worker_app(snap: &PresentExportSnapshot) -> WritingApp {
+        let mut app = Self::worker_app_base();
+        app.sheets = vec![Sheet {
+            id: "export".to_string(),
+            content: snap.content.clone(),
+            group: None,
+            section: Section::Documents,
+            trashed: false,
+            modified: SystemTime::now(),
+            conflict_of: None,
+            material: false,
+            favorite: false,
+            keywords: Vec::new(),
+        }];
+        app.selection = SidebarSelection::Sheet(0);
+        app.selected_sheet = 0;
+        app.selected_sheets = vec![0];
+        app.attached_fonts = snap.attached_fonts.clone();
+        app.attached_images = snap.attached_images.clone();
+        app.icloud_dir = snap.icloud_dir.clone();
+        app.present_colors = snap.present_colors.clone();
+        app.present_header_font = snap.header_family.clone();
+        app.present_body_font = snap.body_family.clone();
+        app.present_aspect = snap.aspect;
+        app.present_sheet = Some(0);
+        let mut theme = ResolvedTheme::default();
+        theme.palette.bg_app = snap.theme_bg;
+        theme.palette.text_bright = snap.theme_bright;
+        theme.palette.text_main = snap.theme_main;
+        theme.palette.text_dim = snap.theme_dim;
+        app.theme = theme;
+        app
+    }
+
+    /// Minimal app for a document-export worker.
+    fn export_worker_app(
+        sheets: Vec<Sheet>,
+        export_css: String,
+        attached_fonts: Vec<String>,
+        attached_images: Vec<AttachedImage>,
+    ) -> WritingApp {
+        let mut app = Self::worker_app_base();
+        if !sheets.is_empty() {
+            app.selection = SidebarSelection::Sheet(0);
+            app.selected_sheet = 0;
+            app.selected_sheets = vec![0];
+        }
+        app.sheets = sheets;
+        app.export_css = export_css;
+        app.attached_fonts = attached_fonts;
+        app.attached_images = attached_images;
+        app
     }
 
     /// Snapshot the presenter inputs for the worker thread.
