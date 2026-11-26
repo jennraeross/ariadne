@@ -4391,8 +4391,165 @@ impl WritingApp {
 
     fn counts(text: &str) -> (usize, usize) {
         let chars = text.chars().count();
-        let words = text.split_whitespace().count();
+        let words = text.lines().map(Self::count_line_words).sum();
         (words, chars)
+    }
+
+    /// Word count for one Markdown line: strip the structural marker(s)
+    /// (`#`, `>`, list/task bullets, ordered numbers, fences) and ignore
+    /// punctuation-only tokens. Characters stay raw source characters;
+    /// this only keeps `-`, `---`, `|` and `#` from inflating word goals.
+    fn count_line_words(line: &str) -> usize {
+        let mut t = line.trim();
+        if t.is_empty() || t.starts_with("```") || Self::is_image_line(t) {
+            return 0;
+        }
+        let hashes = t.chars().take_while(|c| *c == '#').count();
+        if hashes > 0 {
+            let rest = &t[hashes..];
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                t = rest.trim_start();
+            }
+        }
+        while let Some(rest) = t.strip_prefix('>') {
+            t = rest.trim_start();
+        }
+        for prefix in [
+            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "- ", "* ", "+ ",
+        ] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                t = rest.trim_start();
+                break;
+            }
+        }
+        if let Some(pos) = t.find(|c| c == '.' || c == ')') {
+            if pos <= 3
+                && t[..pos].chars().all(|c| c.is_ascii_digit())
+                && t[pos + 1..].starts_with(' ')
+            {
+                t = t[pos + 2..].trim_start();
+            }
+        }
+        t.split_whitespace()
+            .filter(|word| word.chars().any(|c| c.is_alphanumeric()))
+            .count()
+    }
+
+    /// Cached (words, chars) for a sheet. Invalidated by `modified`, so
+    /// typing recomputes one sheet instead of every visible card.
+    fn sheet_metrics(&self, idx: usize) -> (usize, usize) {
+        let Some(sheet) = self.sheets.get(idx) else {
+            return (0, 0);
+        };
+        if let Some((modified, words, chars)) = self.metrics_cache.borrow().get(&sheet.id).copied()
+        {
+            if modified == sheet.modified {
+                return (words, chars);
+            }
+        }
+        let (words, chars) = Self::counts(&sheet.content);
+        self.metrics_cache
+            .borrow_mut()
+            .insert(sheet.id.clone(), (sheet.modified, words, chars));
+        (words, chars)
+    }
+
+    /// Cached title + preview for a sheet card.
+    fn sheet_title_preview(&self, idx: usize) -> Arc<(String, String)> {
+        let Some(sheet) = self.sheets.get(idx) else {
+            return Arc::new(("Untitled".to_string(), "Empty sheet".to_string()));
+        };
+        if let Some((modified, value)) = self.card_cache.borrow().get(&sheet.id) {
+            if *modified == sheet.modified {
+                return value.clone();
+            }
+        }
+        let title = Self::inferred_title(&sheet.content);
+        let preview = Self::sheet_preview(&title, &sheet.content);
+        let value = Arc::new((title, preview));
+        self.card_cache
+            .borrow_mut()
+            .insert(sheet.id.clone(), (sheet.modified, value.clone()));
+        value
+    }
+
+    fn sheet_title(&self, idx: usize) -> String {
+        self.sheet_title_preview(idx).0.clone()
+    }
+
+    /// Cached lowercased body, for sheet search.
+    fn sheet_lower(&self, idx: usize) -> Arc<String> {
+        let Some(sheet) = self.sheets.get(idx) else {
+            return Arc::new(String::new());
+        };
+        if let Some((modified, value)) = self.lower_cache.borrow().get(&sheet.id) {
+            if *modified == sheet.modified {
+                return value.clone();
+            }
+        }
+        let value = Arc::new(sheet.content.to_lowercase());
+        self.lower_cache
+            .borrow_mut()
+            .insert(sheet.id.clone(), (sheet.modified, value.clone()));
+        value
+    }
+
+    /// Search predicate using the cached title/body, so a search box open
+    /// over a large library does not re-lowercase every sheet each frame.
+    fn sheet_matches_cached(&self, idx: usize, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        let Some(sheet) = self.sheets.get(idx) else {
+            return false;
+        };
+        if self.sheet_lower(idx).as_str().contains(&q) {
+            return true;
+        }
+        if self.sheet_title(idx).to_lowercase().contains(&q) {
+            return true;
+        }
+        sheet.keywords.iter().any(|k| k.to_lowercase().contains(&q))
+    }
+
+    /// Cached Markdown links for a sheet, reused by backlinks.
+    fn sheet_links(&self, idx: usize) -> Arc<Vec<(String, String)>> {
+        let Some(sheet) = self.sheets.get(idx) else {
+            return Arc::new(Vec::new());
+        };
+        if let Some((modified, value)) = self.links_cache.borrow().get(&sheet.id) {
+            if *modified == sheet.modified {
+                return value.clone();
+            }
+        }
+        let value = Arc::new(Self::internal_links_in(&sheet.content));
+        self.links_cache
+            .borrow_mut()
+            .insert(sheet.id.clone(), (sheet.modified, value.clone()));
+        value
+    }
+
+    /// Cheap fingerprint of sheet ids+modified times, used to cache the
+    /// dashboard's backlink scan.
+    fn library_stamp(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for sheet in &self.sheets {
+            for b in sheet.id.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            let t = sheet
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            h ^= t;
+            h = h.wrapping_mul(0x100000001b3);
+            h ^= sheet.content.len() as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
     }
 
     /// Reading time at a relaxed 220 words/minute; 0 words reads as 0 min.
@@ -5148,6 +5305,22 @@ blockquote {
 
     /// Sheet indices visible in the middle panel for the current selection.
     /// Trashed sheets only show up in the Trash filter.
+    /// Sheets the sheets panel shows this frame: the smart filter/group
+    /// list, or a cached-body search over the whole library. Computed once
+    /// per frame by the panel.
+    fn current_visible_list(&self) -> Vec<usize> {
+        if self.search_query.trim().is_empty() {
+            self.visible_sheets()
+        } else {
+            self.sheets
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| !s.trashed && self.sheet_matches_cached(*i, &self.search_query))
+                .map(|(i, _)| i)
+                .collect()
+        }
+    }
+
     fn visible_sheets(&self) -> Vec<usize> {
         const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
         let now = SystemTime::now();
@@ -5495,12 +5668,11 @@ blockquote {
     fn sort_sheet_indices(&self, mut idxs: Vec<usize>, sort: GroupSort) -> Vec<usize> {
         match sort {
             GroupSort::Manual => {}
-            GroupSort::Title => idxs.sort_by_key(|i| {
-                self.sheets
-                    .get(*i)
-                    .map(|s| Self::inferred_title(&s.content).to_lowercase())
-                    .unwrap_or_default()
-            }),
+            GroupSort::Title => {
+                // Cache the sort key so a big group does not recompute every
+                // title O(n log n) times per frame.
+                idxs.sort_by_cached_key(|i| self.sheet_title(*i).to_lowercase());
+            }
             GroupSort::Modified => idxs.sort_by(|a, b| {
                 let at = self.sheets.get(*a).map(|s| s.modified);
                 let bt = self.sheets.get(*b).map(|s| s.modified);
@@ -6321,6 +6493,7 @@ blockquote {
             self.selected_sheet = self.selected_sheets.first().copied().unwrap_or(usize::MAX);
         }
         self.ensure_visible_selection();
+        self.reset_word_baseline();
         self.save_library();
     }
 
@@ -6343,6 +6516,7 @@ blockquote {
             self.selected_sheets = vec![idx];
         }
         self.ensure_visible_selection();
+        self.reset_word_baseline();
         self.save_library();
     }
 
@@ -6365,6 +6539,7 @@ blockquote {
         self.remap_after_remove(idx, group);
         self.forget_history_above(idx);
         self.ensure_visible_selection();
+        self.reset_word_baseline();
         self.save_library();
     }
 
@@ -8077,6 +8252,7 @@ blockquote {
             return;
         }
         self.icloud_dir = Some(dest.to_string_lossy().to_string());
+        self.reset_word_baseline();
         self.save_library();
         if dest.join("library.json").is_file() {
             self.status = format!("iCloud section now syncs via {}", dest.display());
@@ -8615,6 +8791,7 @@ blockquote {
         {
             self.status = "Synced changes from another device".to_string();
             self.ensure_visible_selection();
+            self.reset_word_baseline();
             self.save_library();
         }
     }
@@ -8769,6 +8946,7 @@ blockquote {
                     ) {
                         self.status = "Synced changes from Google Drive".to_string();
                         self.ensure_visible_selection();
+                        self.reset_word_baseline();
                         self.save_library();
                     }
                 }
@@ -21112,21 +21290,18 @@ blockquote {
                 let sheet_hits: Vec<usize> = if query.is_empty() {
                     Vec::new()
                 } else {
+                    let query_lower = query.to_lowercase();
                     let mut scored: Vec<(usize, i32)> = self
                         .sheets
                         .iter()
                         .enumerate()
                         .filter(|(_, s)| !s.trashed)
-                        .filter_map(|(i, s)| {
-                            let title = Self::inferred_title(&s.content);
+                        .filter_map(|(i, _)| {
+                            let title = self.sheet_title(i);
                             match Self::fuzzy_score(&title, &query) {
                                 // Title hits rank above body-only hits.
                                 Some(score) => Some((i, score)),
-                                None if s
-                                    .content
-                                    .to_lowercase()
-                                    .contains(&query.to_lowercase()) =>
-                                {
+                                None if self.sheet_lower(i).as_str().contains(&query_lower) => {
                                     Some((i, 5))
                                 }
                                 None => None,
@@ -21365,16 +21540,23 @@ blockquote {
         let Some(target) = self.sheets.get(idx).map(|s| s.id.clone()) else {
             return Vec::new();
         };
-        let mut out = Vec::new();
+        let stamp = self.library_stamp();
+        if let Some((cached_stamp, cached_target, cached)) = self.backlinks_cache.borrow().as_ref()
+        {
+            if *cached_stamp == stamp && cached_target == &target {
+                return Self::backlink_indices(self, cached);
+            }
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
         for (si, sheet) in self.sheets.iter().enumerate() {
             if si == idx || sheet.trashed {
                 continue;
             }
-            for (text, url) in Self::internal_links_in(&sheet.content) {
+            for (text, url) in self.sheet_links(si).iter() {
                 let rest = url
                     .strip_prefix("ariadne://")
                     .or_else(|| url.strip_prefix("sheet:"))
-                    .unwrap_or(&url);
+                    .unwrap_or(url);
                 let link_target = rest
                     .split_once('#')
                     .map(|(t, _)| t)
@@ -21383,17 +21565,32 @@ blockquote {
                     .trim_start_matches("sheet/");
                 if link_target == target {
                     out.push((
-                        si,
+                        sheet.id.clone(),
                         if text.trim().is_empty() {
-                            Self::inferred_title(&sheet.content)
+                            self.sheet_title(si)
                         } else {
-                            text
+                            text.clone()
                         },
                     ));
                 }
             }
         }
-        out
+        let cached = Arc::new(out);
+        *self.backlinks_cache.borrow_mut() = Some((stamp, target, cached.clone()));
+        Self::backlink_indices(self, &cached)
+    }
+
+    /// Map cached `(source UUID, link text)` pairs to current indices.
+    fn backlink_indices(app: &WritingApp, links: &[(String, String)]) -> Vec<(usize, String)> {
+        links
+            .iter()
+            .filter_map(|(uuid, text)| {
+                app.sheets
+                    .iter()
+                    .position(|s| &s.id == uuid)
+                    .map(|i| (i, text.clone()))
+            })
+            .collect()
     }
 
     fn jump_to_offset(&mut self, ctx: &egui::Context, sel: usize, char_offset: usize) {
@@ -26839,8 +27036,7 @@ impl WritingApp {
     fn selection_words(&self) -> usize {
         self.export_targets()
             .iter()
-            .filter_map(|i| self.sheets.get(*i))
-            .map(|s| Self::counts(&s.content).0)
+            .map(|i| self.sheet_metrics(*i).0)
             .sum()
     }
 
@@ -26876,16 +27072,58 @@ impl WritingApp {
 
     /// Total editable words in the library, excluding trash and material.
     fn total_library_words(&self) -> u64 {
-        self.sheets
+        let indices: Vec<usize> = self
+            .sheets
             .iter()
-            .filter(|s| !s.trashed && !s.material)
-            .map(|s| Self::counts(&s.content).0 as u64)
+            .enumerate()
+            .filter(|(_, s)| !s.trashed && !s.material)
+            .map(|(i, _)| i)
+            .collect();
+        indices
+            .into_iter()
+            .map(|i| self.sheet_metrics(i).0 as u64)
             .sum()
+    }
+
+    /// Re-baseline the daily word counter after a change that adds or
+    /// removes text without typing (trash/restore, material toggles, sync
+    /// merges, imports), so those words are not recorded as "written today".
+    fn reset_word_baseline(&mut self) {
+        self.last_counted_words = Some(self.total_library_words());
     }
 
     /// UTC date key (`YYYY-MM-DD`) used by the daily metric store.
     fn today_key() -> String {
-        format_created_date(SystemTime::now())
+        let (year, month, day) = Self::local_today_parts();
+        format!("{year:04}-{month:02}-{day:02}")
+    }
+
+    /// Today's calendar date in the user's local timezone. Daily goals and
+    /// streaks must roll over at local midnight, not UTC (a UTC key moved
+    /// the writing day at 17:00 for US-Pacific users).
+    fn local_today_parts() -> (i64, u32, u32) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let date = js_sys::Date::new_0();
+            (
+                date.get_full_year() as i64,
+                date.get_month() as u32 + 1,
+                date.get_date() as u32,
+            )
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use chrono::Datelike as _;
+            let today = chrono::Local::now().date_naive();
+            (today.year() as i64, today.month(), today.day())
+        }
+    }
+
+    /// Local day index (days since 1970-01-01), for the 14-day chart and
+    /// deadline countdown.
+    fn local_today_day() -> i64 {
+        let (year, month, day) = Self::local_today_parts();
+        days_from_civil(year, month, day)
     }
 
     /// Words written today (positive deltas only).
@@ -26928,8 +27166,7 @@ impl WritingApp {
         let deadline = self.deadline?;
         let secs = deadline.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
         let deadline_day = secs.div_euclid(86_400);
-        let today_day = (Self::now_secs() as i64).div_euclid(86_400);
-        Some(deadline_day - today_day)
+        Some(deadline_day - Self::local_today_day())
     }
 
     /// Words per day needed to hit the deadline target.
@@ -27136,8 +27373,7 @@ impl WritingApp {
             Some(sheet) => sheet,
             None => return,
         };
-        let words = Self::counts(&sheet.content).0;
-        let chars = Self::counts(&sheet.content).1;
+        let (words, chars) = self.sheet_metrics(sel);
         let media = sheet
             .content
             .lines()
@@ -27419,7 +27655,7 @@ impl WritingApp {
         ui.add_space(12.0);
 
         Self::dashboard_section(ui, theme, "WRITING HISTORY");
-        let today_day = (Self::now_secs() as i64).div_euclid(86_400);
+        let today_day = Self::local_today_day();
         let series: Vec<(String, u64)> = (0..14)
             .rev()
             .map(|offset| {
@@ -30175,14 +30411,12 @@ impl eframe::App for WritingApp {
                             | SidebarSelection::Filter(SmartFilter::Favorites)
                             | SidebarSelection::Filter(SmartFilter::Last7Days)
                     );
-                    let sheet_count = if self.search_query.trim().is_empty() {
-                        self.visible_sheets().len()
-                    } else {
-                        self.sheets
-                            .iter()
-                            .filter(|s| !s.trashed && Self::sheet_matches(s, &self.search_query))
-                            .count()
-                    };
+                    // Build the visible list once per frame. The header
+                    // search field may change the query, so remember the
+                    // value and refresh only when it did.
+                    let search_epoch = self.search_query.clone();
+                    let mut visible = self.current_visible_list();
+                    let sheet_count = visible.len();
                     egui::Frame::new()
                         .fill(self.theme.bg_sheets_header())
                         .inner_margin(egui::Margin {
@@ -30352,18 +30586,9 @@ impl eframe::App for WritingApp {
                         });
                         ui.separator();
                     }
-                    let visible: Vec<usize> = if searching {
-                        self.sheets
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, s)| {
-                                !s.trashed && Self::sheet_matches(s, &self.search_query)
-                            })
-                            .map(|(i, _)| i)
-                            .collect()
-                    } else {
-                        self.visible_sheets()
-                    };
+                    if self.search_query != search_epoch {
+                        visible = self.current_visible_list();
+                    }
                     if visible.is_empty() {
                         ui.add_space(16.0);
                         ui.vertical_centered(|ui| {
@@ -30444,23 +30669,12 @@ impl eframe::App for WritingApp {
                                 ui.spacing_mut().item_spacing.y = 4.0;
                                 let mut material_header = false;
                                 for idx in display_visible.clone() {
-                                    let (display_title, preview) = self
-                                        .sheets
-                                        .get(idx)
-                                        .map(|sheet| {
-                                            let title = Self::inferred_title(&sheet.content);
-                                            let preview =
-                                                Self::sheet_preview(&title, &sheet.content);
-                                            (title, preview)
-                                        })
-                                        .unwrap_or_else(|| ("Untitled".to_string(), String::new()));
+                                    let card = self.sheet_title_preview(idx);
+                                    let display_title = card.0.clone();
+                                    let preview = card.1.clone();
                                     let selected = self.is_selected(idx);
                                     let width = ui.available_width();
-                                    let (words, _) = self
-                                        .sheets
-                                        .get(idx)
-                                        .map(|s| Self::counts(&s.content))
-                                        .unwrap_or((0, 0));
+                                    let (words, _) = self.sheet_metrics(idx);
                                     let material = self
                                         .sheets
                                         .get(idx)
@@ -30802,6 +31016,7 @@ impl eframe::App for WritingApp {
                                 } else {
                                     "Marked as sheet".to_string()
                                 };
+                                self.reset_word_baseline();
                                 self.save_library();
                             }
                         }
@@ -30859,25 +31074,37 @@ impl eframe::App for WritingApp {
                 let mut words = 0usize;
                 let mut chars = 0usize;
                 for i in &targets {
-                    if let Some(s) = self.sheets.get(*i) {
-                        let (w, c) = Self::counts(&s.content);
-                        words += w;
-                        chars += c;
-                    }
+                    let (w, c) = self.sheet_metrics(*i);
+                    words += w;
+                    chars += c;
                 }
                 ui.horizontal(|ui| {
-                    let green = Color32::from_rgb(0x4f, 0xa8, 0x64);
-                    ui.label(RichText::new(icon::CIRCLE).size(9.0).color(green));
-                    ui.label(
-                        RichText::new("Saved")
-                            .size(10.5)
-                            .color(self.theme.text_dim()),
-                    )
-                    .on_hover_text(if self.status.is_empty() {
-                        "Changes are saved".to_string()
+                    let (dot, label, hover) = if let Some(err) = &self.save_error {
+                        (
+                            Color32::from_rgb(0xd0, 0x6a, 0x3a),
+                            "Not saved",
+                            format!("Could not save: {err}\nRetrying automatically…"),
+                        )
+                    } else if self.save_pending {
+                        (
+                            Color32::from_rgb(0xd1, 0x9a, 0x66),
+                            "Saving…",
+                            "Saving changes…".to_string(),
+                        )
                     } else {
-                        self.status.clone()
-                    });
+                        (
+                            Color32::from_rgb(0x4f, 0xa8, 0x64),
+                            "Saved",
+                            if self.status.is_empty() {
+                                "Changes are saved".to_string()
+                            } else {
+                                self.status.clone()
+                            },
+                        )
+                    };
+                    ui.label(RichText::new(icon::CIRCLE).size(9.0).color(dot));
+                    ui.label(RichText::new(label).size(10.5).color(self.theme.text_dim()))
+                        .on_hover_text(hover);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("{} min read", Self::reading_minutes(words)))
@@ -34740,20 +34967,20 @@ mod tests {
     fn word_goal_progress_and_persistence() {
         let _storage = isolate_storage();
         let mut app = sample_app();
-        // sample_app sheets are "# A" and "# B" (2 words each); the
-        // selection starts on sheet 0 alone.
-        assert_eq!(app.selection_words(), 2);
+        // sample_app sheets are "# A" and "# B" (1 word each after the
+        // Markdown heading marker is stripped); selection starts on sheet 0.
+        assert_eq!(app.selection_words(), 1);
         assert_eq!(app.goal_progress(), None);
         app.word_goal = 10;
-        assert_eq!(app.goal_progress(), Some(0.2));
+        assert_eq!(app.goal_progress(), Some(0.1));
         // Over-goal reports above 1.0 so the sidebar can celebrate.
         app.word_goal = 1;
-        assert!(app.goal_progress().unwrap() > 1.0);
+        assert!(app.goal_progress().unwrap() >= 1.0);
         // Progress follows the selection, not the whole library.
         app.selected_sheets = vec![0, 1];
         app.word_goal = 8;
-        assert_eq!(app.selection_words(), 4);
-        assert_eq!(app.goal_progress(), Some(0.5));
+        assert_eq!(app.selection_words(), 2);
+        assert_eq!(app.goal_progress(), Some(0.25));
         // The target persists; panel visibility is session-only and never
         // saved, so it always starts collapsed.
         app.goals_visible = true;
@@ -38976,9 +39203,11 @@ mod tests {
         app.deadline_target = target as u32;
         app.deadline = Some(SystemTime::now() + Duration::from_secs(10 * 86_400));
         let days = app.deadline_days_left().expect("deadline");
-        assert!((9..=10).contains(&days), "unexpected days left: {days}");
+        // A local-date deadline ten days out can read as 9–11 calendar
+        // days depending on the time of day.
+        assert!((9..=11).contains(&days), "unexpected days left: {days}");
         let required = app.required_daily_words().expect("required output");
-        assert!(required >= 100 && required <= 120, "required: {required}");
+        assert!(required >= 80 && required <= 120, "required: {required}");
         assert!(app.total_library_words() >= 2);
 
         app.save_library();
@@ -39031,6 +39260,7 @@ mod tests {
         let target = app.sheets[1].id.clone();
         app.sheets[0].content =
             format!("# A\n\n## Details\n\n[go deeper](ariadne://{target}#details)\n");
+        app.sheets[0].modified = SystemTime::now();
         let links = WritingApp::internal_links_in(&app.sheets[0].content);
         assert_eq!(
             links,
@@ -39048,6 +39278,7 @@ mod tests {
         assert!(app.backlinks_for(0).is_empty());
         // Short form links also count.
         app.sheets[1].content = format!("# B\n\n[back](sheet:{})\n", app.sheets[0].id);
+        app.sheets[1].modified = SystemTime::now();
         assert_eq!(app.backlinks_for(0), vec![(1, "back".to_string())]);
     }
 
