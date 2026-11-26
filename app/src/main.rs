@@ -30147,6 +30147,15 @@ impl eframe::App for WritingApp {
         self.update_tick(ctx);
         self.refresh_theme();
         ctx.set_visuals(self.theme.visuals());
+        // An opaque base under every panel. Panels paint their own fills, but
+        // a region none of them covers (and, on some compositors, the window
+        // itself) would otherwise show the desktop between the sheet list and
+        // the editor.
+        ctx.layer_painter(egui::LayerId::background()).rect_filled(
+            ctx.screen_rect(),
+            0.0,
+            self.theme.bg_app(),
+        );
         // Adopt zoom changes made with egui's built-in Ctrl +/- shortcuts so
         // the Settings slider and the persisted value stay in step. Only do
         // this once our own value is settled (`applied == ui_scale`), else a
