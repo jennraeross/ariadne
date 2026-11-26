@@ -94,14 +94,32 @@ jobs:
         # render there. This proves the packaged exe launches and reaches
         # GL init; real rendering is covered by the mac/Linux screenshot
         # smoke tests. Any other failure still fails the job.
+        #
+        # The exe is a GUI-subsystem binary, so `&` only spawns it: PowerShell
+        # waits for console programs, not GUI ones, and the PNG check below
+        # would run before the file existed. Start-Process with a bounded
+        # wait (a hung launch must not sit on a runner) is required.
         run: |
-          & .\app\target\release\ariadne.exe --screenshot $env:TEMP\smoke.png 2> $env:TEMP\smoke-err.txt
-          if ((Test-Path $env:TEMP\smoke.png) -and ((Get-Item $env:TEMP\smoke.png).Length -gt 10000)) { exit 0 }
-          $err = Get-Content $env:TEMP\smoke-err.txt -Raw
+          $png = Join-Path $env:TEMP 'smoke.png'
+          $errFile = Join-Path $env:TEMP 'smoke-err.txt'
+          $outFile = Join-Path $env:TEMP 'smoke-out.txt'
+          Remove-Item $png, $errFile, $outFile -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath '.\app\target\release\ariadne.exe' `
+            -ArgumentList '--screenshot', $png `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile `
+            -PassThru
+          if (-not $p.WaitForExit(120000)) {
+            $p.Kill()
+            Write-Host "Ariadne did not exit within 120s"
+            exit 1
+          }
+          if ((Test-Path $png) -and ((Get-Item $png).Length -gt 10000)) { exit 0 }
+          $err = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { '' }
           if ($err -match "egui_glow requires opengl") {
             Write-Host "Headless runner: no OpenGL. Binary launched OK; rendering covered on mac/Linux."
             exit 0
           }
+          Write-Host "exit=$($p.ExitCode)"
           Write-Host $err
           exit 1
       - name: Install Inno Setup
