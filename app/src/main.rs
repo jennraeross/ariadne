@@ -6621,7 +6621,85 @@ blockquote {
             )
         };
         self.ensure_visible_selection();
+        self.reset_word_baseline();
         self.save_library();
+    }
+
+    /// Confirmation modal for irreversible deletion. Deleting a sheet or
+    /// emptying the trash also drops its snapshots, so both actions get an
+    /// explicit confirmation instead of firing from a single click.
+    fn show_confirm_delete(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.confirm_delete.take() else {
+            return;
+        };
+        let (heading, body, action) = match &target {
+            ConfirmDelete::SheetForever(id) => {
+                let name = self
+                    .sheets
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .map(|s| Self::inferred_title(&s.content))
+                    .unwrap_or_else(|| "This sheet".to_string());
+                (
+                    "Delete forever?",
+                    format!(
+                        "“{name}” and its saved snapshots will be permanently deleted. \
+                         This cannot be undone."
+                    ),
+                    "Delete forever",
+                )
+            }
+            ConfirmDelete::EmptyTrash => {
+                let n = self.sheets.iter().filter(|s| s.trashed).count();
+                (
+                    "Empty the Trash?",
+                    format!(
+                        "{n} {} and their saved snapshots will be permanently deleted. \
+                         This cannot be undone.",
+                        if n == 1 { "sheet" } else { "sheets" }
+                    ),
+                    "Empty Trash",
+                )
+            }
+        };
+        let mut state: Option<bool> = None; // Some(true) = confirmed
+        let resp = egui::Modal::new(egui::Id::new("confirm-delete")).show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            ui.label(RichText::new(heading).strong().size(15.0));
+            ui.add_space(6.0);
+            ui.label(RichText::new(body).size(11.5));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    state = Some(false);
+                }
+                if ui
+                    .button(RichText::new(action).color(Color32::from_rgb(0xd0, 0x4a, 0x4a)))
+                    .clicked()
+                {
+                    state = Some(true);
+                }
+            });
+        });
+        let cancelled = resp.backdrop_response.clicked()
+            || (state.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+        match state {
+            Some(true) => match target {
+                ConfirmDelete::SheetForever(id) => {
+                    if let Some(idx) = self.sheets.iter().position(|s| s.id == id) {
+                        if self.sheets[idx].trashed {
+                            self.delete_sheet_forever(idx);
+                        } else {
+                            self.status = "That sheet is no longer in the Trash".to_string();
+                        }
+                    }
+                }
+                ConfirmDelete::EmptyTrash => self.empty_trash(),
+            },
+            Some(false) => {}
+            None if !cancelled => self.confirm_delete = Some(target),
+            None => {}
+        }
     }
 
     /// Keep `selected_sheet` pointing at something visible, if possible.
@@ -30681,7 +30759,8 @@ impl eframe::App for WritingApp {
                                                 )
                                                 .clicked()
                                             {
-                                                self.empty_trash();
+                                                self.confirm_delete =
+                                                    Some(ConfirmDelete::EmptyTrash);
                                             }
                                         } else if show_new {
                                             let new_hover =
@@ -31206,7 +31285,12 @@ impl eframe::App for WritingApp {
                     match card_action {
                         Some(CardAction::Delete(idx)) => self.trash_sheet(idx),
                         Some(CardAction::Restore(idx)) => self.restore_sheet(idx),
-                        Some(CardAction::DeleteForever(idx)) => self.delete_sheet_forever(idx),
+                        Some(CardAction::DeleteForever(idx)) => {
+                            if let Some(sheet) = self.sheets.get(idx) {
+                                self.confirm_delete =
+                                    Some(ConfirmDelete::SheetForever(sheet.id.clone()));
+                            }
+                        }
                         Some(CardAction::ToggleMaterial(idx)) => {
                             let material = if let Some(sheet) = self.sheets.get_mut(idx) {
                                 sheet.material = !sheet.material;
@@ -31478,6 +31562,7 @@ impl eframe::App for WritingApp {
         self.show_conflicts_popup(ctx);
         self.show_preview_window(ctx);
         self.show_present_windows(ctx);
+        self.show_confirm_delete(ctx);
         // Window-wide drop hint, painted above everything else.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let theme = self.theme;
