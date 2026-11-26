@@ -196,7 +196,52 @@ fn one_sheet(markdown: String, pictures_dropped: usize) -> Imported {
 }
 
 fn document_markdown(doc: &Document) -> (String, usize) {
-    strip_picture_placeholders(&craft_markdown::export(doc))
+    let (markdown, pictures_dropped) = strip_picture_placeholders(&craft_markdown::export(doc));
+    (reflow_hard_breaks(&markdown), pictures_dropped)
+}
+
+/// A line break in a document is layout, not prose: Word, ODF and EPUB
+/// files break lines where the page happened to end, and a sheet wraps its
+/// own text. A hard break inside a paragraph becomes a space, one at the
+/// end of a paragraph disappears, one alone on a line vanishes, and blank
+/// lines still separate paragraphs. Poetry loses its line breaks, which is
+/// the price of not littering a novel with backslashes; the original file
+/// remains the record of the author's lineation.
+fn reflow_hard_breaks(input: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in input.lines() {
+        let Some(body) = line.strip_suffix('\\') else {
+            if current.is_empty() {
+                out.push(line.to_string());
+                continue;
+            }
+            if body_is_blank(line) {
+                out.push(std::mem::take(&mut current));
+                out.push(String::new());
+            } else {
+                current.push(' ');
+                current.push_str(line.trim_start());
+                out.push(std::mem::take(&mut current));
+            }
+            continue;
+        };
+        let body = body.trim_end();
+        if !body.is_empty() {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(body.trim_start());
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out.join("\n")
+}
+
+fn body_is_blank(line: &str) -> bool {
+    line.trim().is_empty()
 }
 
 /// One sheet per chapter: the spine in order. Navigation documents, a
@@ -638,6 +683,28 @@ mod tests {
             "Before *[Image: A sunset]* after\n\n*[Image: chart]*"
         );
         assert!(!markdown.contains("!["));
+    }
+
+    #[test]
+    fn hard_breaks_are_reflowed_into_prose() {
+        // A break at the end of a paragraph plus a lone break marker, as a
+        // Word- or PDF-converted EPUB produces: one paragraph, then the next.
+        assert_eq!(
+            reflow_hard_breaks("one arm.\\\n\\\n\nI stare down"),
+            "one arm.\n\nI stare down"
+        );
+        // Breaks inside a paragraph join into one flowing line.
+        assert_eq!(
+            reflow_hard_breaks("a line that wrapped\\\nanother line"),
+            "a line that wrapped another line"
+        );
+        assert_eq!(reflow_hard_breaks("a\\\nb\\\nc"), "a b c");
+        // Text without breaks is untouched, indentation included.
+        assert_eq!(
+            reflow_hard_breaks("keep\n  this\n\nnormal"),
+            "keep\n  this\n\nnormal"
+        );
+        assert_eq!(reflow_hard_breaks("trailing\\"), "trailing");
     }
 
     #[test]

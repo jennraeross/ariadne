@@ -67,6 +67,10 @@ or theme mapping is involved, which is what keeps this cheap.
 - Pictures are not imported: `craft-markdown` writes `![alt](image.png)` with
   no bytes, so the importer replaces those placeholders with `*[Image: alt]*`
   and reports the count.
+- Line breaks are layout, not prose: a hard break inside a paragraph becomes
+  a space, one at a paragraph end disappears, and a lone break vanishes, so
+  Word/PDF-converted books no longer arrive littered with `\`. Poetry loses
+  its lineation (the original file keeps it).
 - Equations are exported as nothing by `craft-markdown` (no LaTeX path yet).
 - A heading level used for both chapters and section breaks can split too
   finely; the importer has no author intent to go on.
@@ -189,6 +193,8 @@ resetting, and settings survive upgrades through migrations.
 
 - 2026-11-26: plan written; item 1 import wired for docx/doc/odt/rtf/html/epub
   (drop + `Import manuscript…`), 11 unit tests, +45 crates in `Cargo.lock`.
+- 2026-11-26: Document line breaks reflowed into paragraphs; the window
+  paints an opaque base under the panels so no desktop shows between them.
 - 2026-11-26: EPUB import splits chapters (spine items and, for whole-book
   files, top-level headings), in a group named after the file; navigation and
   cover pages skipped. Library footer button added for the manual path.
