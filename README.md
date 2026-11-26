@@ -25,8 +25,9 @@ no runtime beyond the OS GUI layer.
   marks, lists (`Return` continues, `Tab`/`Shift-Tab` nests), checklists,
   quotes, code, and drag-and-drop image attachments (`![alt](attachment:…)`).
   Dropping Markdown, plain text, or project-archive (`.zip`) files imports
-  them; a Word (`.docx`, `.doc`), OpenDocument (`.odt`), Rich Text (`.rtf`),
-  HTML, or EPUB manuscript becomes a sheet; image files are attached.
+  them; a Word (`.docx`, `.doc`), OpenDocument (`.odt`), Rich Text (`.rtf`)
+  or HTML manuscript becomes a sheet, an EPUB becomes a group with one sheet
+  per chapter; image files are attached.
   `Import manuscript…` in the command palette (or under the library's
   `New from template…` link) picks one from disk.
   Selecting text opens a floating markup bar for bold, italic, heading, link,

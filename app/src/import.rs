@@ -64,10 +64,19 @@ impl Format {
     }
 }
 
-/// One imported manuscript, ready to become a sheet.
+/// One imported document, ready to become a sheet.
+#[derive(Debug)]
+pub struct ImportedSheet {
+    /// A chapter title for EPUB, empty when the caller names the sheet.
+    pub title: String,
+    pub markdown: String,
+}
+
+/// Everything one manuscript produced: an EPUB is a sheet per chapter, the
+/// other formats are one sheet.
 #[derive(Debug)]
 pub struct Imported {
-    pub markdown: String,
+    pub sheets: Vec<ImportedSheet>,
     /// Pictures the reader found but the Markdown writer cannot carry.
     pub pictures_dropped: usize,
 }
@@ -143,12 +152,12 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Read one manuscript. Every reader is bounded and lenient by design;
 /// a file none of them understands comes back as an error string.
-pub fn to_markdown(format: Format, bytes: &[u8]) -> Result<Imported, String> {
+pub fn read(format: Format, bytes: &[u8]) -> Result<Imported, String> {
     if format.is_plain() {
-        return Ok(Imported {
-            markdown: String::from_utf8_lossy(bytes).into_owned(),
-            pictures_dropped: 0,
-        });
+        return Ok(one_sheet(String::from_utf8_lossy(bytes).into_owned(), 0));
+    }
+    if format == Format::Epub {
+        return epub_sheets(bytes);
     }
     let (markdown, pictures_dropped) = match format {
         Format::Docx => {
@@ -171,23 +180,31 @@ pub fn to_markdown(format: Format, bytes: &[u8]) -> Result<Imported, String> {
             let html = String::from_utf8_lossy(bytes);
             document_markdown(&craft_html::doc::import(&html))
         }
-        Format::Epub => epub_markdown(bytes)?,
-        Format::Markdown | Format::Text => unreachable!("handled above"),
+        Format::Epub | Format::Markdown | Format::Text => unreachable!("handled above"),
     };
-    Ok(Imported {
-        markdown,
+    Ok(one_sheet(markdown, pictures_dropped))
+}
+
+fn one_sheet(markdown: String, pictures_dropped: usize) -> Imported {
+    Imported {
+        sheets: vec![ImportedSheet {
+            title: String::new(),
+            markdown,
+        }],
         pictures_dropped,
-    })
+    }
 }
 
 fn document_markdown(doc: &Document) -> (String, usize) {
     strip_picture_placeholders(&craft_markdown::export(doc))
 }
 
-/// One sheet per manuscript: the spine in order, each chapter keeping its
-/// own headings. A chapter the reading system names but whose XHTML starts
-/// without a heading gets the reading-system label as its `h1`.
-fn epub_markdown(bytes: &[u8]) -> Result<(String, usize), String> {
+/// One sheet per chapter: the spine in order. Navigation documents, a
+/// cover page and a table of contents are the package's own furniture, not
+/// chapters, so they are left out. Each chapter keeps its headings; one
+/// that starts without a heading takes its reading-system label, or its
+/// position, as an `h1`.
+fn epub_sheets(bytes: &[u8]) -> Result<Imported, String> {
     let mut book = craft_epub::Epub::open(bytes).map_err(|e| e.to_string())?;
     let labels: HashMap<String, String> = book
         .toc()
@@ -195,30 +212,141 @@ fn epub_markdown(bytes: &[u8]) -> Result<(String, usize), String> {
         .into_iter()
         .filter_map(|entry| entry.path.map(|path| (path, entry.label)))
         .collect();
+    // Manifest roles say what a file is even when its name does not.
+    let structural: HashMap<String, bool> = book
+        .package
+        .manifest
+        .iter()
+        .map(|item| {
+            let furniture = item
+                .properties
+                .split_whitespace()
+                .any(|property| matches!(property, "nav" | "cover-image"));
+            (item.path.clone(), furniture)
+        })
+        .collect();
     let paths: Vec<String> = book.package.spine_paths().map(str::to_string).collect();
-    let mut chapters: Vec<String> = Vec::new();
+    let mut sheets: Vec<ImportedSheet> = Vec::new();
     let mut pictures_dropped = 0;
     for path in paths {
+        if is_structural_part(&path) || structural.get(&path).copied().unwrap_or(false) {
+            continue;
+        }
         let Some(data) = book.read(&path).map_err(|e| e.to_string())? else {
             continue;
         };
         let html = String::from_utf8_lossy(&data);
-        let (mut markdown, dropped) = document_markdown(&craft_html::doc::import(html.as_ref()));
+        let (markdown, dropped) = document_markdown(&craft_html::doc::import(html.as_ref()));
         pictures_dropped += dropped;
         if markdown.trim().is_empty() {
             continue;
         }
-        if let Some(label) = labels.get(&path) {
-            if !markdown.trim_start().starts_with("# ") {
-                markdown = format!("# {}\n\n{markdown}", label.trim());
+        let label = labels
+            .get(&path)
+            .map(|label| label.trim().to_string())
+            .filter(|label| !label.is_empty());
+        // Many EPUBs carry the whole book in one XHTML: split it at its
+        // own chapter headings, or it would arrive as one enormous sheet.
+        for mut sheet in split_at_headings(markdown) {
+            if sheet.title.is_empty() {
+                sheet.title = label
+                    .clone()
+                    .unwrap_or_else(|| format!("Chapter {}", sheets.len() + 1));
             }
+            if first_heading(&sheet.markdown).is_none() {
+                sheet.markdown = format!("# {}\n\n{}", sheet.title, sheet.markdown);
+            }
+            sheets.push(sheet);
         }
-        chapters.push(markdown);
     }
-    if chapters.is_empty() {
+    if sheets.is_empty() {
         return Err("the EPUB has no readable chapters".to_string());
     }
-    Ok((chapters.join("\n\n"), pictures_dropped))
+    Ok(Imported {
+        sheets,
+        pictures_dropped,
+    })
+}
+
+/// Split one spine document into chapters.
+///
+/// A document with its own `h1` chapters splits there. A document with no
+/// `h1` at all is a whole book in one file (the IDPF sample is), so its
+/// `h2` or `h3` entries are the chapters — an anthology numbers its
+/// stories in `h3`. One `h1` followed by many `h2`s is a single chapter
+/// with subsections, and stays whole.
+fn split_at_headings(markdown: String) -> Vec<ImportedSheet> {
+    let h1 = heading_count(&markdown, 1);
+    let h2 = heading_count(&markdown, 2);
+    let h3 = heading_count(&markdown, 3);
+    let level = if h1 >= 2 {
+        1
+    } else if h1 == 0 && h2 >= 2 {
+        2
+    } else if h1 == 0 && h3 >= 2 {
+        3
+    } else {
+        0
+    };
+    if level == 0 {
+        let title = first_heading(&markdown).unwrap_or_default();
+        return vec![ImportedSheet { title, markdown }];
+    }
+    let prefix = format!("{} ", "#".repeat(level as usize));
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    let mut preamble = String::new();
+    for line in markdown.lines() {
+        if let Some(title) = line.strip_prefix(&prefix) {
+            if let Some(done) = current.take() {
+                parts.push(done);
+            }
+            current = Some((title.trim().to_string(), line.to_string()));
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push('\n');
+            body.push_str(line);
+        } else {
+            preamble.push_str(line);
+            preamble.push('\n');
+        }
+    }
+    if let Some(done) = current.take() {
+        parts.push(done);
+    }
+    if parts.is_empty() {
+        let title = first_heading(&markdown).unwrap_or_default();
+        return vec![ImportedSheet { title, markdown }];
+    }
+    if !preamble.trim().is_empty() {
+        parts[0].1 = format!("{}\n\n{}", preamble.trim_end(), parts[0].1);
+    }
+    parts
+        .into_iter()
+        .map(|(title, markdown)| ImportedSheet { title, markdown })
+        .collect()
+}
+
+fn heading_count(markdown: &str, level: u8) -> usize {
+    let prefix = format!("{} ", "#".repeat(level as usize));
+    markdown
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .count()
+}
+
+/// The package's own pages, not chapters.
+fn is_structural_part(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let stem = name.split('.').next().unwrap_or("");
+    matches!(stem, "nav" | "toc" | "cover")
+}
+
+fn first_heading(markdown: &str) -> Option<String> {
+    markdown.lines().find_map(|line| {
+        line.strip_prefix("# ")
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+    })
 }
 
 /// `craft_markdown` writes a picture as `![alt](image.ext)` but has no
@@ -290,9 +418,9 @@ mod tests {
     fn docx_roundtrips_text() {
         let doc = Document::from_text("Hello manuscript\n\nSecond paragraph");
         let bytes = craft_docx::write(&doc).expect("write docx");
-        let imported = to_markdown(Format::Docx, &bytes).expect("read docx");
-        assert!(imported.markdown.contains("Hello manuscript"));
-        assert!(imported.markdown.contains("Second paragraph"));
+        let imported = read(Format::Docx, &bytes).expect("read docx");
+        assert!(imported.sheets[0].markdown.contains("Hello manuscript"));
+        assert!(imported.sheets[0].markdown.contains("Second paragraph"));
         assert_eq!(imported.pictures_dropped, 0);
     }
 
@@ -301,8 +429,8 @@ mod tests {
         let doc = Document::from_text("Misnamed manuscript");
         let bytes = craft_docx::write(&doc).expect("write docx");
         assert_eq!(sniff("notes.bin", &bytes), Some(Format::Docx));
-        let imported = to_markdown(Format::Docx, &bytes).expect("read docx");
-        assert!(imported.markdown.contains("Misnamed manuscript"));
+        let imported = read(Format::Docx, &bytes).expect("read docx");
+        assert!(imported.sheets[0].markdown.contains("Misnamed manuscript"));
     }
 
     #[test]
@@ -310,28 +438,28 @@ mod tests {
         let html = b"<!doctype html><html><body><h1>Title</h1>\
             <p>Some <strong>bold</strong> and <em>italic</em> text.</p>\
             <ul><li>one</li><li>two</li></ul></body></html>";
-        let imported = to_markdown(Format::Html, html).expect("read html");
-        assert!(imported.markdown.contains("# Title"));
-        assert!(imported.markdown.contains("**bold**"));
-        assert!(imported.markdown.contains("*italic*"));
-        assert!(imported.markdown.contains("- one"));
-        assert!(imported.markdown.contains("- two"));
+        let imported = read(Format::Html, html).expect("read html");
+        assert!(imported.sheets[0].markdown.contains("# Title"));
+        assert!(imported.sheets[0].markdown.contains("**bold**"));
+        assert!(imported.sheets[0].markdown.contains("*italic*"));
+        assert!(imported.sheets[0].markdown.contains("- one"));
+        assert!(imported.sheets[0].markdown.contains("- two"));
     }
 
     #[test]
     fn rtf_roundtrips_text() {
         let doc = Document::from_text("Rtf manuscript");
         let rtf = craft_rtf::doc::export(&doc);
-        let imported = to_markdown(Format::Rtf, rtf.as_bytes()).expect("read rtf");
-        assert!(imported.markdown.contains("Rtf manuscript"));
+        let imported = read(Format::Rtf, rtf.as_bytes()).expect("read rtf");
+        assert!(imported.sheets[0].markdown.contains("Rtf manuscript"));
     }
 
     #[test]
     fn odt_roundtrips_text() {
         let doc = Document::from_text("Odt manuscript");
         let bytes = craft_odf::text::export(&doc).expect("write odt");
-        let imported = to_markdown(Format::Odt, &bytes).expect("read odt");
-        assert!(imported.markdown.contains("Odt manuscript"));
+        let imported = read(Format::Odt, &bytes).expect("read odt");
+        assert!(imported.sheets[0].markdown.contains("Odt manuscript"));
     }
 
     #[test]
@@ -361,9 +489,143 @@ mod tests {
             ..Default::default()
         };
         let bytes = craft_epub::write(&book).expect("write epub");
-        let imported = to_markdown(Format::Epub, &bytes).expect("read epub");
-        assert!(imported.markdown.contains("# One"));
-        assert!(imported.markdown.contains("Chapter text."));
+        let imported = read(Format::Epub, &bytes).expect("read epub");
+        assert_eq!(imported.sheets.len(), 1);
+        assert_eq!(imported.sheets[0].title, "One");
+        assert!(imported.sheets[0].markdown.contains("# One"));
+        assert!(imported.sheets[0].markdown.contains("Chapter text."));
+    }
+
+    #[test]
+    fn epub_is_one_sheet_per_chapter() {
+        let one = craft_epub::xhtml("en", "A Book", "", "", "<h1>One</h1>\n<p>First.</p>\n");
+        let two = craft_epub::xhtml("en", "A Book", "", "", "<p>Second, no heading.</p>\n");
+        let book = craft_epub::Book {
+            metadata: craft_epub::Metadata {
+                identifier: craft_epub::urn_uuid("A Book\n2"),
+                title: "A Book".into(),
+                language: "en".into(),
+                modified: "2026-11-26T00:00:00Z".into(),
+                ..Default::default()
+            },
+            resources: vec![
+                craft_epub::Resource::new(
+                    "c1",
+                    "ch1.xhtml",
+                    "application/xhtml+xml",
+                    one.into_bytes(),
+                ),
+                craft_epub::Resource::new(
+                    "c2",
+                    "ch2.xhtml",
+                    "application/xhtml+xml",
+                    two.into_bytes(),
+                ),
+            ],
+            spine: vec!["c1".into(), "c2".into()],
+            nav: craft_epub::Nav {
+                items: vec![
+                    craft_epub::NavItem {
+                        href: "ch1.xhtml".into(),
+                        label: "Chapter One".into(),
+                        level: 1,
+                    },
+                    craft_epub::NavItem {
+                        href: "ch2.xhtml".into(),
+                        label: "Chapter Two".into(),
+                        level: 1,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let bytes = craft_epub::write(&book).expect("write epub");
+        let imported = read(Format::Epub, &bytes).expect("read epub");
+        assert_eq!(imported.sheets.len(), 2);
+        // The chapter's own heading wins; a chapter without one takes the
+        // reading system's label.
+        assert_eq!(imported.sheets[0].title, "One");
+        assert!(imported.sheets[0].markdown.starts_with("# One"));
+        assert_eq!(imported.sheets[1].title, "Chapter Two");
+        assert!(imported.sheets[1].markdown.starts_with("# Chapter Two"));
+        assert!(imported.sheets[1].markdown.contains("Second, no heading."));
+    }
+
+    /// One EPUB whose whole content is the given XHTML files, in spine order.
+    fn epub_of(chapters: &[(&str, &str)]) -> Vec<u8> {
+        let resources = chapters
+            .iter()
+            .map(|(path, body)| {
+                craft_epub::Resource::new(
+                    *path,
+                    *path,
+                    "application/xhtml+xml",
+                    craft_epub::xhtml("en", "Book", "", "", body).into_bytes(),
+                )
+            })
+            .collect();
+        let book = craft_epub::Book {
+            metadata: craft_epub::Metadata {
+                identifier: craft_epub::urn_uuid("Book\n3"),
+                title: "Book".into(),
+                language: "en".into(),
+                modified: "2026-11-26T00:00:00Z".into(),
+                ..Default::default()
+            },
+            resources,
+            spine: chapters.iter().map(|(path, _)| path.to_string()).collect(),
+            ..Default::default()
+        };
+        craft_epub::write(&book).expect("write epub")
+    }
+
+    #[test]
+    fn a_whole_book_in_one_document_splits_at_its_chapters() {
+        let bytes = epub_of(&[(
+            "all.xhtml",
+            "<h1>One</h1><p>First.</p><h1>Two</h1><p>Second.</p>",
+        )]);
+        let imported = read(Format::Epub, &bytes).expect("read epub");
+        assert_eq!(imported.sheets.len(), 2);
+        assert_eq!(imported.sheets[0].title, "One");
+        assert!(imported.sheets[0].markdown.starts_with("# One"));
+        assert_eq!(imported.sheets[1].title, "Two");
+        assert!(imported.sheets[1].markdown.starts_with("# Two"));
+    }
+
+    #[test]
+    fn a_chapter_with_subsections_stays_one_sheet() {
+        let bytes = epub_of(&[(
+            "ch1.xhtml",
+            "<h1>The Long Chapter</h1><h2>First part</h2><p>A.</p>\
+             <h2>Second part</h2><p>B.</p>",
+        )]);
+        let imported = read(Format::Epub, &bytes).expect("read epub");
+        assert_eq!(imported.sheets.len(), 1);
+        assert_eq!(imported.sheets[0].title, "The Long Chapter");
+    }
+
+    #[test]
+    fn an_anthology_splits_at_its_story_headings() {
+        let bytes = epub_of(&[(
+            "all.xhtml",
+            "<h2>A Section</h2><h3>190</h3><p>One.</p>\
+             <h3>191</h3><p>Two.</p>",
+        )]);
+        let imported = read(Format::Epub, &bytes).expect("read epub");
+        assert_eq!(imported.sheets.len(), 2);
+        assert_eq!(imported.sheets[0].title, "190");
+        assert_eq!(imported.sheets[1].title, "191");
+    }
+
+    #[test]
+    fn structural_pages_are_not_chapters() {
+        assert!(is_structural_part("OEBPS/nav.xhtml"));
+        assert!(is_structural_part("EPUB/toc.xhtml"));
+        assert!(is_structural_part("cover.xhtml"));
+        assert!(!is_structural_part("OEBPS/chapter1.xhtml"));
+        assert!(!is_structural_part("OEBPS/text/part-1.xhtml"));
     }
 
     #[test]
@@ -388,8 +650,8 @@ mod tests {
 
     #[test]
     fn plain_text_passes_through_untouched() {
-        let imported = to_markdown(Format::Text, b"# Not Markdown? It is.").expect("text");
-        assert_eq!(imported.markdown, "# Not Markdown? It is.");
+        let imported = read(Format::Text, b"# Not Markdown? It is.").expect("text");
+        assert_eq!(imported.sheets[0].markdown, "# Not Markdown? It is.");
         assert_eq!(imported.pictures_dropped, 0);
     }
 
@@ -401,7 +663,7 @@ mod tests {
 
     #[test]
     fn broken_manuscript_is_an_error_not_a_panic() {
-        let err = to_markdown(Format::Docx, b"not a zip").unwrap_err();
+        let err = read(Format::Docx, b"not a zip").unwrap_err();
         assert!(!err.is_empty());
     }
 
@@ -417,13 +679,20 @@ mod tests {
         };
         let bytes = std::fs::read(&path).expect("read fixture");
         let format = sniff(&path, &bytes).expect("recognised format");
-        let imported = to_markdown(format, &bytes).expect("import fixture");
+        let imported = read(format, &bytes).expect("import fixture");
         println!(
-            "{}: {} chars, {} pictures dropped\n{}",
+            "{}: {} sheets, {} pictures dropped",
             format.label(),
-            imported.markdown.chars().count(),
-            imported.pictures_dropped,
-            imported.markdown
+            imported.sheets.len(),
+            imported.pictures_dropped
         );
+        for (n, sheet) in imported.sheets.iter().enumerate() {
+            println!(
+                "--- sheet {} ({}) ---\n{}",
+                n + 1,
+                sheet.title,
+                sheet.markdown
+            );
+        }
     }
 }

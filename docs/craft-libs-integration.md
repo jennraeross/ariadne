@@ -48,17 +48,31 @@ archives are accepted.
 `craft_markdown::export` turns that into the Markdown a sheet holds. No layout
 or theme mapping is involved, which is what keeps this cheap.
 
-**Known limits of the first cut**
+**EPUB structure**
+
+- One sheet per chapter in the book's reading order, collected in a group
+  named after the file.
+- Spine items marked `nav` or `cover-image` in the manifest, and files named
+  `nav`/`toc`/`cover`, are package furniture and are skipped. This is also
+  where the "slash symbols all over" report came from: the earlier build
+  imported the navigation document, which is nothing but
+  `(chapter.xhtml#…)` links.
+- A spine item that holds the *whole* book (common: one `section` for the
+  lot) is split at its own headings: `h1` when there are two or more; with no
+  `h1`, `h2` (two or more), else `h3`. One `h1` followed by `h2`s is a single
+  chapter with subsections and stays whole.
+
+**Known limits**
 
 - Pictures are not imported: `craft-markdown` writes `![alt](image.png)` with
   no bytes, so the importer replaces those placeholders with `*[Image: alt]*`
   and reports the count.
 - Equations are exported as nothing by `craft-markdown` (no LaTeX path yet).
-- An EPUB becomes one sheet; chapters are joined in spine order and keep their
-  own headings.
+- A heading level used for both chapters and section breaks can split too
+  finely; the importer has no author intent to go on.
 
 **Follow-ups:** import pictures as attachments (walk `Document::media`, place
-them in order), equations to `$…$`, one sheet per EPUB spine item.
+them in order), equations to `$…$`, honour `epub:type` when present.
 
 **Acceptance**
 
@@ -66,6 +80,7 @@ them in order), equations to `$…$`, one sheet per EPUB spine item.
 - [x] Format recognised by extension and by bytes (a misnamed `.docx` works)
 - [x] Failures set the status line; nothing panics on a malformed file
 - [x] Unit tests round-trip each format through its own writer
+- [x] EPUB becomes one sheet per chapter, in a group named after the book
 - [x] LibreOffice-authored `.docx` and `.odt` import with headings, emphasis,
       links, inline code, nested lists, ordered lists, quotes and tables
       (`cargo test import::tests::external_fixture -- --ignored`, with
@@ -174,3 +189,6 @@ resetting, and settings survive upgrades through migrations.
 
 - 2026-11-26: plan written; item 1 import wired for docx/doc/odt/rtf/html/epub
   (drop + `Import manuscript…`), 11 unit tests, +45 crates in `Cargo.lock`.
+- 2026-11-26: EPUB import splits chapters (spine items and, for whole-book
+  files, top-level headings), in a group named after the file; navigation and
+  cover pages skipped. Library footer button added for the manual path.

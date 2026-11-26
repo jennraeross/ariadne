@@ -14267,21 +14267,16 @@ blockquote {
         self.save_library();
     }
 
-    /// Turn a dropped Markdown/plain-text file into a new sheet in the
-    /// current group/section, selecting it so the text is immediately visible.
-    fn import_text_sheet(&mut self, filename: &str, text: String) {
-        let stem = std::path::Path::new(filename)
-            .file_stem()
-            .map(|n| n.to_string_lossy().to_string())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| "Imported".to_string());
+    /// The section an import lands in: the selected group's, else the
+    /// selected sheet's, else Documents.
+    fn import_section(&self) -> Section {
         let group = match self.selection {
             SidebarSelection::Group(g) => Some(g),
             SidebarSelection::Sheet(s) => self.sheets.get(s).and_then(|s| s.group),
             _ => None,
         }
         .filter(|g| *g < self.groups.len());
-        let section = group
+        group
             .and_then(|g| self.groups.get(g))
             .map(|g| g.section)
             .unwrap_or_else(|| {
@@ -14289,13 +14284,19 @@ blockquote {
                     .get(self.selected_sheet)
                     .map(|s| s.section)
                     .unwrap_or(Section::Documents)
-            });
-        let content = if text.trim().is_empty() {
-            format!("# {stem}\n\n")
-        } else {
-            text
-        };
-        let now = SystemTime::now();
+            })
+    }
+
+    /// Append one imported sheet and return its index. Selection is left to
+    /// the caller: a single import selects the sheet, a book selects the
+    /// group.
+    fn push_imported_sheet(
+        &mut self,
+        section: Section,
+        group: Option<usize>,
+        content: String,
+        now: SystemTime,
+    ) -> usize {
         let id = new_sheet_id();
         self.created_dates.insert(id.clone(), now);
         self.sheets.push(Sheet {
@@ -14314,6 +14315,30 @@ blockquote {
         if let Some(g) = group.and_then(|g| self.groups.get_mut(g)) {
             g.expanded = true;
         }
+        idx
+    }
+
+    /// Turn a dropped Markdown/plain-text file into a new sheet in the
+    /// current group/section, selecting it so the text is immediately visible.
+    fn import_text_sheet(&mut self, filename: &str, text: String) {
+        let stem = std::path::Path::new(filename)
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Imported".to_string());
+        let group = match self.selection {
+            SidebarSelection::Group(g) => Some(g),
+            SidebarSelection::Sheet(s) => self.sheets.get(s).and_then(|s| s.group),
+            _ => None,
+        }
+        .filter(|g| *g < self.groups.len());
+        let section = self.import_section();
+        let content = if text.trim().is_empty() {
+            format!("# {stem}\n\n")
+        } else {
+            text
+        };
+        let idx = self.push_imported_sheet(section, group, content, SystemTime::now());
         self.selected_sheet = idx;
         self.selected_sheets = vec![idx];
         self.selection = SidebarSelection::Sheet(idx);
@@ -14322,39 +14347,85 @@ blockquote {
         self.status = format!("Imported {stem}");
     }
 
-    /// Read one dropped or picked manuscript into a new sheet. Returns
-    /// false when the file could not be read, with the reason on the
-    /// status line. Pictures and equations are reported as left out until
-    /// the importer carries them (see `docs/craft-libs-integration.md`).
+    /// Read one dropped or picked manuscript into the library. A single
+    /// document becomes one sheet in the current group; an EPUB becomes a
+    /// group named after the book with one sheet per chapter. Returns false
+    /// when the file could not be read, with the reason on the status line.
+    /// Pictures and equations are reported as left out until the importer
+    /// carries them (see `docs/craft-libs-integration.md`).
     fn import_manuscript(&mut self, filename: &str, bytes: &[u8], format: import::Format) -> bool {
-        match import::to_markdown(format, bytes) {
-            Ok(imported) => {
-                let stem = std::path::Path::new(filename)
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| "Imported".to_string());
-                self.import_text_sheet(filename, imported.markdown);
-                let mut status = format!("Imported {stem} ({})", format.label());
-                if imported.pictures_dropped > 0 {
-                    status.push_str(&format!(
-                        "; {} image{} not imported yet",
-                        imported.pictures_dropped,
-                        if imported.pictures_dropped == 1 {
-                            ""
-                        } else {
-                            "s"
-                        }
-                    ));
-                }
-                self.status = status;
-                true
-            }
+        let imported = match import::read(format, bytes) {
+            Ok(imported) => imported,
             Err(e) => {
                 self.status = format!("Could not import {filename}: {e}");
-                false
+                return false;
             }
+        };
+        let stem = std::path::Path::new(filename)
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Imported".to_string());
+        let mut status = {
+            let mut status = format!("Imported {stem} ({})", format.label());
+            if imported.pictures_dropped > 0 {
+                status.push_str(&format!(
+                    "; {} image{} not imported yet",
+                    imported.pictures_dropped,
+                    if imported.pictures_dropped == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            status
+        };
+        if imported.sheets.len() > 1 {
+            let chapters = imported.sheets.len();
+            let section = self.import_section();
+            let now = SystemTime::now();
+            self.groups.push(Group {
+                id: new_group_id(),
+                modified: now,
+                name: stem.clone(),
+                section,
+                expanded: true,
+                parent: None,
+            });
+            let group = self.groups.len() - 1;
+            let first = self.sheets.len();
+            for sheet in imported.sheets {
+                self.push_imported_sheet(section, Some(group), sheet.markdown, now);
+            }
+            self.selection = SidebarSelection::Group(group);
+            self.selected_sheet = first;
+            self.selected_sheets = vec![first];
+            self.ensure_visible_selection();
+            self.reset_word_baseline();
+            status = format!("Imported {chapters} chapters from {stem}");
+            if imported.pictures_dropped > 0 {
+                status.push_str(&format!(
+                    "; {} image{} not imported yet",
+                    imported.pictures_dropped,
+                    if imported.pictures_dropped == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+        } else {
+            let markdown = imported
+                .sheets
+                .into_iter()
+                .next()
+                .map(|sheet| sheet.markdown)
+                .unwrap_or_default();
+            self.import_text_sheet(filename, markdown);
         }
+        self.status = status;
+        true
     }
 
     /// Pick a manuscript file and import it as a sheet. The browser build
@@ -38421,6 +38492,71 @@ mod tests {
         assert!(app.settings_open);
         assert!(app.settings_tab == SettingsTab::Updates);
         assert!(matches!(app.update_state.status, UpdateStatus::Idle));
+    }
+
+    #[test]
+    fn epub_import_becomes_one_sheet_per_chapter() {
+        let _storage = isolate_storage();
+        let mut app = sample_app();
+        let before = app.sheets.len();
+        let before_groups = app.groups.len();
+        let one = craft_epub::xhtml("en", "Book", "", "", "<h1>One</h1>\n<p>First.</p>\n");
+        let two = craft_epub::xhtml("en", "Book", "", "", "<h1>Two</h1>\n<p>Second.</p>\n");
+        let book = craft_epub::Book {
+            metadata: craft_epub::Metadata {
+                identifier: craft_epub::urn_uuid("Book\n1"),
+                title: "Book".into(),
+                language: "en".into(),
+                modified: "2026-11-26T00:00:00Z".into(),
+                ..Default::default()
+            },
+            resources: vec![
+                craft_epub::Resource::new(
+                    "c1",
+                    "ch1.xhtml",
+                    "application/xhtml+xml",
+                    one.into_bytes(),
+                ),
+                craft_epub::Resource::new(
+                    "c2",
+                    "ch2.xhtml",
+                    "application/xhtml+xml",
+                    two.into_bytes(),
+                ),
+            ],
+            spine: vec!["c1".into(), "c2".into()],
+            nav: craft_epub::Nav {
+                items: vec![
+                    craft_epub::NavItem {
+                        href: "ch1.xhtml".into(),
+                        label: "Chapter One".into(),
+                        level: 1,
+                    },
+                    craft_epub::NavItem {
+                        href: "ch2.xhtml".into(),
+                        label: "Chapter Two".into(),
+                        level: 1,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let bytes = craft_epub::write(&book).expect("write epub");
+
+        assert!(app.import_manuscript("my-book.epub", &bytes, crate::import::Format::Epub));
+
+        assert_eq!(app.sheets.len(), before + 2);
+        assert_eq!(app.groups.len(), before_groups + 1);
+        let group = app.groups.last().expect("book group");
+        assert_eq!(group.name, "my-book");
+        assert_eq!(app.sheets[before].group, Some(app.groups.len() - 1));
+        assert_eq!(app.sheets[before + 1].group, Some(app.groups.len() - 1));
+        assert!(app.sheets[before].content.starts_with("# One"));
+        assert!(app.sheets[before + 1].content.starts_with("# Two"));
+        assert_eq!(app.selection, SidebarSelection::Group(app.groups.len() - 1));
+        assert_eq!(app.selected_sheet, before);
+        assert!(app.status.contains("2 chapters"));
     }
 
     #[test]
