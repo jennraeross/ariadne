@@ -255,7 +255,7 @@ impl GroupSort {
 /// Presentation attached to a group: a Phosphor icon key, a hex color,
 /// and its sheet ordering. Stored by group UUID so reorders and merges
 /// keep it attached.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct GroupStyle {
     #[serde(default)]
     icon: Option<String>,
@@ -264,6 +264,28 @@ struct GroupStyle {
     color: Option<String>,
     #[serde(default)]
     sort: GroupSort,
+    /// When this presentation last changed, for newest-wins sync. Older
+    /// save files have no timestamp and read as the Unix epoch, so the
+    /// first real edit wins.
+    #[serde(default = "epoch_time")]
+    modified: SystemTime,
+}
+
+impl Default for GroupStyle {
+    fn default() -> Self {
+        Self {
+            icon: None,
+            color: None,
+            sort: GroupSort::default(),
+            modified: UNIX_EPOCH,
+        }
+    }
+}
+
+/// Serde default for absent timestamps: the Unix epoch, so any real edit
+/// compares as newer.
+fn epoch_time() -> SystemTime {
+    UNIX_EPOCH
 }
 
 /// Pickable group icons: stable key, glyph, and menu label.
@@ -1561,12 +1583,25 @@ struct AttachedImage {
 }
 
 /// Presentation for one library-wide keyword (by lowercased text).
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct KeywordStyle {
     #[serde(default)]
     color: Option<String>,
     #[serde(default)]
     favorite: bool,
+    /// When this style last changed, for newest-wins sync.
+    #[serde(default = "epoch_time")]
+    modified: SystemTime,
+}
+
+impl Default for KeywordStyle {
+    fn default() -> Self {
+        Self {
+            color: None,
+            favorite: false,
+            modified: UNIX_EPOCH,
+        }
+    }
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
@@ -5658,7 +5693,9 @@ blockquote {
     /// Change a group's icon. `None` restores the default folder.
     fn set_group_icon(&mut self, gi: usize, icon: Option<String>) {
         if let Some(id) = self.groups.get(gi).map(|g| g.id.clone()) {
-            self.group_styles.entry(id).or_default().icon = icon;
+            let style = self.group_styles.entry(id).or_default();
+            style.icon = icon;
+            style.modified = SystemTime::now();
             self.save_library();
         }
     }
@@ -5666,7 +5703,9 @@ blockquote {
     /// Tint a group's row. `None` restores the theme text color.
     fn set_group_color(&mut self, gi: usize, color: Option<String>) {
         if let Some(id) = self.groups.get(gi).map(|g| g.id.clone()) {
-            self.group_styles.entry(id).or_default().color = color;
+            let style = self.group_styles.entry(id).or_default();
+            style.color = color;
+            style.modified = SystemTime::now();
             self.save_library();
         }
     }
@@ -5674,7 +5713,9 @@ blockquote {
     /// Set how sheets inside this group are ordered.
     fn set_group_sort(&mut self, gi: usize, sort: GroupSort) {
         if let Some(id) = self.groups.get(gi).map(|g| g.id.clone()) {
-            self.group_styles.entry(id).or_default().sort = sort;
+            let style = self.group_styles.entry(id).or_default();
+            style.sort = sort;
+            style.modified = SystemTime::now();
             self.status = format!(
                 "{}: sorted by {}",
                 self.groups
@@ -8843,9 +8884,19 @@ blockquote {
             if tombstoned(&s.id) {
                 continue;
             }
+            // Incoming sheets carry file-local group indices; resolve the
+            // group by UUID so Documents/iCloud splits compare correctly.
+            let incoming_group = s
+                .group
+                .and_then(|p| inc.groups.get(p))
+                .and_then(|ig| group_idx(&ig.id));
             if let Some(&ci) = sindex.get(&s.id) {
                 let same_content =
                     cur_sheets[ci].content == s.content && cur_sheets[ci].trashed == s.trashed;
+                let same_meta = cur_sheets[ci].favorite == s.favorite
+                    && cur_sheets[ci].material == s.material
+                    && cur_sheets[ci].keywords == s.keywords
+                    && cur_sheets[ci].group == incoming_group;
                 if !same_content {
                     let incoming_newer = s.modified > cur_sheets[ci].modified;
                     let (winner, loser) = if incoming_newer {
@@ -8853,8 +8904,19 @@ blockquote {
                     } else {
                         (cur_sheets[ci].clone(), s.clone())
                     };
+                    let winner_group = if incoming_newer {
+                        incoming_group
+                    } else {
+                        cur_sheets[ci].group
+                    };
+                    // The newer version wins wholesale, including tags,
+                    // material/favorite flags and the group link.
                     cur_sheets[ci].content = winner.content.clone();
                     cur_sheets[ci].trashed = winner.trashed;
+                    cur_sheets[ci].favorite = winner.favorite;
+                    cur_sheets[ci].material = winner.material;
+                    cur_sheets[ci].keywords = winner.keywords.clone();
+                    cur_sheets[ci].group = winner_group;
                     cur_sheets[ci].modified = winner.modified;
                     rep.updated_in_place += 1;
                     // Preserve one conflict copy of the loser for review,
@@ -8880,14 +8942,20 @@ blockquote {
                         sindex.insert(cur_sheets[ni].id.clone(), ni);
                         rep.conflict_copies += 1;
                     }
+                } else if !same_meta && s.modified > cur_sheets[ci].modified {
+                    // Metadata-only changes (favorite, keywords, material,
+                    // group move) sync newest-wins without a conflict copy.
+                    cur_sheets[ci].favorite = s.favorite;
+                    cur_sheets[ci].material = s.material;
+                    cur_sheets[ci].keywords = s.keywords.clone();
+                    cur_sheets[ci].group = incoming_group;
+                    cur_sheets[ci].modified = s.modified;
+                    rep.updated_in_place += 1;
                 }
             } else {
                 // Adopt unknown sheets, remapping the group link by UUID
                 // (missing => ungrouped, preserving content either way).
-                let group = s
-                    .group
-                    .and_then(|p| inc.groups.get(p))
-                    .and_then(|ig| group_idx(&ig.id));
+                let group = incoming_group;
                 cur_sheets.push(Sheet {
                     id: s.id.clone(),
                     conflict_of: None,
@@ -9913,11 +9981,23 @@ blockquote {
         for (k, v) in &store.created_dates {
             created_dates.entry(k.clone()).or_insert(*v);
         }
+        // Presentation maps carry a timestamp now: newest wins, so icon,
+        // colour, sort and keyword edits converge across devices.
         for (k, v) in &store.group_styles {
-            group_styles.entry(k.clone()).or_insert_with(|| v.clone());
+            match group_styles.get(k) {
+                Some(local) if local.modified >= v.modified => {}
+                _ => {
+                    group_styles.insert(k.clone(), v.clone());
+                }
+            }
         }
         for (k, v) in &store.keyword_styles {
-            keyword_styles.entry(k.clone()).or_insert_with(|| v.clone());
+            match keyword_styles.get(k) {
+                Some(local) if local.modified >= v.modified => {}
+                _ => {
+                    keyword_styles.insert(k.clone(), v.clone());
+                }
+            }
         }
         for (k, v) in &store.daily_words {
             let entry = daily_words.entry(k.clone()).or_insert(0);
@@ -9974,51 +10054,12 @@ blockquote {
             dictionary_removes: store.dictionary_removes,
             dirty: false,
         };
-        // Remap the file-local cross-refs to merged space via UUIDs, so the
-        // merge below compares structure instead of positions.
-        Self::relink_file_refs(&mut pseudo, groups);
         let rep = Self::merge_store_content(groups, sheets, tombs, &pseudo);
         let changed = rep.changed()
             || groups.len() != before.0
             || sheets.len() != before.1
             || tombs.len() != before.2;
         changed
-    }
-
-    /// Rewrite a store file's group/sheet links from file-local indices to
-    /// merged-space indices by UUID (missing => ungrouped). Used before any
-    /// merge so both sides speak the same positions.
-    fn relink_file_refs(store: &mut SavedLibrary, groups: &[Group]) {
-        let gmap: std::collections::HashMap<&str, usize> = groups
-            .iter()
-            .enumerate()
-            .map(|(i, g)| (g.id.as_str(), i))
-            .collect();
-        let resolve = |uuid: &str| gmap.get(uuid).copied();
-        let parents: Vec<Option<String>> = store
-            .groups
-            .iter()
-            .map(|g| {
-                g.parent
-                    .and_then(|p| store.groups.get(p))
-                    .map(|pg| pg.id.clone())
-            })
-            .collect();
-        for (g, uuid) in store.groups.iter_mut().zip(parents) {
-            g.parent = uuid.as_deref().and_then(&resolve);
-        }
-        let owners: Vec<Option<String>> = store
-            .sheets
-            .iter()
-            .map(|s| {
-                s.group
-                    .and_then(|p| store.groups.get(p))
-                    .map(|pg| pg.id.clone())
-            })
-            .collect();
-        for (s, uuid) in store.sheets.iter_mut().zip(owners) {
-            s.group = uuid.as_deref().and_then(&resolve);
-        }
     }
 
     /// Stable global order: sheets listed in `order` keep that sequence;
@@ -10267,16 +10308,20 @@ blockquote {
                             saved.created_dates.entry(k.clone()).or_insert(*v);
                         }
                         for (k, v) in &istore.group_styles {
-                            saved
-                                .group_styles
-                                .entry(k.clone())
-                                .or_insert_with(|| v.clone());
+                            match saved.group_styles.get(k) {
+                                Some(local) if local.modified >= v.modified => {}
+                                _ => {
+                                    saved.group_styles.insert(k.clone(), v.clone());
+                                }
+                            }
                         }
                         for (k, v) in &istore.keyword_styles {
-                            saved
-                                .keyword_styles
-                                .entry(k.clone())
-                                .or_insert_with(|| v.clone());
+                            match saved.keyword_styles.get(k) {
+                                Some(local) if local.modified >= v.modified => {}
+                                _ => {
+                                    saved.keyword_styles.insert(k.clone(), v.clone());
+                                }
+                            }
                         }
                         for (k, v) in &istore.daily_words {
                             let entry = saved.daily_words.entry(k.clone()).or_insert(0);
@@ -10324,16 +10369,20 @@ blockquote {
                                 saved.created_dates.entry(k.clone()).or_insert(*v);
                             }
                             for (k, v) in &cstore.group_styles {
-                                saved
-                                    .group_styles
-                                    .entry(k.clone())
-                                    .or_insert_with(|| v.clone());
+                                match saved.group_styles.get(k) {
+                                    Some(local) if local.modified >= v.modified => {}
+                                    _ => {
+                                        saved.group_styles.insert(k.clone(), v.clone());
+                                    }
+                                }
                             }
                             for (k, v) in &cstore.keyword_styles {
-                                saved
-                                    .keyword_styles
-                                    .entry(k.clone())
-                                    .or_insert_with(|| v.clone());
+                                match saved.keyword_styles.get(k) {
+                                    Some(local) if local.modified >= v.modified => {}
+                                    _ => {
+                                        saved.keyword_styles.insert(k.clone(), v.clone());
+                                    }
+                                }
                             }
                             for (k, v) in &cstore.daily_words {
                                 let entry = saved.daily_words.entry(k.clone()).or_insert(0);
@@ -29107,7 +29156,8 @@ impl WritingApp {
         }
         let changed = self.replace_keyword_in_sheets(&from, Some(&to));
         // Keep the target's existing color/favorite when both exist.
-        if let Some(style) = self.keyword_styles.remove(&from) {
+        if let Some(mut style) = self.keyword_styles.remove(&from) {
+            style.modified = SystemTime::now();
             self.keyword_styles.entry(to.clone()).or_insert(style);
         }
         self.status = format!(
@@ -29148,7 +29198,9 @@ impl WritingApp {
 
     fn set_keyword_color(&mut self, keyword: &str, color: Option<String>) {
         let keyword = keyword.trim().to_lowercase();
-        self.keyword_styles.entry(keyword).or_default().color = color;
+        let style = self.keyword_styles.entry(keyword).or_default();
+        style.color = color;
+        style.modified = SystemTime::now();
         self.save_library();
     }
 
@@ -29156,6 +29208,7 @@ impl WritingApp {
         let keyword = keyword.trim().to_lowercase();
         let entry = self.keyword_styles.entry(keyword).or_default();
         entry.favorite = !entry.favorite;
+        entry.modified = SystemTime::now();
         self.save_library();
     }
 
