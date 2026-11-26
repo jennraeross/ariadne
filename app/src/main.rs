@@ -2480,6 +2480,9 @@ enum PaletteCommand {
     SettingsTab(SettingsTab),
     ToggleTheme,
     CheckUpdates,
+    RecoverLibrary,
+    ImportArchive,
+    CleanAttachments,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -14085,65 +14088,167 @@ blockquote {
         if dropped.is_empty() {
             return;
         }
-        // No editable target (empty library): nothing to attach to.
-        if self.sheets.is_empty() {
-            self.status = "Nothing to attach to: add a sheet first".to_string();
-            return;
-        }
-        let mut inserted = 0;
-        let mut skipped = 0;
+        let mut images = 0usize;
+        let mut text_sheets = 0usize;
+        let mut archives = 0usize;
+        let mut skipped = 0usize;
+        let mut last_archive_status: Option<String> = None;
         for file in &dropped {
-            if let Some(bytes) = &file.bytes {
+            let (name, bytes) = if let Some(bytes) = &file.bytes {
                 let name = if file.name.is_empty() {
                     "image".to_string()
                 } else {
                     file.name.clone()
                 };
-                // Strip a file extension for the alt text.
-                let name = std::path::Path::new(&name)
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or(name);
-                if self.attach_one_image(ctx, bytes, &name) {
-                    inserted += 1;
-                } else {
-                    skipped += 1;
+                (name, bytes.to_vec())
+            } else if let Some(path) = &file.path {
+                match std::fs::read(path) {
+                    Ok(bytes) => (
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "image".to_string()),
+                        bytes,
+                    ),
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
                 }
-                continue;
-            }
-            let Some(path) = &file.path else {
+            } else {
                 skipped += 1;
                 continue;
             };
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
+            let ext = std::path::Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "zip" {
+                match self.import_project_archive_bytes(&bytes) {
+                    Ok(message) => {
+                        archives += 1;
+                        last_archive_status = Some(message);
+                    }
+                    Err(e) => {
+                        self.status = format!("Archive import failed: {e}");
+                        skipped += 1;
+                    }
                 }
-            };
-            let name = path
+                continue;
+            }
+            if matches!(ext.as_str(), "md" | "markdown" | "txt") {
+                self.import_text_sheet(&name, String::from_utf8_lossy(&bytes).into_owned());
+                text_sheets += 1;
+                continue;
+            }
+            // Everything else is tried as an image attachment. That needs
+            // an existing sheet to insert the reference into.
+            if self.sheets.is_empty() {
+                self.status = "Add a sheet before attaching images".to_string();
+                skipped += 1;
+                continue;
+            }
+            let stem = std::path::Path::new(&name)
                 .file_stem()
                 .map(|n| n.to_string_lossy().to_string())
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| "image".to_string());
-            if self.attach_one_image(ctx, &bytes, &name) {
-                inserted += 1;
+            if self.attach_one_image(ctx, &bytes, &stem) {
+                images += 1;
             } else {
                 skipped += 1;
             }
         }
-        if inserted > 0 {
-            self.status = if inserted == 1 {
-                "Attached 1 image".to_string()
-            } else {
-                format!("Attached {inserted} images")
-            };
-            self.save_library();
-        } else if skipped > 0 {
-            self.status = "Skipped: only PNG, JPEG, and GIF images can be attached".to_string();
+        let mut parts: Vec<String> = Vec::new();
+        if images > 0 {
+            parts.push(format!(
+                "attached {images} {}",
+                if images == 1 { "image" } else { "images" }
+            ));
         }
+        if text_sheets > 0 {
+            parts.push(format!(
+                "imported {text_sheets} {}",
+                if text_sheets == 1 { "sheet" } else { "sheets" }
+            ));
+        }
+        if archives > 0 {
+            parts.push(format!(
+                "imported {archives} archive{}",
+                if archives == 1 { "" } else { "s" }
+            ));
+        }
+        if parts.is_empty() {
+            if skipped > 0 {
+                self.status =
+                    "Skipped: drop images, Markdown/plain text, or a project archive".to_string();
+            }
+            return;
+        }
+        if let (1, true) = (archives, images == 0 && text_sheets == 0 && skipped == 0) {
+            if let Some(message) = last_archive_status {
+                self.status = message;
+                self.save_library();
+                return;
+            }
+        }
+        self.status = format!("Dropped: {}", parts.join(", "));
+        self.save_library();
+    }
+
+    /// Turn a dropped Markdown/plain-text file into a new sheet in the
+    /// current group/section, selecting it so the text is immediately visible.
+    fn import_text_sheet(&mut self, filename: &str, text: String) {
+        let stem = std::path::Path::new(filename)
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Imported".to_string());
+        let group = match self.selection {
+            SidebarSelection::Group(g) => Some(g),
+            SidebarSelection::Sheet(s) => self.sheets.get(s).and_then(|s| s.group),
+            _ => None,
+        }
+        .filter(|g| *g < self.groups.len());
+        let section = group
+            .and_then(|g| self.groups.get(g))
+            .map(|g| g.section)
+            .unwrap_or_else(|| {
+                self.sheets
+                    .get(self.selected_sheet)
+                    .map(|s| s.section)
+                    .unwrap_or(Section::Documents)
+            });
+        let content = if text.trim().is_empty() {
+            format!("# {stem}\n\n")
+        } else {
+            text
+        };
+        let now = SystemTime::now();
+        let id = new_sheet_id();
+        self.created_dates.insert(id.clone(), now);
+        self.sheets.push(Sheet {
+            id,
+            conflict_of: None,
+            section,
+            content,
+            group,
+            trashed: false,
+            modified: now,
+            material: false,
+            favorite: false,
+            keywords: Vec::new(),
+        });
+        let idx = self.sheets.len() - 1;
+        if let Some(g) = group.and_then(|g| self.groups.get_mut(g)) {
+            g.expanded = true;
+        }
+        self.selected_sheet = idx;
+        self.selected_sheets = vec![idx];
+        self.selection = SidebarSelection::Sheet(idx);
+        self.ensure_visible_selection();
+        self.reset_word_baseline();
+        self.status = format!("Imported {stem}");
     }
 
     /// Encode raw RGBA pixels as PNG bytes for `attach_one_image`. None
@@ -19044,6 +19149,246 @@ blockquote {
         }
     }
 
+    /// Remove attachments no sheet references anymore. Manual cleanup:
+    /// deleting image files automatically could lose one the user is about
+    /// to re-reference.
+    fn remove_unused_attachments(&mut self) -> usize {
+        let referenced: std::collections::HashSet<String> =
+            Self::referenced_attachments(&self.sheets)
+                .into_iter()
+                .collect();
+        let unused: Vec<AttachedImage> = self
+            .attached_images
+            .iter()
+            .filter(|a| !referenced.contains(&a.id))
+            .cloned()
+            .collect();
+        if unused.is_empty() {
+            self.status = "No unused images to remove".to_string();
+            return 0;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for att in &unused {
+                crate::web::images_remove(&att.id);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(dir) = Self::assets_dir() {
+                for att in &unused {
+                    let _ = std::fs::remove_file(dir.join(format!("{}.{}", att.id, att.ext)));
+                }
+            }
+        }
+        self.attached_images.retain(|a| referenced.contains(&a.id));
+        self.clear_image_caches();
+        self.status = format!(
+            "Removed {} unused {}",
+            unused.len(),
+            if unused.len() == 1 { "image" } else { "images" }
+        );
+        self.save_library();
+        unused.len()
+    }
+
+    /// Validate an archive entry name under `attachments/` and return its
+    /// attachment id + extension. Anything with a path separator, `..`, or
+    /// non-image characters is ignored, so an archive can never write
+    /// outside the assets folder.
+    fn archive_attachment_name(name: &str) -> Option<(String, String)> {
+        let rest = name.strip_prefix("attachments/")?;
+        if rest.contains('/') || rest.contains('\\') || rest.contains("..") {
+            return None;
+        }
+        let (id, ext) = rest.rsplit_once('.')?;
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return None;
+        }
+        let ext = ext.to_ascii_lowercase();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif") {
+            return None;
+        }
+        Some((id.to_string(), ext))
+    }
+
+    /// Store one attachment restored from a project archive. Native builds
+    /// write the assets file; the browser build fills its image slot.
+    fn store_imported_attachment(&self, id: &str, ext: &str, bytes: &[u8]) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web::images_insert(
+                id.to_string(),
+                id.to_string(),
+                ext.to_string(),
+                bytes.to_vec(),
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(dir) = Self::assets_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = Self::atomic_write(&dir.join(format!("{id}.{ext}")), bytes);
+            }
+        }
+    }
+
+    /// Merge a project archive (`.zip`) into the current library. Restores
+    /// sheets, groups, settings, history and attachments. Tombstones stored
+    /// in the archive are ignored so importing a backup never deletes newer
+    /// work.
+    fn import_project_archive_bytes(&mut self, bytes: &[u8]) -> Result<String, String> {
+        let entries = crate::archive::read_entries(bytes)?;
+        let library = entries
+            .iter()
+            .find(|(name, _)| name == "library.json")
+            .map(|(_, data)| data.clone())
+            .ok_or_else(|| "Not an Ariadne project archive: library.json is missing".to_string())?;
+        // Ignore archive tombstones: they describe deletions from the
+        // archive's own history, not a reason to delete current sheets.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&library).map_err(|e| format!("Bad archive library: {e}"))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "tombstones".to_string(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
+        let library =
+            serde_json::to_vec(&value).map_err(|e| format!("Could not read archive: {e}"))?;
+
+        // Register attachment metadata before sheets start resolving images.
+        let mut attachment_count = 0usize;
+        for (name, _) in &entries {
+            if let Some((id, ext)) = Self::archive_attachment_name(name) {
+                if !self.attached_images.iter().any(|a| a.id == id) {
+                    self.attached_images.push(AttachedImage {
+                        id: id.clone(),
+                        name: id.clone(),
+                        ext,
+                    });
+                }
+                attachment_count += 1;
+            }
+        }
+
+        let before = self.sheets.len();
+        let changed = Self::merge_store_bytes(
+            &mut self.groups,
+            &mut self.sheets,
+            &mut self.tombstones,
+            &mut self.grammar.dict_adds,
+            &mut self.grammar.dict_removes,
+            &mut self.created_dates,
+            &mut self.group_styles,
+            &mut self.keyword_styles,
+            &mut self.daily_words,
+            &library,
+            &mut self.sync_hashes,
+            "archive-import",
+        );
+        // An import must be repeatable (e.g. restoring after deleting a
+        // sheet), so never let the hash gate skip the next identical file.
+        self.sync_hashes.remove("archive-import");
+
+        for (name, data) in &entries {
+            if let Some((id, ext)) = Self::archive_attachment_name(name) {
+                self.store_imported_attachment(&id, &ext, data);
+            }
+        }
+
+        // Snapshots are keyed by sheet UUID in the archive.
+        if let Some(history) = entries
+            .iter()
+            .find(|(name, _)| name == "history.json")
+            .map(|(_, data)| data)
+        {
+            if let Ok(map) =
+                serde_json::from_slice::<std::collections::HashMap<String, Vec<Snapshot>>>(history)
+            {
+                let mut history_changed = false;
+                for (uuid, mut snaps) in map {
+                    let Some(idx) = self.sheets.iter().position(|s| s.id == uuid) else {
+                        continue;
+                    };
+                    snaps.truncate(Self::MAX_SNAPSHOTS);
+                    let list = self.history.entry(idx).or_default();
+                    let before_len = list.len();
+                    list.extend(snaps);
+                    list.sort_by_key(|s| s.at);
+                    list.dedup_by(|a, b| a.content == b.content && a.at == b.at);
+                    while list.len() > Self::MAX_SNAPSHOTS {
+                        list.remove(0);
+                    }
+                    if list.len() != before_len {
+                        history_changed = true;
+                    }
+                }
+                if history_changed {
+                    self.save_history();
+                }
+            }
+        }
+
+        let added = self.sheets.len().saturating_sub(before);
+        self.ensure_visible_selection();
+        self.reset_word_baseline();
+        self.save_library();
+        let message = if changed || added > 0 {
+            format!(
+                "Imported project archive: {added} new {}, {attachment_count} {}",
+                if added == 1 { "sheet" } else { "sheets" },
+                if attachment_count == 1 {
+                    "attachment"
+                } else {
+                    "attachments"
+                }
+            )
+        } else {
+            "Archive had no new content".to_string()
+        };
+        self.status = message.clone();
+        Ok(message)
+    }
+
+    /// Pick a project archive and merge it into the current library.
+    fn import_project_archive(&mut self) {
+        #[cfg(feature = "dialogs")]
+        {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Ariadne project archive", &["zip"])
+                .pick_file()
+            else {
+                self.status = "Import cancelled".to_string();
+                return;
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if let Err(e) = self.import_project_archive_bytes(&bytes) {
+                        self.status = format!("Archive import failed: {e}");
+                    }
+                }
+                Err(e) => self.status = format!("Could not read the archive: {e}"),
+            }
+        }
+        #[cfg(not(feature = "dialogs"))]
+        {
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.status =
+                    "Drag a project archive (.zip) into the window to import it".to_string();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.status = "Importing an archive needs the dialogs feature".to_string();
+            }
+        }
+    }
+
     /// Write finished export bytes to disk via a save dialog (or straight to
     /// Downloads without the dialogs feature), reporting into the status bar.
     fn write_export_file(
@@ -20748,7 +21093,8 @@ blockquote {
         PaletteCommand,
     )> {
         use egui::Modifiers as M;
-        vec![
+        #[allow(unused_mut)]
+        let mut cmds = vec![
             (
                 "New sheet",
                 Some((M::COMMAND, egui::Key::N)),
@@ -20845,7 +21191,26 @@ blockquote {
                 Some((M::COMMAND, egui::Key::Slash)),
                 PaletteCommand::Style,
             ),
-        ]
+            (
+                "Import project archive…",
+                None,
+                PaletteCommand::ImportArchive,
+            ),
+            (
+                "Clean up unused images",
+                None,
+                PaletteCommand::CleanAttachments,
+            ),
+        ];
+        #[cfg(target_arch = "wasm32")]
+        if crate::web::load_text(crate::web::LIBRARY_BACKUP_KEY).is_some() {
+            cmds.push((
+                "Download recovered library…",
+                None,
+                PaletteCommand::RecoverLibrary,
+            ));
+        }
+        cmds
     }
 
     /// Run a palette command (same effects as the headerbar buttons).
@@ -20914,6 +21279,41 @@ blockquote {
                 self.settings_tab = SettingsTab::Updates;
                 self.settings_open = true;
                 self.update_check_now();
+            }
+            PaletteCommand::ImportArchive => {
+                self.search_open = false;
+                self.search_query.clear();
+                self.import_project_archive();
+            }
+            PaletteCommand::CleanAttachments => {
+                self.search_open = false;
+                self.search_query.clear();
+                self.remove_unused_attachments();
+            }
+            PaletteCommand::RecoverLibrary => {
+                // The raw slot failed to parse at startup; offer it as a
+                // download instead of silently keeping samples.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    if let Some(text) = crate::web::load_text(crate::web::LIBRARY_BACKUP_KEY) {
+                        let ok = crate::web::download(
+                            "ariadne-recovered-library.json",
+                            text.as_bytes(),
+                            "application/json",
+                        );
+                        self.status = if ok {
+                            "Downloaded the recovered library".to_string()
+                        } else {
+                            "Could not download the recovery file".to_string()
+                        };
+                    } else {
+                        self.status = "No recovered library found".to_string();
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.status = "Recovery copies are a browser-build feature".to_string();
+                }
             }
             PaletteCommand::ToggleTheme => {
                 // Cycle through built-in themes in menu order; a built-in
@@ -23795,6 +24195,7 @@ blockquote {
         let mut do_save = false;
         let mut do_share = false;
         let mut do_archive = false;
+        let mut do_import_archive = false;
         let mut close = false;
         let targets = self.export_targets();
         let count = targets.len();
@@ -24224,6 +24625,24 @@ blockquote {
                             );
                         });
                     });
+                    ui.add_space(6.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(format!(
+                                    "{}  Import project archive…",
+                                    icon::FILE_ZIP
+                                ))
+                                .size(10.5)
+                                .color(self.theme.text_faint()),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Merge a .zip backup into this library")
+                        .clicked()
+                    {
+                        do_import_archive = true;
+                    }
             });
         if close {
             self.show_export_popover = false;
@@ -24291,7 +24710,10 @@ blockquote {
             self.save_library();
         }
         let fmt = self.export_format;
-        if do_archive {
+        if do_import_archive {
+            self.show_export_popover = false;
+            self.import_project_archive();
+        } else if do_archive {
             self.save_project_archive();
             self.show_export_popover = false;
         } else if do_preview {
@@ -31608,7 +32030,7 @@ impl eframe::App for WritingApp {
                     ui.painter().text(
                         screen.center(),
                         egui::Align2::CENTER_CENTER,
-                        "Drop to attach images",
+                        "Drop images, Markdown, or a project archive",
                         FontId::proportional(18.0),
                         theme.text_bright(),
                     );
