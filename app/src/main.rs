@@ -5521,7 +5521,9 @@ blockquote {
         }
         self.status = format!("Opened {}", Self::inferred_title(&self.sheets[idx].content));
         self.ensure_visible_selection();
-        self.save_library();
+        // Navigation is high-frequency (arrow-key browsing): let the
+        // selection persist on the same debounce as typing.
+        self.schedule_save();
     }
 
     /// Ulysses-style physical keyboard navigation across the three panes.
@@ -7320,7 +7322,7 @@ blockquote {
         let opened = Self::inferred_title(&self.sheets[idx].content);
         self.status = format!("Opened {opened}");
         self.ensure_visible_selection();
-        self.save_library();
+        self.schedule_save();
     }
 
     fn navigate_back(&mut self) {
@@ -8025,7 +8027,7 @@ blockquote {
     /// comment and are rewritten/pruned on every save — the JSON store
     /// stays the source of truth, the folder is for transparency (Finder,
     /// Spotlight, other editors for reading).
-    fn sync_section_mirror(&self, store_dir: &std::path::Path, section: Section) {
+    fn sync_section_mirror(&mut self, store_dir: &std::path::Path, section: Section) {
         // Resolve each iCloud group's folder path, guarding against parent
         // cycles by capping the walk at the group count.
         let group_dir = |groups: &[Group],
@@ -8119,14 +8121,42 @@ blockquote {
                 "<!-- Managed by Ariadne — edits here are overwritten on the next save. -->\n\n{}",
                 s.content
             );
-            let same = std::fs::read_to_string(&path)
-                .map(|old| old == text)
-                .unwrap_or(false);
-            if !same {
-                let _ = Self::atomic_write(&path, text.as_bytes());
+            let hash = Self::hash_bytes(text.as_bytes());
+            // Unchanged saves only stat the file; reading every mirror file
+            // (and every attachment) on each keystroke was the bulk of the
+            // save cost. A changed mtime/size still triggers the content
+            // comparison, and an outside edit is overwritten as before.
+            let meta = std::fs::metadata(&path).ok();
+            let cached = self.mirror_files.get(&path);
+            let unchanged = match (cached, &meta) {
+                (Some(state), Some(meta)) => {
+                    state.hash == hash
+                        && state.len == meta.len()
+                        && state.mtime == meta.modified().ok()
+                }
+                _ => false,
+            };
+            if !unchanged {
+                let same = std::fs::read_to_string(&path)
+                    .map(|old| old == text)
+                    .unwrap_or(false);
+                if !same {
+                    let _ = Self::atomic_write(&path, text.as_bytes());
+                }
+                let meta = std::fs::metadata(&path).ok();
+                self.mirror_files.insert(
+                    path.clone(),
+                    MirrorFileState {
+                        mtime: meta.as_ref().and_then(|m| m.modified().ok()),
+                        len: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                        hash,
+                    },
+                );
             }
             written.push(path);
         }
+        self.mirror_files
+            .retain(|path, _| written.iter().any(|p| p == path));
         // Prune stale mirror files (*.md we did not write this pass).
         Self::prune_mirror(store_dir, &written);
         // Sync referenced attachments alongside the mirror.
@@ -8136,7 +8166,7 @@ blockquote {
     /// Copy images referenced by the section's sheets into the store's
     /// `attachments/` folder, and prune ones no sheet references anymore.
     /// Keeps synced sheets renderable on devices without the local assets.
-    fn sync_section_attachments(&self, store_dir: &std::path::Path, section: Section) {
+    fn sync_section_attachments(&mut self, store_dir: &std::path::Path, section: Section) {
         let dir = store_dir.join("attachments");
         let section_sheets: Vec<&Sheet> = self
             .sheets
@@ -8156,9 +8186,23 @@ blockquote {
         for (id, ext) in &wanted {
             let dest = dir.join(format!("{id}.{ext}"));
             keep.push(dest.to_string_lossy().to_string());
-            let src_bytes = local_dir
-                .as_ref()
-                .and_then(|d| std::fs::read(d.join(format!("{id}.{ext}"))).ok());
+            let src = local_dir.as_ref().map(|d| d.join(format!("{id}.{ext}")));
+            let src_meta = src.as_ref().and_then(|p| std::fs::metadata(p).ok());
+            let dst_meta = std::fs::metadata(&dest).ok();
+            let cached = self.mirror_assets.get(&dest);
+            let unchanged = match (cached, &src_meta, &dst_meta) {
+                (Some(state), Some(src), Some(dst)) => {
+                    state.src_len == src.len()
+                        && state.src_mtime == src.modified().ok()
+                        && state.dst_len == dst.len()
+                        && state.dst_mtime == dst.modified().ok()
+                }
+                _ => false,
+            };
+            if unchanged {
+                continue;
+            }
+            let src_bytes = src.as_ref().and_then(|p| std::fs::read(p).ok());
             let same = src_bytes
                 .as_ref()
                 .map(|b| std::fs::read(&dest).map(|old| old == *b).unwrap_or(false));
@@ -8168,12 +8212,24 @@ blockquote {
                     let _ = Self::atomic_write(&dest, &b);
                 }
             }
+            let src_meta = src.as_ref().and_then(|p| std::fs::metadata(p).ok());
+            let dst_meta = std::fs::metadata(&dest).ok();
+            self.mirror_assets.insert(
+                dest,
+                MirrorAssetState {
+                    src_mtime: src_meta.as_ref().and_then(|m| m.modified().ok()),
+                    src_len: src_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                    dst_mtime: dst_meta.as_ref().and_then(|m| m.modified().ok()),
+                    dst_len: dst_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                },
+            );
         }
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_file() && !keep.iter().any(|k| PathBuf::from(k) == p) {
                     let _ = std::fs::remove_file(&p);
+                    self.mirror_assets.remove(&p);
                 }
             }
         }
@@ -8198,7 +8254,14 @@ blockquote {
                 } else if p.extension().and_then(|e| e.to_str()) == Some("md")
                     && !written.contains(&p)
                 {
-                    let _ = std::fs::remove_file(&p);
+                    // Only remove files Ariadne wrote. A user's own notes
+                    // dropped into the synced folder must survive pruning.
+                    let managed = std::fs::read_to_string(&p)
+                        .map(|text| text.starts_with("<!-- Managed by Ariadne"))
+                        .unwrap_or(false);
+                    if managed {
+                        let _ = std::fs::remove_file(&p);
+                    }
                 }
             }
             if dir != root
@@ -9330,13 +9393,90 @@ blockquote {
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
         };
-        if let Ok(text) = serde_json::to_string(&local_saved) {
-            if !crate::web::store_text(crate::web::LIBRARY_KEY, &text)
-                && crate::web::note_quota_once()
-            {
-                self.status =
-                    "Browser storage is full: changes are kept for this session only".to_string();
+        match serde_json::to_string(&local_saved) {
+            Ok(text) => {
+                if crate::web::store_text(crate::web::LIBRARY_KEY, &text) {
+                    self.note_save_success();
+                } else {
+                    self.note_save_failure(
+                        "Browser storage is full or unavailable; changes are kept for this session only",
+                    );
+                    if crate::web::note_quota_once() {
+                        self.status =
+                            "Browser storage is full: changes are kept for this session only"
+                                .to_string();
+                    }
+                }
             }
+            Err(e) => self.note_save_failure(format!("Could not encode the library: {e}")),
+        }
+    }
+
+    /// Record a failed local write: the status bar turns red and a bounded
+    /// retry is scheduled. Data stays in memory, so nothing is lost yet.
+    fn note_save_failure(&mut self, reason: impl Into<String>) {
+        self.save_error = Some(reason.into());
+        self.save_retry_at = Some(Instant::now() + Duration::from_secs(5));
+    }
+
+    /// Clear the failure state after a successful local write.
+    fn note_save_success(&mut self) {
+        self.save_error = None;
+        self.save_retry_at = None;
+    }
+
+    /// Quiet period after the last edit before the deferred save runs.
+    const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+    /// Delay between automatic retries of a failed local save.
+    const SAVE_RETRY: Duration = Duration::from_secs(5);
+
+    /// Defer a save until typing/navigation settles. Discrete actions that
+    /// must be durable immediately still call [`Self::save_library`].
+    fn schedule_save(&mut self) {
+        self.save_pending = true;
+        self.save_due = Some(Instant::now() + Self::SAVE_DEBOUNCE);
+    }
+
+    /// Flush the deferred save when due. Returns the wait until it is due.
+    fn poll_pending_save(&mut self) -> Option<Duration> {
+        if !self.save_pending {
+            return None;
+        }
+        let now = Instant::now();
+        match self.save_due {
+            Some(due) if now < due => Some(due - now),
+            _ => {
+                self.save_library();
+                None
+            }
+        }
+    }
+
+    /// Retry a failed local save. Returns the wait until the next attempt.
+    fn poll_save_retry(&mut self) -> Option<Duration> {
+        if self.save_error.is_none() {
+            self.save_retry_at = None;
+            return None;
+        }
+        let now = Instant::now();
+        match self.save_retry_at {
+            Some(at) if now < at => Some(at - now),
+            _ => {
+                self.save_retry_at = None;
+                self.save_library();
+                None
+            }
+        }
+    }
+
+    /// Drive deferred saves and retries from the frame loop. Requests a
+    /// repaint at the deadline so a save still happens after typing stops.
+    fn poll_saves(&mut self, ctx: &egui::Context) {
+        if let Some(wait) = self.poll_pending_save() {
+            ctx.request_repaint_after(wait);
+        }
+        if let Some(wait) = self.poll_save_retry() {
+            ctx.request_repaint_after(wait);
         }
     }
 
@@ -9352,6 +9492,9 @@ blockquote {
     /// clobber remote edits.
     #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     fn save_library(&mut self) {
+        // Any explicit save supersedes a pending autosave.
+        self.save_pending = false;
+        self.save_due = None;
         // Browser build: single localStorage slot, no store split or merge.
         #[cfg(target_arch = "wasm32")]
         {
@@ -9359,20 +9502,41 @@ blockquote {
             return;
         }
         let Some(local_path) = Self::library_path() else {
+            self.note_save_failure("No writable app-data folder is available");
             return;
         };
         let Some(local_dir) = local_path.parent().map(|p| p.to_path_buf()) else {
+            self.note_save_failure("The library path has no parent folder");
             return;
         };
-        if std::fs::create_dir_all(&local_dir).is_err() {
+        if let Err(e) = std::fs::create_dir_all(&local_dir) {
+            self.note_save_failure(format!("Could not create {}: {e}", local_dir.display()));
             return;
         }
         let anchor = self.icloud_dir.clone();
         let icloud_path = Self::icloud_library_path(anchor.as_deref());
 
         // Merge any external changes into memory first, so what follows is
-        // a merged save rather than a blind overwrite.
+        // a merged save rather than a blind overwrite. The local store is
+        // included so a second app instance (or an external edit) cannot be
+        // clobbered by this one.
         let mut synced_note = false;
+        if Self::merge_store_file(
+            &mut self.groups,
+            &mut self.sheets,
+            &mut self.tombstones,
+            &mut self.grammar.dict_adds,
+            &mut self.grammar.dict_removes,
+            &mut self.created_dates,
+            &mut self.group_styles,
+            &mut self.keyword_styles,
+            &mut self.daily_words,
+            &local_path,
+            &mut self.sync_hashes,
+            "local",
+        ) {
+            synced_note = true;
+        }
         if let Some(ref ipath) = icloud_path {
             if Self::merge_store_file(
                 &mut self.groups,
@@ -9394,6 +9558,7 @@ blockquote {
         if synced_note {
             self.status = "Synced changes from another device".to_string();
             self.ensure_visible_selection();
+            self.reset_word_baseline();
         }
 
         // Partition memory into per-store parts with file-local indices.
@@ -9470,11 +9635,23 @@ blockquote {
             dictionary_removes: self.grammar.dict_removes.iter().cloned().collect(),
             dirty: false,
         };
-        if let Ok(text) = serde_json::to_string_pretty(&local_saved) {
-            if Self::atomic_write(&local_path, text.as_bytes()) {
-                self.sync_hashes
-                    .insert("local".to_string(), Self::hash_bytes(text.as_bytes()));
+        let local_bytes = match serde_json::to_vec_pretty(&local_saved) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.note_save_failure(format!("Could not encode the library: {e}"));
+                return;
             }
+        };
+        if Self::atomic_write(&local_path, &local_bytes) {
+            self.sync_hashes
+                .insert("local".to_string(), Self::hash_bytes(&local_bytes));
+            self.note_save_success();
+        } else {
+            self.note_save_failure(format!(
+                "Could not write {} (disk full, read-only, or permission denied)",
+                local_path.display()
+            ));
+            return;
         }
 
         // The iCloud store holds only the iCloud section (globals ride in
@@ -9536,6 +9713,13 @@ blockquote {
                     if Self::atomic_write(&ipath, text.as_bytes()) {
                         self.sync_hashes
                             .insert("icloud".to_string(), Self::hash_bytes(text.as_bytes()));
+                    } else {
+                        // The local file already holds everything, so this is
+                        // a sync warning rather than a "not saved" state.
+                        self.status = format!(
+                            "Saved locally; could not write the iCloud copy at {}",
+                            ipath.display()
+                        );
                     }
                 }
                 // Mirror the synced section as folders + Markdown, plus the
@@ -11813,7 +11997,9 @@ blockquote {
             self.open_table_editor(ui.ctx());
         }
         if edited {
-            self.save_library();
+            // Typing is the hot path: coalesce keystrokes instead of
+            // rewriting the whole library on every frame.
+            self.schedule_save();
         }
         if paste_pressed && self.paste_clipboard_image(ui.ctx()) {
             let mods = ui.input(|i| i.modifiers);
@@ -28985,6 +29171,11 @@ impl WritingApp {
 
 impl eframe::App for WritingApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A pending debounce or an earlier failure must not cost the last
+        // edits: try once more before the process goes away.
+        if self.save_pending || self.save_error.is_some() {
+            self.save_library();
+        }
         self.flush_window_state();
     }
 
@@ -29070,6 +29261,7 @@ impl eframe::App for WritingApp {
         self.last_viewport_size = ctx.screen_rect().size();
         self.track_window_state(ctx);
         self.handle_screenshot(ctx);
+        self.poll_saves(ctx);
         self.handle_dropped_files(ctx);
         self.maybe_background_sync(ctx);
         self.maybe_track_daily_words(ctx);
@@ -33245,7 +33437,7 @@ mod tests {
     #[test]
     fn sync_mirror_builds_tree_with_ungrouped_and_dedup() {
         let _storage = isolate_storage();
-        let app = mirror_app();
+        let mut app = mirror_app();
         let root = mirror_root();
         app.sync_section_mirror(&root, Section::ICloud);
         // Nested group folder, ungrouped folder, no Documents leakage.
