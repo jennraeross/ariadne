@@ -12100,8 +12100,17 @@ blockquote {
         }
         if let Some(url) = pending_url {
             if !self.follow_internal_link(ui.ctx(), sel, &url) {
-                ui.ctx().open_url(egui::OpenUrl::same_tab(url.clone()));
-                self.status = format!("Opened link {url}");
+                // Only web/mail links are handed to the OS; `file:`,
+                // `javascript:` and custom URI schemes are refused.
+                let safe = url::Url::parse(&url)
+                    .map(|u| matches!(u.scheme(), "http" | "https" | "mailto"))
+                    .unwrap_or(false);
+                if safe {
+                    ui.ctx().open_url(egui::OpenUrl::same_tab(url.clone()));
+                    self.status = format!("Opened link {url}");
+                } else {
+                    self.status = "Only web links can be opened".to_string();
+                }
             }
         }
         if let Some(action) = pending_grammar {
@@ -19295,8 +19304,11 @@ blockquote {
         }
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", &path.to_string_lossy()])
+            // Explorer opens the path with its default app without going
+            // through cmd.exe, so characters like `&` in a title can never
+            // be parsed as another command.
+            std::process::Command::new("explorer.exe")
+                .arg(path)
                 .spawn()
                 .map(|_| ())
         }

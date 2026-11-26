@@ -690,18 +690,21 @@ pub fn staging_dir() -> Option<std::path::PathBuf> {
         .map(|dirs| dirs.data_dir().join("gdrive"))
 }
 
-/// Open a URL in the default browser (used for the OAuth sign-in page).
-/// Native only; the browser build opens links through egui instead.
+/// Open a web URL in the default browser (used for the OAuth sign-in page
+/// and update downloads). Native only; the browser build opens links
+/// through egui instead.
+///
+/// Only `http`/`https`/`mailto` are accepted. `webbrowser` uses
+/// `ShellExecute` on Windows, so URLs containing `&` can never be parsed by
+/// `cmd.exe` as an extra command.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", url])
-        .spawn();
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let safe = url::Url::parse(url)
+        .map(|u| matches!(u.scheme(), "http" | "https" | "mailto"))
+        .unwrap_or(false);
+    if safe {
+        let _ = webbrowser::open(url);
+    }
 }
 
 /// Browser-build no-op: nothing opens URLs from the sync layer on web
@@ -739,6 +742,16 @@ fn wait_for_code(
         }
         match server.recv_timeout(deadline - now) {
             Ok(Some(request)) => {
+                // Browsers often request /favicon.ico before (or instead
+                // of) the redirect; ignore anything but the callback path
+                // and keep waiting instead of failing the sign-in.
+                let path = request.url().split('?').next().unwrap_or("");
+                if path != "/callback" {
+                    let _ = request.respond(
+                        tiny_http::Response::from_string("Not found").with_status_code(404),
+                    );
+                    continue;
+                }
                 let full = format!("http://localhost{}", request.url());
                 let parsed = url::Url::parse(&full).map_err(|e| format!("Bad redirect: {e}"))?;
                 let mut code = None;
