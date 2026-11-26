@@ -4328,6 +4328,12 @@ impl WritingApp {
         } else {
             // First run: persist the starter library right away.
             app.save_library();
+            #[cfg(target_arch = "wasm32")]
+            if crate::web::load_text(crate::web::LIBRARY_BACKUP_KEY).is_some() {
+                app.status = "Could not read the saved library; a recovery copy is available \
+                             from the command palette"
+                    .to_string();
+            }
         }
         // Baseline content hashes so the next save can tell external edits
         // (another device) apart from our own writes.
@@ -10087,8 +10093,19 @@ blockquote {
         if text.is_empty() {
             return None;
         }
-        let saved: SavedLibrary = serde_json::from_str(&text).ok()?;
+        // A corrupt slot must never be silently replaced by samples: the
+        // first-run save would overwrite the only copy. Keep the raw text
+        // under a recovery key so the user can still download it.
+        let parsed: Option<SavedLibrary> = match serde_json::from_str(&text) {
+            Ok(saved) => Some(saved),
+            Err(_) => {
+                crate::web::store_text(crate::web::LIBRARY_BACKUP_KEY, &text);
+                None
+            }
+        };
+        let saved = parsed?;
         if saved.version != 1 {
+            crate::web::store_text(crate::web::LIBRARY_BACKUP_KEY, &text);
             return None;
         }
         if saved.groups.is_empty() && saved.sheets.is_empty() {

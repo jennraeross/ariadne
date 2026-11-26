@@ -19,6 +19,9 @@ use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 
 pub const LIBRARY_KEY: &str = "ariadne-library-v1";
+/// Copy of a library slot that failed to parse, kept so a bad write (or a
+/// full quota) cannot erase the only copy of the user's work.
+pub const LIBRARY_BACKUP_KEY: &str = "ariadne-library-recovery-v1";
 pub const IMAGES_KEY: &str = "ariadne-images-v1";
 pub const STYLES_KEY: &str = "ariadne-styles-v1";
 pub const THEMES_KEY: &str = "ariadne-themes-v1";
@@ -239,6 +242,15 @@ pub fn images_insert(id: String, name: String, ext: String, bytes: Vec<u8>) {
         cell.borrow_mut().insert(id, WebImage { name, ext, bytes });
     });
     images_persist();
+}
+
+/// Drop one image from the store (used by attachment cleanup).
+pub fn images_remove(id: &str) -> bool {
+    let removed = IMAGES.with(|cell| cell.borrow_mut().remove(id).is_some());
+    if removed {
+        images_persist();
+    }
+    removed
 }
 
 // ---------------------------------------------------------------------------
